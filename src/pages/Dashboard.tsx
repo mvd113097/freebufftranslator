@@ -24,10 +24,10 @@ import { DEFAULT_MODEL, translateChunkSimple } from "@/lib/translator/gemini-api
 
 const MODEL_OPTIONS = [
   { value: "openrouter/free", label: "Auto Free (best available)" },
+  { value: "minimax/minimax-m3:free", label: "MiniMax M3 (free, 1M ctx)" },
+  { value: "nvidia/nemotron-3-ultra-550b-a55b:free", label: "Nemotron 3 Ultra (free, 1M ctx)" },
   { value: "inclusionai/ling-3.0-flash-fin:free", label: "Ling 3.0 Flash (free, 262K ctx)" },
-  { value: "qwen/qwen3-235b-a22b:free", label: "Qwen3 235B (free, great Chinese)" },
-  { value: "google/gemini-2.5-flash", label: "Gemini 2.5 Flash (paid, cheapest)" },
-  { value: "google/gemini-3.6-flash", label: "Gemini 3.6 Flash (paid, best)" },
+  { value: "google/gemini-2.5-flash", label: "Gemini 2.5 Flash (paid)" },
 ];
 
 export default function Dashboard() {
