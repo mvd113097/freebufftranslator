@@ -39,7 +39,7 @@ const DEFAULT_OPTIONS: PipelineOptions = {
   chunkSize: 4000,
   concurrency: 5,
   maxRetries: 3,
-  model: "google/gemma-4-31b-it:free",
+  model: "openrouter/free",
 };
 
 export class TranslationPipeline {

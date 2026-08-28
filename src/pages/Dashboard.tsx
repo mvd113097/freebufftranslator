@@ -23,9 +23,9 @@ import { stitchAndExportEpub } from "@/components/translator/epub-export";
 import { DEFAULT_MODEL, translateChunkSimple } from "@/lib/translator/gemini-api";
 
 const MODEL_OPTIONS = [
-  { value: "google/gemma-4-31b-it:free", label: "Gemma 4 31B (free, Google)" },
-  { value: "nvidia/nemotron-3-ultra-550b-a55b:free", label: "Nemotron 3 Ultra (free, 550B)" },
-  { value: "nvidia/nemotron-3.5-lightning:free", label: "Nemotron 3.5 Lightning (free, fast)" },
+  { value: "openrouter/free", label: "Auto Free (best available)" },
+  { value: "inclusionai/ling-3.0-flash-fin:free", label: "Ling 3.0 Flash (free, 262K ctx)" },
+  { value: "qwen/qwen-2.5-72b-instruct:free", label: "Qwen 2.5 72B (free, great Chinese)" },
   { value: "google/gemini-2.5-flash", label: "Gemini 2.5 Flash (paid, cheapest)" },
   { value: "google/gemini-3.6-flash", label: "Gemini 3.6 Flash (paid, best)" },
 ];
