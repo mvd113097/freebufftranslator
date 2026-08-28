@@ -36,7 +36,7 @@ export interface PipelineOptions {
 
 const DEFAULT_OPTIONS: PipelineOptions = {
   chunkSize: 25000,
-  concurrency: 3,
+  concurrency: 1,
   maxRetries: 3,
 };
 
@@ -53,7 +53,7 @@ export class TranslationPipeline {
 
   constructor() {
     this.options = { ...DEFAULT_OPTIONS };
-    this.rateLimiter = new RateLimiter(1, 4500);
+    this.rateLimiter = new RateLimiter(1, 6000);
   }
 
   setProgressCallback(cb: ProgressCallback) {
@@ -100,10 +100,7 @@ export class TranslationPipeline {
 
     this.reportProgress();
 
-    // Process chunks with concurrency control
     const results: string[] = new Array(chunks.length).fill("");
-    const pendingChunks = [...chunks];
-    const activePromises: Promise<void>[] = [];
 
     const processChunk = async (chunk: TextChunk) => {
       const progress = this.chunkProgress[chunk.id];
@@ -111,16 +108,6 @@ export class TranslationPipeline {
       this.reportProgress();
 
       let attempt = 0;
-      console.log(`[Pipeline] Chunk ${chunk.id + 1} waiting for key...`);
-      let currentKey = await this.rateLimiter.waitForAvailableKey(this.keys);
-      console.log(`[Pipeline] Chunk ${chunk.id + 1} got key, sending request...`);
-
-      // Global delay: ensure at least 2s between any two API requests (IP-level rate limit)
-      const timeSinceLastRequest = Date.now() - this.lastRequestTime;
-      if (timeSinceLastRequest < 2000) {
-        await new Promise((r) => setTimeout(r, 2000 - timeSinceLastRequest));
-      }
-      this.lastRequestTime = Date.now();
 
       while (attempt <= this.options.maxRetries) {
         try {
@@ -129,6 +116,20 @@ export class TranslationPipeline {
             progress.error = "Aborted";
             return;
           }
+
+          // Wait for an available key (handles per-key rate limiting + stagger)
+          const currentKey = await this.rateLimiter.waitForAvailableKey(this.keys);
+
+          // Global delay: at least 3s between any two API requests (IP-level rate limit)
+          const timeSinceLastRequest = Date.now() - this.lastRequestTime;
+          if (timeSinceLastRequest < 3000) {
+            const waitMs = 3000 - timeSinceLastRequest;
+            console.log(`[Pipeline] Global delay: waiting ${waitMs}ms`);
+            await new Promise((r) => setTimeout(r, waitMs));
+          }
+          this.lastRequestTime = Date.now();
+
+          console.log(`[Pipeline] Chunk ${chunk.id + 1} sending request (attempt ${attempt + 1})...`);
 
           const translated = await translateChunk(
             chunk.text,
@@ -150,7 +151,7 @@ export class TranslationPipeline {
           return;
         } catch (err: unknown) {
           const message = err instanceof Error ? err.message : String(err);
-          console.error(`[Pipeline] Chunk ${chunk.id} attempt ${attempt} failed:`, message);
+          console.error(`[Pipeline] Chunk ${chunk.id + 1} attempt ${attempt + 1} failed:`, message);
 
           if (message === "Translation aborted") {
             progress.status = "failed";
@@ -162,16 +163,14 @@ export class TranslationPipeline {
             attempt++;
             progress.retries = attempt;
             progress.error = message;
-            // For rate limit errors, wait longer (30-60s) for the window to reset
+            // For rate limit errors, wait 60s for the window to fully reset
             const isRateLimit = message.includes("RATE_LIMITED") || message.includes("429");
             const backoffMs = isRateLimit
-              ? Math.min(30000 * Math.pow(2, attempt - 1), 60000)
-              : Math.min(2000 * Math.pow(2, attempt - 1), 30000);
+              ? 60000
+              : Math.min(5000 * Math.pow(2, attempt - 1), 30000);
+            console.log(`[Pipeline] Retrying in ${backoffMs / 1000}s...`);
             this.reportProgress();
             await new Promise((r) => setTimeout(r, backoffMs));
-
-            // Get a different key for the retry
-            currentKey = await this.rateLimiter.waitForAvailableKey(this.keys);
           } else {
             progress.status = "failed";
             progress.error = message;
@@ -182,34 +181,42 @@ export class TranslationPipeline {
       }
     };
 
-    // Process with concurrency limit
-    const runNext = async (): Promise<void> => {
-      if (pendingChunks.length === 0) return;
-      if (this.abortController?.signal.aborted) return;
+    // Process chunks — if concurrency=1, sequential; otherwise, N workers with stagger
+    if (this.options.concurrency <= 1) {
+      // Sequential: one chunk at a time
+      for (const chunk of chunks) {
+        if (this.abortController?.signal.aborted) break;
+        await processChunk(chunk);
+      }
+    } else {
+      // Concurrent: N workers pulling from queue
+      const pendingChunks = [...chunks];
+      const activePromises: Promise<void>[] = [];
 
-      const chunk = pendingChunks.shift()!;
-      await processChunk(chunk);
-      return runNext();
-    };
+      const runNext = async (): Promise<void> => {
+        if (pendingChunks.length === 0) return;
+        if (this.abortController?.signal.aborted) return;
+        const chunk = pendingChunks.shift()!;
+        await processChunk(chunk);
+        return runNext();
+      };
 
-    // Start N concurrent workers, staggered to avoid burst traffic
-    const workerCount = Math.min(this.options.concurrency, chunks.length);
-    for (let i = 0; i < workerCount; i++) {
-      // Stagger worker starts by 1.5s each to prevent burst
-      const delay = i * 1500;
-      activePromises.push(
-        new Promise<void>((resolve) => {
-          setTimeout(async () => {
-            await runNext();
-            resolve();
-          }, delay);
-        }),
-      );
+      const workerCount = Math.min(this.options.concurrency, chunks.length);
+      for (let i = 0; i < workerCount; i++) {
+        const delay = i * 3000; // 3s stagger between workers
+        activePromises.push(
+          new Promise<void>((resolve) => {
+            setTimeout(async () => {
+              await runNext();
+              resolve();
+            }, delay);
+          }),
+        );
+      }
+
+      await Promise.allSettled(activePromises);
     }
 
-    await Promise.allSettled(activePromises);
-
-    // Filter out empty results
     return results;
   }
 

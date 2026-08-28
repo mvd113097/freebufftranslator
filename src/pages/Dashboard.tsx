@@ -30,7 +30,7 @@ export default function Dashboard() {
   const [progress, setProgress] = useState<PipelineProgress | null>(null);
   const [chunkProgress, setChunkProgress] = useState<ChunkProgress[]>([]);
   const [chunkSize, setChunkSize] = useState(25000);
-  const [concurrency, setConcurrency] = useState(5);
+  const [concurrency, setConcurrency] = useState(1);
   const [finalResults, setFinalResults] = useState<string[]>([]);
 
   const pipelineRef = useRef<TranslationPipeline | null>(null);

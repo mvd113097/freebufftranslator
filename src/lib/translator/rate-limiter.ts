@@ -1,6 +1,6 @@
 /**
  * Token-bucket rate limiter tracking per-key rolling windows.
- * Gemini free tier: ~2 RPM per key with stagger between requests.
+ * Conservative: 1 request per key per minute, 6s stagger.
  */
 
 interface KeyBucket {
@@ -13,7 +13,7 @@ export class RateLimiter {
   private maxRPM: number;
   private staggerMs: number;
 
-  constructor(maxRPM = 2, staggerMs = 4500) {
+  constructor(maxRPM = 1, staggerMs = 6000) {
     this.maxRPM = maxRPM;
     this.staggerMs = staggerMs;
   }
@@ -60,13 +60,12 @@ export class RateLimiter {
           // Record usage
           bucket.timestamps.push(Date.now());
           bucket.lastUsed = Date.now();
-          console.log(`[RateLimiter] Key assigned: ${key.slice(0, 12)}... | Uses in last 60s: ${bucket.timestamps.length}/${this.maxRPM}`);
           return key;
         }
       }
 
       // All keys are rate-limited, wait and retry
-      await new Promise((resolve) => setTimeout(resolve, 2000));
+      await new Promise((resolve) => setTimeout(resolve, 5000));
     }
   }
 
