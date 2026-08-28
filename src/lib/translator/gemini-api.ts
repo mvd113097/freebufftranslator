@@ -110,7 +110,7 @@ function buildPayload(text: string) {
   return {
     system_instruction: { parts: [{ text: SYSTEM_INSTRUCTION }] },
     contents: [{ role: "user", parts: [{ text }] }],
-    generationConfig: { temperature: 0.7, topP: 0.95, maxOutputTokens: 8192 },
+    generationConfig: { temperature: 0.7, topP: 0.95, maxOutputTokens: 65536 },
   };
 }
 

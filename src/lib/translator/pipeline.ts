@@ -35,7 +35,7 @@ export interface PipelineOptions {
 }
 
 const DEFAULT_OPTIONS: PipelineOptions = {
-  chunkSize: 35000,
+  chunkSize: 50000,
   concurrency: 3,
   maxRetries: 3,
 };
@@ -52,7 +52,7 @@ export class TranslationPipeline {
 
   constructor() {
     this.options = { ...DEFAULT_OPTIONS };
-    this.rateLimiter = new RateLimiter(1, 4500);
+    this.rateLimiter = new RateLimiter(3, 2000);
   }
 
   setProgressCallback(cb: ProgressCallback) {
