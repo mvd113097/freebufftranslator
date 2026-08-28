@@ -1,43 +1,16 @@
 /**
  * Gemini API client for novel translation.
  *
- * Key type detection:
- *   - AQ. prefix → tries Vertex AI first, falls back to AI Studio
- *   - AIza prefix → AI Studio endpoint directly
- *
- * NOTE: Google's new AQ. auth keys have a known issue where many return
- * "ACCESS_TOKEN_TYPE_UNSUPPORTED" on both endpoints. This is a Google-side
- * bug tracked at discuss.ai.google.dev. If both endpoints fail, the user
- * should regenerate their key in Google AI Studio.
+ * AQ keys work from the browser using generativelanguage.googleapis.com.
+ * Tries x-goog-api-key header first, then falls back to ?key= query param.
  */
 
-const GEMINI_MODEL = "gemini-2.5-flash";
+const GEMINI_MODEL = "gemini-3.6-flash";
+const API_BASE = "https://generativelanguage.googleapis.com/v1beta";
 
 const SYSTEM_INSTRUCTION = `You are an expert human literary translator specializing in Chinese web novels (Xianxia, Wuxia, and Sci-Fi). Translate the following Chinese prose into highly fluent, immersive English fiction. Do not use stiff or literal machine-like phrasing. Translate cultivation tiers, localized idioms, and online slang into contextually accurate Western fantasy equivalents while maintaining rigid character name consistency.
 
 IMPORTANT: Output ONLY the translated English text. Do not include any explanations, notes, commentary, or metadata. Do not wrap your output in quotes or markdown. Just return the raw translated English prose.`;
-
-/** Build endpoint URLs based on key type */
-function getEndpoints(apiKey: string) {
-  const isAQ = apiKey.startsWith("AQ.");
-
-  // Vertex AI Express Mode endpoint
-  const vertexStream = `https://aiplatform.googleapis.com/v1/publishers/google/models/${GEMINI_MODEL}:streamGenerateContent?key=${apiKey}`;
-  const vertexNonStream = `https://aiplatform.googleapis.com/v1/publishers/google/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`;
-
-  // AI Studio endpoint
-  const studioStream = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:streamGenerateContent`;
-  const studioNonStream = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
-
-  return {
-    isAQ,
-    // For AQ keys: try Vertex first, then Studio
-    // For AIza keys: use Studio directly
-    streamUrls: isAQ ? [vertexStream, studioStream] : [studioStream],
-    nonStreamUrls: isAQ ? [vertexNonStream, studioNonStream] : [studioNonStream],
-    streamHeaders: isAQ ? [] : [{ "x-goog-api-key": apiKey }],
-  };
-}
 
 /**
  * Extract text from a Gemini response JSON object.
@@ -142,40 +115,56 @@ function buildPayload(text: string) {
 }
 
 /**
- * Try non-streaming on each endpoint until one works.
+ * Build request configs — tries header auth first, then query param auth.
+ */
+function getAuthConfigs(apiKey: string, action: "stream" | "nonstream") {
+  const method = action === "stream" ? "streamGenerateContent" : "generateContent";
+  const headerAuth: Record<string, string> = {
+    "Content-Type": "application/json",
+    "x-goog-api-key": apiKey,
+  };
+  const paramAuth: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+  return [
+    {
+      // Method 1: x-goog-api-key header
+      url: `${API_BASE}/models/${GEMINI_MODEL}:${method}`,
+      headers: headerAuth,
+    },
+    {
+      // Method 2: ?key= query param (fallback for some AQ key setups)
+      url: `${API_BASE}/models/${GEMINI_MODEL}:${method}?key=${apiKey}`,
+      headers: paramAuth,
+    },
+  ];
+}
+
+/**
+ * Try non-streaming translation with both auth methods.
  */
 async function tryNonStreaming(
   text: string,
   apiKey: string,
 ): Promise<string> {
-  const ep = getEndpoints(apiKey);
+  const configs = getAuthConfigs(apiKey, "nonstream");
+  const payload = JSON.stringify(buildPayload(text));
 
-  for (let i = 0; i < ep.nonStreamUrls.length; i++) {
-    const url = ep.nonStreamUrls[i];
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
-    // AI Studio endpoint needs x-goog-api-key header
-    if (i > 0 || !ep.isAQ) {
-      headers["x-goog-api-key"] = apiKey;
-    }
-
+  for (let i = 0; i < configs.length; i++) {
+    const { url, headers } = configs[i];
     try {
       const response = await fetch(url, {
         method: "POST",
         headers,
-        body: JSON.stringify(buildPayload(text)),
+        body: payload,
       });
 
       if (response.status === 429) throw new Error("RATE_LIMITED");
 
       if (!response.ok) {
         const body = await response.text().catch(() => "");
-        const code = body.includes("ACCESS_TOKEN_TYPE_UNSUPPORTED")
-          ? "AQ_KEY_BUG"
-          : `${response.status}`;
-        console.warn(
-          `[Translator] Endpoint ${i + 1} (${ep.isAQ && i === 0 ? "Vertex" : "Studio"}) failed: ${code}`,
-        );
-        continue; // Try next endpoint
+        console.warn(`[Translator] Non-stream auth method ${i + 1} failed: ${response.status}`);
+        continue;
       }
 
       const data = await response.json();
@@ -185,24 +174,16 @@ async function tryNonStreaming(
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (msg === "RATE_LIMITED") throw err;
-      console.warn(`[Translator] Endpoint ${i + 1} error:`, msg);
+      console.warn(`[Translator] Non-stream auth method ${i + 1} error:`, msg);
       continue;
     }
   }
 
-  // All endpoints failed
-  if (ep.isAQ) {
-    throw new Error(
-      "AQ_KEY_BUG: Your AQ. API key was rejected by both Google endpoints. " +
-        "This is a known Google bug — try regenerating your key in AI Studio, " +
-        "or use an older AIza-prefixed key if available.",
-    );
-  }
   throw new Error("All API endpoints failed. Check your API key and try again.");
 }
 
 /**
- * Translate a single chunk. Tries streaming on each endpoint, falls back to non-streaming.
+ * Translate a single chunk via streaming, with non-streaming fallback.
  */
 export async function translateChunk(
   text: string,
@@ -210,21 +191,17 @@ export async function translateChunk(
   onToken: (token: string) => void,
   abortSignal?: AbortSignal,
 ): Promise<string> {
-  const ep = getEndpoints(apiKey);
+  const configs = getAuthConfigs(apiKey, "stream");
+  const payload = JSON.stringify(buildPayload(text));
 
-  // Try each streaming endpoint
-  for (let i = 0; i < ep.streamUrls.length; i++) {
-    const url = ep.streamUrls[i];
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
-    if (i > 0 || !ep.isAQ) {
-      headers["x-goog-api-key"] = apiKey;
-    }
-
+  // Try streaming with both auth methods
+  for (let i = 0; i < configs.length; i++) {
+    const { url, headers } = configs[i];
     try {
       const response = await fetch(url, {
         method: "POST",
         headers,
-        body: JSON.stringify(buildPayload(text)),
+        body: payload,
         signal: abortSignal,
       });
 
@@ -232,8 +209,7 @@ export async function translateChunk(
 
       if (!response.ok) {
         const body = await response.text().catch(() => "");
-        const label = ep.isAQ && i === 0 ? "Vertex" : "Studio";
-        console.warn(`[Translator] Stream ${label} failed: ${response.status}`);
+        console.warn(`[Translator] Stream auth method ${i + 1} failed: ${response.status}`);
         continue;
       }
 
@@ -244,13 +220,13 @@ export async function translateChunk(
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (msg === "RATE_LIMITED" || msg === "Translation aborted") throw err;
-      console.warn(`[Translator] Stream error (endpoint ${i + 1}):`, msg);
+      console.warn(`[Translator] Stream auth method ${i + 1} error:`, msg);
       continue;
     }
   }
 
-  // All streaming endpoints failed — try non-streaming
-  console.log("[Translator] All streaming endpoints failed, trying non-streaming...");
+  // All streaming attempts failed — try non-streaming
+  console.log("[Translator] All streaming attempts failed, trying non-streaming...");
   const result = await tryNonStreaming(text, apiKey);
   const words = result.split(/(\s+)/);
   for (const word of words) {

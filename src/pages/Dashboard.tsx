@@ -8,7 +8,6 @@ import {
   BookOpen,
   RotateCcw,
   Zap,
-  AlertTriangle,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { FileUploader } from "@/components/translator/FileUploader";
@@ -226,40 +225,6 @@ export default function Dashboard() {
             />
           </motion.div>
         </div>
-
-        {/* AQ Key Warning Banner */}
-        {keys.length > 0 && keys.every((k) => k.startsWith("AQ.")) && (
-          <motion.div
-            initial={{ opacity: 0, y: 12 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="rounded-2xl border border-amber-200/60 bg-amber-50/40 backdrop-blur-xl p-5 shadow-sm"
-          >
-            <div className="flex items-start gap-3">
-              <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-amber-100 shrink-0">
-                <AlertTriangle className="h-4 w-4 text-amber-600" />
-              </div>
-              <div className="text-sm space-y-1.5">
-                <p className="font-semibold text-amber-800">
-                  AQ. API Keys — Known Google Bug
-                </p>
-                <p className="text-amber-700 text-xs leading-relaxed">
-                  Your keys start with <code className="bg-amber-100 px-1 rounded">AQ.</code> — Google's new auth key format. Many AQ keys return
-                  <code className="bg-amber-100 px-1 rounded"> ACCESS_TOKEN_TYPE_UNSUPPORTED</code> on the Gemini API.
-                  This is a <strong>Google-side bug</strong> affecting hundreds of developers (see
-                  <a href="https://discuss.ai.google.dev/t/aq-key-401-access-token-type-unsupported-fully-configured-key-still-rejected/172852" target="_blank" rel="noopener noreferrer" className="underline ml-1">forum thread</a>).
-                </p>
-                <p className="text-amber-700 text-xs font-medium">To fix this:</p>
-                <ol className="text-xs text-amber-700 space-y-1 ml-4 list-decimal">
-                  <li>Go to <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer" className="underline font-medium">Google AI Studio API Keys</a></li>
-                  <li>Delete all existing AQ. keys</li>
-                  <li>Create a <strong>new</strong> API key — it may generate a working AQ. key or an AIza key</li>
-                  <li>If you only get AQ. keys, try creating a <strong>new project</strong> in AI Studio first</li>
-                  <li>Click <strong>Test Key</strong> below to verify before translating</li>
-                </ol>
-              </div>
-            </div>
-          </motion.div>
-        )}
 
         {/* Action Buttons */}
         <motion.div

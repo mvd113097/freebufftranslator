@@ -82,21 +82,7 @@ export function KeyManager({ keys, onKeysChange }: KeyManagerProps) {
         </div>
       )}
 
-      {keys.length > 0 && keys.every((k) => k.startsWith("AQ.")) && (
-        <div className="flex items-start gap-2 rounded-lg bg-amber-50/60 backdrop-blur-sm border border-amber-200/50 px-3 py-2.5 text-xs text-amber-700">
-          <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
-          <div>
-            <p className="font-medium mb-1">⚠ AQ. key format detected</p>
-            <p>
-              AQ. keys are affected by a known Google bug — many return
-              ACCESS_TOKEN_TYPE_UNSUPPORTED. If translation fails, try
-              regenerating keys in
-              <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer" className="underline font-medium ml-1">Google AI Studio</a>
-              or use older AIza-prefixed keys if available.
-            </p>
-          </div>
-        </div>
-      )}
+
 
       {/* Key list */}
       {keys.length > 0 && (
