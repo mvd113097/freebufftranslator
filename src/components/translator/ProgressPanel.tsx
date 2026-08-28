@@ -101,6 +101,25 @@ export function ProgressPanel({
         </div>
       )}
 
+      {isComplete && failedCount > 0 && (
+        <div className="flex items-start gap-2 rounded-xl bg-red-50/50 backdrop-blur-md border border-red-200/50 px-3 py-2.5">
+          <AlertTriangle className="h-4 w-4 text-red-500 mt-0.5 shrink-0" />
+          <div className="text-xs text-red-700 space-y-1">
+            <p className="font-medium">{failedCount} chunk(s) failed</p>
+            {chunks.some((c) => c.error?.includes("AQ_KEY_BUG")) ? (
+              <p className="text-red-600">
+                Your AQ. API keys are rejected by Google. This is a known bug.
+                Try regenerating keys in AI Studio or using an older AIza-prefixed key.
+              </p>
+            ) : (
+              <p className="text-red-600">
+                {chunks.find((c) => c.error)?.error?.slice(0, 120) || "Unknown error"}
+              </p>
+            )}
+          </div>
+        </div>
+      )}
+
       {isComplete && failedCount === 0 && chunks.length > 0 && (
         <div className="flex items-center gap-2 rounded-xl bg-green-50/50 backdrop-blur-md border border-green-200/50 px-3 py-2.5">
           <CheckCircle2 className="h-4 w-4 text-green-500" />

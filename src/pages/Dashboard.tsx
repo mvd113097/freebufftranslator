@@ -7,6 +7,7 @@ import {
   Sparkles,
   BookOpen,
   RotateCcw,
+  Zap,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { FileUploader } from "@/components/translator/FileUploader";
@@ -233,19 +234,39 @@ export default function Dashboard() {
           className="flex items-center gap-3"
         >
           {!isRunning ? (
-            <button
-              onClick={startTranslation}
-              disabled={!canStart}
-              className={cn(
-                "flex items-center gap-2 rounded-xl px-6 py-2.5 text-sm font-semibold transition-all shadow-lg cursor-pointer",
-                canStart
-                  ? "bg-gradient-to-r from-blue-500 to-indigo-600 text-white shadow-blue-500/25 hover:shadow-blue-500/40 hover:scale-[1.02] active:scale-[0.98]"
-                  : "bg-gray-200/80 text-gray-400 cursor-not-allowed shadow-none",
+            <>
+              <button
+                onClick={startTranslation}
+                disabled={!canStart}
+                className={cn(
+                  "flex items-center gap-2 rounded-xl px-6 py-2.5 text-sm font-semibold transition-all shadow-lg cursor-pointer",
+                  canStart
+                    ? "bg-gradient-to-r from-blue-500 to-indigo-600 text-white shadow-blue-500/25 hover:shadow-blue-500/40 hover:scale-[1.02] active:scale-[0.98]"
+                    : "bg-gray-200/80 text-gray-400 cursor-not-allowed shadow-none",
+                )}
+              >
+                <Play className="h-4 w-4" />
+                Start Translation
+              </button>
+              {keys.length > 0 && (
+                <button
+                  onClick={async () => {
+                    try {
+                      const { translateChunkSimple } = await import("@/lib/translator/gemini-api");
+                      const result = await translateChunkSimple("你好世界 Hello World", keys[0]);
+                      alert(`✅ Key works! Response: ${result.slice(0, 100)}`);
+                    } catch (err) {
+                      const msg = err instanceof Error ? err.message : String(err);
+                      alert(`❌ Key test failed: ${msg.slice(0, 200)}`);
+                    }
+                  }}
+                  className="flex items-center gap-2 rounded-xl border border-gray-200/60 bg-white/50 backdrop-blur-md px-4 py-2.5 text-xs font-medium text-gray-600 hover:bg-gray-50/50 transition-all cursor-pointer"
+                >
+                  <Zap className="h-3.5 w-3.5" />
+                  Test Key
+                </button>
               )}
-            >
-              <Play className="h-4 w-4" />
-              Start Translation
-            </button>
+            </>
           ) : (
             <button
               onClick={stopTranslation}
