@@ -52,7 +52,7 @@ export class TranslationPipeline {
 
   constructor() {
     this.options = { ...DEFAULT_OPTIONS };
-    this.rateLimiter = new RateLimiter(2, 4500);
+    this.rateLimiter = new RateLimiter(1, 4500);
   }
 
   setProgressCallback(cb: ProgressCallback) {
@@ -150,7 +150,11 @@ export class TranslationPipeline {
             attempt++;
             progress.retries = attempt;
             progress.error = message;
-            const backoffMs = Math.min(2000 * Math.pow(2, attempt - 1), 30000);
+            // For rate limit errors, wait longer (30-60s) for the window to reset
+            const isRateLimit = message.includes("RATE_LIMITED") || message.includes("429");
+            const backoffMs = isRateLimit
+              ? Math.min(30000 * Math.pow(2, attempt - 1), 60000)
+              : Math.min(2000 * Math.pow(2, attempt - 1), 30000);
             this.reportProgress();
             await new Promise((r) => setTimeout(r, backoffMs));
 

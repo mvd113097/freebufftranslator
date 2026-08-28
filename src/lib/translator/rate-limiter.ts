@@ -13,7 +13,7 @@ export class RateLimiter {
   private maxRPM: number;
   private staggerMs: number;
 
-  constructor(maxRPM = 2, staggerMs = 4500) {
+  constructor(maxRPM = 1, staggerMs = 4500) {
     this.maxRPM = maxRPM;
     this.staggerMs = staggerMs;
   }
