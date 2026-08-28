@@ -47,12 +47,13 @@ export class TranslationPipeline {
   private options: PipelineOptions;
   private rateLimiter: RateLimiter;
   private startTime = 0;
+  private lastRequestTime = 0;
   private onProgress: ProgressCallback | null = null;
   private onToken: TokenCallback | null = null;
 
   constructor() {
     this.options = { ...DEFAULT_OPTIONS };
-    this.rateLimiter = new RateLimiter(2, 4500);
+    this.rateLimiter = new RateLimiter(1, 4500);
   }
 
   setProgressCallback(cb: ProgressCallback) {
@@ -84,6 +85,7 @@ export class TranslationPipeline {
     this.rateLimiter.reset();
     this.abortController = new AbortController();
     this.startTime = Date.now();
+    this.lastRequestTime = 0;
 
     // Chunk the text
     const chunks = chunkText(rawText, this.options.chunkSize);
@@ -109,7 +111,16 @@ export class TranslationPipeline {
       this.reportProgress();
 
       let attempt = 0;
+      console.log(`[Pipeline] Chunk ${chunk.id + 1} waiting for key...`);
       let currentKey = await this.rateLimiter.waitForAvailableKey(this.keys);
+      console.log(`[Pipeline] Chunk ${chunk.id + 1} got key, sending request...`);
+
+      // Global delay: ensure at least 2s between any two API requests (IP-level rate limit)
+      const timeSinceLastRequest = Date.now() - this.lastRequestTime;
+      if (timeSinceLastRequest < 2000) {
+        await new Promise((r) => setTimeout(r, 2000 - timeSinceLastRequest));
+      }
+      this.lastRequestTime = Date.now();
 
       while (attempt <= this.options.maxRetries) {
         try {
@@ -134,6 +145,7 @@ export class TranslationPipeline {
           results[chunk.id] = translated;
           progress.translatedText = translated;
           progress.status = "completed";
+          console.log(`[Pipeline] Chunk ${chunk.id + 1} completed (${translated.length} chars)`);
           this.reportProgress();
           return;
         } catch (err: unknown) {

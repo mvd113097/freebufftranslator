@@ -60,6 +60,7 @@ export class RateLimiter {
           // Record usage
           bucket.timestamps.push(Date.now());
           bucket.lastUsed = Date.now();
+          console.log(`[RateLimiter] Key assigned: ${key.slice(0, 12)}... | Uses in last 60s: ${bucket.timestamps.length}/${this.maxRPM}`);
           return key;
         }
       }
