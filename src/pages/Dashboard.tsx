@@ -4,7 +4,6 @@ import {
   Play,
   Square,
   Download,
-  DownloadCloud,
   Sparkles,
   BookOpen,
   RotateCcw,
@@ -335,10 +334,12 @@ export default function Dashboard() {
 
           {isRunning && (
             <button
+              type="button"
               onClick={handleDownloadProgress}
-              className="flex items-center gap-2 rounded-xl border border-amber-200/60 bg-amber-50/50 backdrop-blur-md px-4 py-2.5 text-sm font-medium text-amber-700 hover:bg-amber-100/50 transition-all cursor-pointer"
+              className="relative z-10 flex items-center gap-2 rounded-xl border border-amber-200/60 bg-amber-50/50 backdrop-blur-md px-4 py-2.5 text-sm font-medium text-amber-700 hover:bg-amber-100/50 active:bg-amber-200/60 transition-all"
+              style={{ WebkitTapHighlightColor: "transparent", touchAction: "manipulation" }}
             >
-              <DownloadCloud className="h-3.5 w-3.5" />
+              <Download className="h-4 w-4" />
               Download Progress
             </button>
           )}
