@@ -13,7 +13,6 @@ import { cn } from "@/lib/utils";
 import { FileUploader } from "@/components/translator/FileUploader";
 import { KeyManager } from "@/components/translator/KeyManager";
 import { ProgressPanel } from "@/components/translator/ProgressPanel";
-import { SplitView } from "@/components/translator/SplitView";
 import { SettingsPanel } from "@/components/translator/SettingsPanel";
 import {
   TranslationPipeline,
@@ -114,11 +113,6 @@ export default function Dashboard() {
     setRawText("");
     setFileName("");
   }, []);
-
-  const activeChunkId = useMemo(() => {
-    const active = chunkProgress.find((c) => c.status === "translating");
-    return active?.id ?? null;
-  }, [chunkProgress]);
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50/80 via-indigo-50/60 to-violet-50/40">
@@ -307,14 +301,7 @@ export default function Dashboard() {
           )}
         </motion.div>
 
-        {/* Split View */}
-        <motion.div
-          initial={{ opacity: 0, y: 12 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.3 }}
-        >
-          <SplitView chunks={chunkProgress} activeChunkId={activeChunkId} />
-        </motion.div>
+
       </main>
     </div>
   );
