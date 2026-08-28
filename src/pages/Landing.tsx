@@ -51,7 +51,7 @@ export default function Landing() {
           >
             <div className="inline-flex items-center gap-2 rounded-full border border-blue-200/60 bg-white/50 backdrop-blur-md px-4 py-1.5 text-xs font-medium text-blue-700 mb-6 shadow-sm">
               <Sparkles className="h-3.5 w-3.5" />
-              Powered by Google Gemini Flash
+              Powered by OpenRouter
             </div>
           </motion.div>
 
@@ -178,7 +178,7 @@ export default function Landing() {
               Ready to translate your novel?
             </h2>
             <p className="mt-2 text-sm text-gray-500">
-              Paste your Gemini API keys, upload a file, and hit start.
+              Get a free OpenRouter API key, upload your file, and hit start.
             </p>
             <button
               onClick={() => navigate("/dashboard")}
@@ -211,7 +211,7 @@ const features = [
   {
     icon: Shield,
     title: "Multi-Key Rate Limiting",
-    desc: "Per-key token-bucket limiter respects 2 RPM free-tier limits. 4.5s stagger prevents cross-key collisions.",
+    desc: "Per-key token-bucket rate limiter prevents hitting API limits. Staggered requests across multiple keys.",
   },
   {
     icon: Zap,

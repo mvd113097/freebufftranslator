@@ -32,12 +32,14 @@ export interface PipelineOptions {
   chunkSize: number;
   concurrency: number;
   maxRetries: number;
+  model: string;
 }
 
 const DEFAULT_OPTIONS: PipelineOptions = {
   chunkSize: 25000,
   concurrency: 1,
   maxRetries: 3,
+  model: "google/gemini-2.5-flash",
 };
 
 export class TranslationPipeline {
@@ -53,7 +55,8 @@ export class TranslationPipeline {
 
   constructor() {
     this.options = { ...DEFAULT_OPTIONS };
-    this.rateLimiter = new RateLimiter(1, 6000);
+    // OpenRouter free tier: ~20 RPM per key. Be conservative with 5 RPM.
+    this.rateLimiter = new RateLimiter(5, 3000);
   }
 
   setProgressCallback(cb: ProgressCallback) {
@@ -117,14 +120,13 @@ export class TranslationPipeline {
             return;
           }
 
-          // Wait for an available key (handles per-key rate limiting + stagger)
+          // Wait for an available key (handles per-key rate limiting)
           const currentKey = await this.rateLimiter.waitForAvailableKey(this.keys);
 
-          // Global delay: at least 3s between any two API requests (IP-level rate limit)
+          // Brief delay to avoid burst
           const timeSinceLastRequest = Date.now() - this.lastRequestTime;
-          if (timeSinceLastRequest < 3000) {
-            const waitMs = 3000 - timeSinceLastRequest;
-            console.log(`[Pipeline] Global delay: waiting ${waitMs}ms`);
+          if (timeSinceLastRequest < 1000) {
+            const waitMs = 1000 - timeSinceLastRequest;
             await new Promise((r) => setTimeout(r, waitMs));
           }
           this.lastRequestTime = Date.now();
@@ -141,6 +143,7 @@ export class TranslationPipeline {
               this.reportProgress();
             },
             this.abortController?.signal,
+            this.options.model,
           );
 
           results[chunk.id] = translated;
@@ -163,11 +166,11 @@ export class TranslationPipeline {
             attempt++;
             progress.retries = attempt;
             progress.error = message;
-            // For rate limit errors, wait 60s for the window to fully reset
+            // Rate limit: wait 30s. Other errors: exponential backoff.
             const isRateLimit = message.includes("RATE_LIMITED") || message.includes("429");
             const backoffMs = isRateLimit
-              ? 60000
-              : Math.min(5000 * Math.pow(2, attempt - 1), 30000);
+              ? 30000
+              : Math.min(3000 * Math.pow(2, attempt - 1), 20000);
             console.log(`[Pipeline] Retrying in ${backoffMs / 1000}s...`);
             this.reportProgress();
             await new Promise((r) => setTimeout(r, backoffMs));
@@ -181,15 +184,13 @@ export class TranslationPipeline {
       }
     };
 
-    // Process chunks — if concurrency=1, sequential; otherwise, N workers with stagger
+    // Process chunks
     if (this.options.concurrency <= 1) {
-      // Sequential: one chunk at a time
       for (const chunk of chunks) {
         if (this.abortController?.signal.aborted) break;
         await processChunk(chunk);
       }
     } else {
-      // Concurrent: N workers pulling from queue
       const pendingChunks = [...chunks];
       const activePromises: Promise<void>[] = [];
 
@@ -203,7 +204,7 @@ export class TranslationPipeline {
 
       const workerCount = Math.min(this.options.concurrency, chunks.length);
       for (let i = 0; i < workerCount; i++) {
-        const delay = i * 3000; // 3s stagger between workers
+        const delay = i * 2000; // 2s stagger between workers
         activePromises.push(
           new Promise<void>((resolve) => {
             setTimeout(async () => {

@@ -1,44 +1,39 @@
 /**
- * Gemini API client for novel translation.
+ * OpenRouter API client for novel translation.
  *
- * AQ keys work from the browser using generativelanguage.googleapis.com.
- * Tries x-goog-api-key header first, then falls back to ?key= query param.
+ * Uses the standard OpenAI-compatible chat completions endpoint.
+ * Works with any model available on OpenRouter (free or paid).
  */
 
-const GEMINI_MODEL = "gemini-3.6-flash";
-const API_BASE = "https://generativelanguage.googleapis.com/v1beta";
+const OPENROUTER_BASE = "https://openrouter.ai/api/v1/chat/completions";
 
-const SYSTEM_INSTRUCTION = `You are an expert human literary translator specializing in Chinese web novels (Xianxia, Wuxia, and Sci-Fi). Translate the following Chinese prose into highly fluent, immersive English fiction. Do not use stiff or literal machine-like phrasing. Translate cultivation tiers, localized idioms, and online slang into contextually accurate Western fantasy equivalents while maintaining rigid character name consistency.
+const SYSTEM_PROMPT = `You are an expert human literary translator specializing in Chinese web novels (Xianxia, Wuxia, and Sci-Fi). Translate the following Chinese prose into highly fluent, immersive English fiction. Do not use stiff or literal machine-like phrasing. Translate cultivation tiers, localized idioms, and online slang into contextually accurate Western fantasy equivalents while maintaining rigid character name consistency.
 
 IMPORTANT: Output ONLY the translated English text. Do not include any explanations, notes, commentary, or metadata. Do not wrap your output in quotes or markdown. Just return the raw translated English prose.`;
 
+/** Default model — free or very cheap on OpenRouter */
+export const DEFAULT_MODEL = "google/gemini-2.5-flash";
+
 /**
- * Extract text from a Gemini response JSON object.
+ * Build OpenAI-compatible chat completions payload.
  */
-function extractText(obj: unknown): string {
-  if (!obj || typeof obj !== "object") return "";
-  const record = obj as Record<string, unknown>;
-  const candidates = record.candidates as
-    | Array<Record<string, unknown>>
-    | undefined;
-  if (!candidates || candidates.length === 0) return "";
-
-  const content = candidates[0].content as
-    | Record<string, unknown>
-    | undefined;
-  if (!content) return "";
-
-  const parts = content.parts as Array<Record<string, unknown>> | undefined;
-  if (!parts || parts.length === 0) return "";
-
-  return parts
-    .filter((p) => typeof p.text === "string")
-    .map((p) => p.text as string)
-    .join("");
+function buildPayload(text: string, model: string) {
+  return {
+    model,
+    messages: [
+      { role: "system", content: SYSTEM_PROMPT },
+      { role: "user", content: text },
+    ],
+    temperature: 0.7,
+    top_p: 0.95,
+    max_tokens: 65536,
+    stream: true,
+  };
 }
 
 /**
- * Parse streaming SSE response — handles both "data: {json}" and raw JSON.
+ * Parse SSE streaming response from OpenRouter (OpenAI-compatible format).
+ * Lines are: "data: {json}" or "data: [DONE]"
  */
 function parseStream(
   reader: ReadableStreamDefaultReader<Uint8Array>,
@@ -62,41 +57,46 @@ function parseStream(
           if (done) break;
 
           buffer += decoder.decode(value, { stream: true });
-          const frames = buffer.split(/\n\n|\n/);
-          buffer = frames.pop() || "";
+          const lines = buffer.split("\n");
+          buffer = lines.pop() || "";
 
-          for (let frame of frames) {
-            frame = frame.trim();
-            if (!frame || frame === "[DONE]") continue;
-            if (frame.startsWith("data: ")) frame = frame.slice(6).trim();
-            if (!frame.startsWith("{")) continue;
+          for (let line of lines) {
+            line = line.trim();
+            if (!line || line === "data: [DONE]") continue;
+            if (line.startsWith("data: ")) line = line.slice(6).trim();
+            if (!line.startsWith("{")) continue;
+
             try {
-              const text = extractText(JSON.parse(frame));
-              if (text) {
-                fullText += text;
-                onToken(text);
+              const parsed = JSON.parse(line);
+              const delta = parsed.choices?.[0]?.delta;
+              if (delta?.content) {
+                fullText += delta.content;
+                onToken(delta.content);
               }
             } catch {
-              /* skip */
+              /* skip malformed lines */
             }
           }
         }
-        // Remaining buffer
+
+        // Handle remaining buffer
         if (buffer.trim()) {
           let r = buffer.trim();
           if (r.startsWith("data: ")) r = r.slice(6).trim();
           if (r.startsWith("{")) {
             try {
-              const text = extractText(JSON.parse(r));
-              if (text) {
-                fullText += text;
-                onToken(text);
+              const parsed = JSON.parse(r);
+              const delta = parsed.choices?.[0]?.delta;
+              if (delta?.content) {
+                fullText += delta.content;
+                onToken(delta.content);
               }
             } catch {
               /* skip */
             }
           }
         }
+
         resolve(fullText);
       } catch (err) {
         reject(err);
@@ -106,80 +106,39 @@ function parseStream(
   });
 }
 
-function buildPayload(text: string) {
-  return {
-    system_instruction: { parts: [{ text: SYSTEM_INSTRUCTION }] },
-    contents: [{ role: "user", parts: [{ text }] }],
-    generationConfig: { temperature: 0.7, topP: 0.95, maxOutputTokens: 65536 },
-  };
-}
-
 /**
- * Build request configs — tries header auth first, then query param auth.
+ * Non-streaming fallback — uses the same endpoint with stream: false.
  */
-function getAuthConfigs(apiKey: string, action: "stream" | "nonstream") {
-  const method = action === "stream" ? "streamGenerateContent" : "generateContent";
-  const headerAuth: Record<string, string> = {
-    "Content-Type": "application/json",
-    "x-goog-api-key": apiKey,
-  };
-  const paramAuth: Record<string, string> = {
-    "Content-Type": "application/json",
-  };
-  return [
-    {
-      // Method 1: x-goog-api-key header
-      url: `${API_BASE}/models/${GEMINI_MODEL}:${method}`,
-      headers: headerAuth,
-    },
-    {
-      // Method 2: ?key= query param (fallback for some AQ key setups)
-      url: `${API_BASE}/models/${GEMINI_MODEL}:${method}?key=${apiKey}`,
-      headers: paramAuth,
-    },
-  ];
-}
-
-/**
- * Try non-streaming translation with both auth methods.
- */
-async function tryNonStreaming(
+async function translateNonStreaming(
   text: string,
   apiKey: string,
+  model: string,
 ): Promise<string> {
-  const configs = getAuthConfigs(apiKey, "nonstream");
-  const payload = JSON.stringify(buildPayload(text));
+  const payload = buildPayload(text, model);
+  payload.stream = false;
 
-  for (let i = 0; i < configs.length; i++) {
-    const { url, headers } = configs[i];
-    try {
-      const response = await fetch(url, {
-        method: "POST",
-        headers,
-        body: payload,
-      });
+  const response = await fetch(OPENROUTER_BASE, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify(payload),
+  });
 
-      if (response.status === 429) throw new Error("RATE_LIMITED");
+  if (response.status === 429) throw new Error("RATE_LIMITED");
 
-      if (!response.ok) {
-        const body = await response.text().catch(() => "");
-        console.warn(`[Translator] Non-stream auth method ${i + 1} failed: ${response.status}`);
-        continue;
-      }
-
-      const data = await response.json();
-      const result = extractText(data);
-      if (!result) throw new Error("No translation content in response");
-      return result;
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (msg === "RATE_LIMITED") throw err;
-      console.warn(`[Translator] Non-stream auth method ${i + 1} error:`, msg);
-      continue;
-    }
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    throw new Error(`API error ${response.status}: ${body.slice(0, 200)}`);
   }
 
-  throw new Error("All API endpoints failed. Check your API key and try again.");
+  const data = await response.json();
+  const content = data.choices?.[0]?.message?.content;
+  if (typeof content !== "string" || !content) {
+    throw new Error("No translation content in response");
+  }
+  return content;
 }
 
 /**
@@ -190,56 +149,56 @@ export async function translateChunk(
   apiKey: string,
   onToken: (token: string) => void,
   abortSignal?: AbortSignal,
+  model?: string,
 ): Promise<string> {
-  const configs = getAuthConfigs(apiKey, "stream");
-  const payload = JSON.stringify(buildPayload(text));
+  const usedModel = model || DEFAULT_MODEL;
+  const payload = buildPayload(text, usedModel);
 
-  // Try streaming with both auth methods
-  for (let i = 0; i < configs.length; i++) {
-    const { url, headers } = configs[i];
-    try {
-      const response = await fetch(url, {
-        method: "POST",
-        headers,
-        body: payload,
-        signal: abortSignal,
-      });
+  // Try streaming first
+  try {
+    const response = await fetch(OPENROUTER_BASE, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(payload),
+      signal: abortSignal,
+    });
 
-      if (response.status === 429) throw new Error("RATE_LIMITED");
+    if (response.status === 429) throw new Error("RATE_LIMITED");
 
-      if (!response.ok) {
-        const body = await response.text().catch(() => "");
-        console.warn(`[Translator] Stream auth method ${i + 1} failed: ${response.status}`);
-        continue;
-      }
-
-      if (!response.body) throw new Error("Response body is null");
-
-      const reader = response.body.getReader();
-      return await parseStream(reader, onToken, abortSignal);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (msg === "RATE_LIMITED" || msg === "Translation aborted") throw err;
-      console.warn(`[Translator] Stream auth method ${i + 1} error:`, msg);
-      continue;
+    if (!response.ok) {
+      const body = await response.text().catch(() => "");
+      throw new Error(`API error ${response.status}: ${body.slice(0, 200)}`);
     }
-  }
 
-  // All streaming attempts failed — try non-streaming
-  console.log("[Translator] All streaming attempts failed, trying non-streaming...");
-  const result = await tryNonStreaming(text, apiKey);
-  const words = result.split(/(\s+)/);
-  for (const word of words) {
-    if (abortSignal?.aborted) throw new Error("Translation aborted");
-    onToken(word);
+    if (!response.body) throw new Error("Response body is null");
+
+    const reader = response.body.getReader();
+    return await parseStream(reader, onToken, abortSignal);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg === "RATE_LIMITED" || msg === "Translation aborted") throw err;
+
+    // Streaming failed — try non-streaming fallback
+    console.log("[Translator] Streaming failed:", msg, "— falling back to non-streaming");
+    const result = await translateNonStreaming(text, apiKey, usedModel);
+    // Simulate token-by-token delivery for progress tracking
+    const words = result.split(/(\s+)/);
+    for (const word of words) {
+      if (abortSignal?.aborted) throw new Error("Translation aborted");
+      onToken(word);
+    }
+    return result;
   }
-  return result;
 }
 
 /** Simple non-streaming translation for testing */
 export async function translateChunkSimple(
   text: string,
   apiKey: string,
+  model?: string,
 ): Promise<string> {
-  return tryNonStreaming(text, apiKey);
+  return translateNonStreaming(text, apiKey, model || DEFAULT_MODEL);
 }

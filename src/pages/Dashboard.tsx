@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, useMemo } from "react";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion } from "framer-motion";
 import {
   Play,
   Square,
@@ -20,6 +20,15 @@ import {
   type ChunkProgress,
 } from "@/lib/translator/pipeline";
 import { stitchAndExportEpub } from "@/components/translator/epub-export";
+import { DEFAULT_MODEL, translateChunkSimple } from "@/lib/translator/gemini-api";
+
+const MODEL_OPTIONS = [
+  { value: "google/gemini-2.5-flash", label: "Gemini 2.5 Flash (fast, cheap)" },
+  { value: "google/gemini-2.5-pro-preview-06-05", label: "Gemini 2.5 Pro (quality)" },
+  { value: "qwen/qwen3-235b-a22b", label: "Qwen3 235B (best Chinese)" },
+  { value: "deepseek/deepseek-chat-v3-0324:free", label: "DeepSeek V3 (free)" },
+  { value: "meta-llama/llama-4-maverick:free", label: "Llama 4 Maverick (free)" },
+];
 
 export default function Dashboard() {
   const [keys, setKeys] = useState<string[]>([]);
@@ -32,6 +41,7 @@ export default function Dashboard() {
   const [chunkSize, setChunkSize] = useState(25000);
   const [concurrency, setConcurrency] = useState(1);
   const [finalResults, setFinalResults] = useState<string[]>([]);
+  const [selectedModel, setSelectedModel] = useState(DEFAULT_MODEL);
 
   const pipelineRef = useRef<TranslationPipeline | null>(null);
 
@@ -74,6 +84,7 @@ export default function Dashboard() {
         chunkSize,
         concurrency,
         maxRetries: 3,
+        model: selectedModel,
       });
 
       setFinalResults(results);
@@ -84,7 +95,7 @@ export default function Dashboard() {
     } finally {
       setIsRunning(false);
     }
-  }, [canStart, rawText, keys, chunkSize, concurrency]);
+  }, [canStart, rawText, keys, chunkSize, concurrency, selectedModel]);
 
   const stopTranslation = useCallback(() => {
     pipelineRef.current?.abort();
@@ -127,7 +138,7 @@ export default function Dashboard() {
               <h1 className="text-sm font-bold text-gray-900 tracking-tight">
                 Novel Translator
               </h1>
-              <p className="text-[10px] text-gray-500">Chinese → English via Gemini</p>
+              <p className="text-[10px] text-gray-500">Chinese → English via OpenRouter</p>
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -147,9 +158,8 @@ export default function Dashboard() {
       </header>
 
       <main className="mx-auto max-w-7xl px-4 sm:px-6 py-6 space-y-6">
-        {/* Top Row: Upload + Keys + Settings */}
+        {/* Top Row: Upload + Keys */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-          {/* File Upload */}
           <motion.div
             initial={{ opacity: 0, y: 12 }}
             animate={{ opacity: 1, y: 0 }}
@@ -177,7 +187,6 @@ export default function Dashboard() {
             )}
           </motion.div>
 
-          {/* Keys */}
           <motion.div
             initial={{ opacity: 0, y: 12 }}
             animate={{ opacity: 1, y: 0 }}
@@ -188,14 +197,31 @@ export default function Dashboard() {
           </motion.div>
         </div>
 
-        {/* Settings + Progress */}
+        {/* Model + Settings + Progress */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
           <motion.div
             initial={{ opacity: 0, y: 12 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 0.15 }}
-            className="rounded-2xl border border-white/50 bg-white/40 backdrop-blur-xl p-4 shadow-sm"
+            className="space-y-4"
           >
+            {/* Model Selector */}
+            <div className="rounded-2xl border border-white/50 bg-white/40 backdrop-blur-xl p-4 shadow-sm">
+              <label className="text-xs font-semibold text-gray-800 block mb-2">Model</label>
+              <select
+                value={selectedModel}
+                onChange={(e) => setSelectedModel(e.target.value)}
+                disabled={isRunning}
+                className="w-full rounded-xl border border-gray-200/60 bg-white/40 backdrop-blur-md px-3 py-2 text-xs text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-400/30 disabled:opacity-50 cursor-pointer"
+              >
+                {MODEL_OPTIONS.map((m) => (
+                  <option key={m.value} value={m.value}>
+                    {m.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+
             <SettingsPanel
               chunkSize={chunkSize}
               onChunkSizeChange={setChunkSize}
@@ -246,8 +272,11 @@ export default function Dashboard() {
                 <button
                   onClick={async () => {
                     try {
-                      const { translateChunkSimple } = await import("@/lib/translator/gemini-api");
-                      const result = await translateChunkSimple("你好世界 Hello World", keys[0]);
+                      const result = await translateChunkSimple(
+                        "你好世界 Hello World",
+                        keys[0],
+                        selectedModel,
+                      );
                       alert(`✅ Key works! Response: ${result.slice(0, 100)}`);
                     } catch (err) {
                       const msg = err instanceof Error ? err.message : String(err);
@@ -300,8 +329,6 @@ export default function Dashboard() {
             </span>
           )}
         </motion.div>
-
-
       </main>
     </div>
   );

@@ -41,7 +41,7 @@ export function KeyManager({ keys, onKeysChange }: KeyManagerProps) {
     const lines = inputValue
       .split("\n")
       .map((l) => l.trim())
-      .filter((l) => l.startsWith("AQ.") || l.length > 20);
+      .filter((l) => l.length > 10);
 
     if (lines.length === 0) return;
 
@@ -73,16 +73,21 @@ export function KeyManager({ keys, onKeysChange }: KeyManagerProps) {
       </div>
 
       {keys.length === 0 && (
-        <div className="flex items-start gap-2 rounded-lg bg-amber-50/60 backdrop-blur-sm border border-amber-200/50 px-3 py-2.5 text-xs text-amber-700">
+        <div className="flex items-start gap-2 rounded-lg bg-blue-50/60 backdrop-blur-sm border border-blue-200/50 px-3 py-2.5 text-xs text-blue-700">
           <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
           <span>
-            Add at least one Gemini API key. Multiple keys allow parallel
-            translation for faster throughput.
+            Add your OpenRouter API key(s). Get one free at{" "}
+            <a
+              href="https://openrouter.ai/keys"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="underline font-medium"
+            >
+              openrouter.ai/keys
+            </a>
           </span>
         </div>
       )}
-
-
 
       {/* Key list */}
       {keys.length > 0 && (
@@ -117,7 +122,7 @@ export function KeyManager({ keys, onKeysChange }: KeyManagerProps) {
         <textarea
           value={inputValue}
           onChange={(e) => setInputValue(e.target.value)}
-          placeholder={"Paste API keys here, one per line\nAQ.xxxxxxxxxxxxxxxxxxxx\nAQ.xxxxxxxxxxxxxxxxxxxx"}
+          placeholder={"Paste OpenRouter API key(s) here, one per line\nsk-or-v1-xxxxxxxxxxxxxxxx\nsk-or-v1-yyyyyyyyyyyyyyyy"}
           className={cn(
             "w-full rounded-xl border border-gray-200/60 bg-white/40 backdrop-blur-md px-3 py-2.5",
             "text-xs font-mono text-gray-700 placeholder:text-gray-400",
