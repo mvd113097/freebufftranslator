@@ -4,6 +4,7 @@ import {
   Play,
   Square,
   Download,
+  DownloadCloud,
   Sparkles,
   BookOpen,
   RotateCcw,
@@ -113,6 +114,28 @@ export default function Dashboard() {
       console.error("Export error:", err);
     }
   }, [finalResults, rawText, fileName]);
+
+  const handleDownloadProgress = useCallback(() => {
+    try {
+      const completedChunks = chunkProgress
+        .filter((c) => c.status === "completed" && c.translatedText.length > 0)
+        .sort((a, b) => a.id - b.id)
+        .map((c) => c.translatedText);
+
+      if (completedChunks.length === 0) {
+        alert("No completed chunks to download yet.");
+        return;
+      }
+
+      stitchAndExportEpub(
+        completedChunks,
+        rawText,
+        "incomplete_english",
+      );
+    } catch (err) {
+      console.error("Progress export error:", err);
+    }
+  }, [chunkProgress, rawText]);
 
   const handleReset = useCallback(() => {
     pipelineRef.current?.abort();
@@ -307,6 +330,16 @@ export default function Dashboard() {
             >
               <Download className="h-4 w-4" />
               Export .epub
+            </button>
+          )}
+
+          {isRunning && (
+            <button
+              onClick={handleDownloadProgress}
+              className="flex items-center gap-2 rounded-xl border border-amber-200/60 bg-amber-50/50 backdrop-blur-md px-4 py-2.5 text-sm font-medium text-amber-700 hover:bg-amber-100/50 transition-all cursor-pointer"
+            >
+              <DownloadCloud className="h-3.5 w-3.5" />
+              Download Progress
             </button>
           )}
 
