@@ -23,7 +23,7 @@ import { stitchAndExportEpub } from "@/components/translator/epub-export";
 import { DEFAULT_MODEL, translateChunkSimple } from "@/lib/translator/gemini-api";
 
 const MODEL_OPTIONS = [
-  { value: "google/gemini-2.5-flash:free", label: "Gemini 2.5 Flash (free, fast)" },
+  { value: "google/gemini-2.5-f", label: "Gemini 2.5 Flash (free, fast)" },
   { value: "qwen/qwen3-235b-a22b:free", label: "Qwen3 235B (free, best Chinese)" },
   { value: "deepseek/deepseek-chat-v3-0324:free", label: "DeepSeek V3 (free)" },
   { value: "meta-llama/llama-4-maverick:free", label: "Llama 4 Maverick (free)" },

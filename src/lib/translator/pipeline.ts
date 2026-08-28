@@ -39,7 +39,7 @@ const DEFAULT_OPTIONS: PipelineOptions = {
   chunkSize: 4000,
   concurrency: 5,
   maxRetries: 3,
-  model: "google/gemini-2.5-flash:free",
+  model: "google/gemini-2.5-f",
 };
 
 export class TranslationPipeline {
