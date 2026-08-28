@@ -9,7 +9,13 @@ const OPENROUTER_BASE = "https://openrouter.ai/api/v1/chat/completions";
 
 const SYSTEM_PROMPT = `You are an expert human literary translator specializing in Chinese web novels (Xianxia, Wuxia, and Sci-Fi). Translate the following Chinese prose into highly fluent, immersive English fiction. Do not use stiff or literal machine-like phrasing. Translate cultivation tiers, localized idioms, and online slang into contextually accurate Western fantasy equivalents while maintaining rigid character name consistency.
 
-IMPORTANT: Output ONLY the translated English text. Do not include any explanations, notes, commentary, or metadata. Do not wrap your output in quotes or markdown. Just return the raw translated English prose.`;
+CRITICAL FORMATTING RULES:
+- Preserve ALL paragraph breaks from the original text. Separate every paragraph with a blank line (double newline). The output must have clear visual spacing between paragraphs, matching the input's paragraph structure.
+- If the input has a line break between paragraphs, your output MUST have a blank line between those same paragraphs.
+- Preserve dialogue formatting and paragraph indentation style.
+- Do NOT merge paragraphs together. Each paragraph in the input becomes its own paragraph in the output.
+
+IMPORTANT: Output ONLY the translated English text. Do not include any explanations, notes, commentary, or metadata. Do not wrap your output in quotes or markdown. Just return the raw translated English prose with proper paragraph spacing.`;
 
 /** Default model — free or very cheap on OpenRouter */
 export const DEFAULT_MODEL = "openrouter/free";

@@ -63,7 +63,7 @@ export function chunkText(
         currentChunk += sentence;
       }
     } else {
-      currentChunk += para;
+      currentChunk += (currentChunk.length > 0 ? "\n\n" : "") + para;
     }
   }
 
