@@ -1,7 +1,7 @@
 /**
  * Gemini API client for novel translation.
  * Handles the modern native Gemini endpoint with x-goog-api-key header auth.
- * Parses the streaming response (SSE format with data: prefix OR newline-delimited JSON).
+ * Supports both SSE streaming and non-streaming fallback.
  */
 
 const GEMINI_MODEL = "gemini-2.5-flash";
@@ -16,10 +16,14 @@ IMPORTANT: Output ONLY the translated English text. Do not include any explanati
 function extractTextFromResponse(obj: unknown): string {
   if (!obj || typeof obj !== "object") return "";
   const record = obj as Record<string, unknown>;
-  const candidates = record.candidates as Array<Record<string, unknown>> | undefined;
+  const candidates = record.candidates as
+    | Array<Record<string, unknown>>
+    | undefined;
   if (!candidates || candidates.length === 0) return "";
 
-  const content = candidates[0].content as Record<string, unknown> | undefined;
+  const content = candidates[0].content as
+    | Record<string, unknown>
+    | undefined;
   if (!content) return "";
 
   const parts = content.parts as Array<Record<string, unknown>> | undefined;
@@ -32,11 +36,9 @@ function extractTextFromResponse(obj: unknown): string {
 }
 
 /**
- * Parse Gemini streaming response body.
- * Supports two formats:
- *   1. SSE: each line is "data: {json}\n\n"
- *   2. Raw streaming: each line is a JSON object or JSON array element
- *   3. Full JSON array: entire body is [{...}, {...}, ...]
+ * Parse Gemini streaming SSE response body.
+ * SSE format: each line is "data: {json}\n\n"
+ * Also handles raw JSON objects separated by newlines.
  */
 function parseGeminiStream(
   reader: ReadableStreamDefaultReader<Uint8Array>,
@@ -46,10 +48,6 @@ function parseGeminiStream(
   const decoder = new TextDecoder();
   let fullText = "";
   let buffer = "";
-  let isSSE = false;
-  let isJsonArray = false;
-  let arrayBuffer = "";
-  let firstChunk = true;
 
   return new Promise<string>((resolve, reject) => {
     const processStream = async () => {
@@ -64,104 +62,46 @@ function parseGeminiStream(
           const { done, value } = await reader.read();
           if (done) break;
 
-          const chunk = decoder.decode(value, { stream: true });
+          buffer += decoder.decode(value, { stream: true });
 
-          // Detect format on first chunk
-          if (firstChunk) {
-            firstChunk = false;
-            const trimmed = chunk.trimStart();
-            if (trimmed.startsWith("[")) {
-              isJsonArray = true;
-              arrayBuffer = trimmed;
-              // Try to parse the full array
-              try {
-                const arr = JSON.parse(arrayBuffer);
-                if (Array.isArray(arr)) {
-                  for (const obj of arr) {
-                    const text = extractTextFromResponse(obj);
-                    if (text) {
-                      fullText += text;
-                      onToken(text);
-                    }
-                  }
-                  resolve(fullText);
-                  return;
-                }
-              } catch {
-                // Not complete yet, will accumulate
-              }
-            } else if (trimmed.startsWith("data: ")) {
-              isSSE = true;
-            } else if (trimmed.startsWith("{")) {
-              isSSE = false;
-            }
-          }
+          // Split on double newline (SSE frames) or single newline
+          const frames = buffer.split(/\n\n|\n/);
+          buffer = frames.pop() || "";
 
-          if (isJsonArray) {
-            // Accumulate and try to parse the JSON array
-            arrayBuffer += chunk;
-            try {
-              const arr = JSON.parse(arrayBuffer);
-              if (Array.isArray(arr)) {
-                for (const obj of arr) {
-                  const text = extractTextFromResponse(obj);
-                  if (text) {
-                    fullText += text;
-                    onToken(text);
-                  }
-                }
-                resolve(fullText);
-                return;
-              }
-            } catch {
-              // Not complete yet, keep accumulating
-            }
-            continue;
-          }
+          for (let frame of frames) {
+            frame = frame.trim();
+            if (!frame || frame === "[DONE]") continue;
 
-          buffer += chunk;
-
-          // Split on double newline (SSE) or single newline
-          const separator = isSSE ? "\n\n" : "\n";
-          const parts = buffer.split(separator);
-          // Keep the last incomplete part in the buffer
-          buffer = parts.pop() || "";
-
-          for (const part of parts) {
-            let jsonStr = part.trim();
-
-            // Strip SSE "data: " prefix if present
-            if (jsonStr.startsWith("data: ")) {
-              jsonStr = jsonStr.slice(6);
+            // Strip SSE "data: " prefix
+            if (frame.startsWith("data: ")) {
+              frame = frame.slice(6).trim();
             }
 
-            // Skip empty lines or [DONE] markers
-            if (!jsonStr || jsonStr === "[DONE]" || !jsonStr.startsWith("{")) {
-              continue;
-            }
+            // Skip non-JSON lines
+            if (!frame.startsWith("{")) continue;
 
             try {
-              const obj = JSON.parse(jsonStr);
+              const obj = JSON.parse(frame);
               const text = extractTextFromResponse(obj);
               if (text) {
                 fullText += text;
                 onToken(text);
               }
             } catch {
-              // Skip malformed JSON
+              // Skip malformed JSON lines
             }
           }
         }
 
         // Process remaining buffer
         if (buffer.trim()) {
-          let jsonStr = buffer.trim();
-          if (jsonStr.startsWith("data: ")) {
-            jsonStr = jsonStr.slice(6);
+          let remaining = buffer.trim();
+          if (remaining.startsWith("data: ")) {
+            remaining = remaining.slice(6).trim();
           }
-          if (jsonStr.startsWith("{")) {
+          if (remaining.startsWith("{")) {
             try {
-              const obj = JSON.parse(jsonStr);
+              const obj = JSON.parse(remaining);
               const text = extractTextFromResponse(obj);
               if (text) {
                 fullText += text;
@@ -184,19 +124,13 @@ function parseGeminiStream(
 }
 
 /**
- * Translate a single chunk of Chinese text to English.
- * Uses streaming for real-time token output.
+ * Non-streaming translation — used as fallback if streaming fails.
  */
-export async function translateChunk(
+async function translateNonStreaming(
   text: string,
   apiKey: string,
-  onToken: (token: string) => void,
-  abortSignal?: AbortSignal,
 ): Promise<string> {
-  const url = new URL(
-    `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:streamGenerateContent`,
-  );
-  url.searchParams.set("alt", "sse");
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
 
   const payload = {
     system_instruction: {
@@ -215,64 +149,7 @@ export async function translateChunk(
     },
   };
 
-  const response = await fetch(url.toString(), {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-goog-api-key": apiKey,
-    },
-    body: JSON.stringify(payload),
-    signal: abortSignal,
-  });
-
-  if (response.status === 429) {
-    throw new Error("RATE_LIMITED");
-  }
-
-  if (!response.ok) {
-    const errorBody = await response.text().catch(() => "");
-    throw new Error(
-      `API error ${response.status}: ${errorBody.slice(0, 200)}`,
-    );
-  }
-
-  if (!response.body) {
-    throw new Error("Response body is null");
-  }
-
-  const reader = response.body.getReader();
-  return parseGeminiStream(reader, onToken, abortSignal);
-}
-
-/**
- * Non-streaming translation for simpler use (testing, etc.)
- */
-export async function translateChunkSimple(
-  text: string,
-  apiKey: string,
-): Promise<string> {
-  const url = new URL(
-    `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`,
-  );
-
-  const payload = {
-    system_instruction: {
-      parts: [{ text: SYSTEM_INSTRUCTION }],
-    },
-    contents: [
-      {
-        role: "user",
-        parts: [{ text }],
-      },
-    ],
-    generationConfig: {
-      temperature: 0.7,
-      topP: 0.95,
-      maxOutputTokens: 8192,
-    },
-  };
-
-  const response = await fetch(url.toString(), {
+  const response = await fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -293,5 +170,119 @@ export async function translateChunkSimple(
   }
 
   const data = await response.json();
-  return extractTextFromResponse(data);
+  const result = extractTextFromResponse(data);
+  if (!result) {
+    throw new Error("No translation content in response");
+  }
+  return result;
+}
+
+/**
+ * Translate a single chunk of Chinese text to English.
+ * Tries streaming first, falls back to non-streaming on certain errors.
+ */
+export async function translateChunk(
+  text: string,
+  apiKey: string,
+  onToken: (token: string) => void,
+  abortSignal?: AbortSignal,
+): Promise<string> {
+  const streamingUrl = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:streamGenerateContent?alt=sse`;
+
+  const payload = {
+    system_instruction: {
+      parts: [{ text: SYSTEM_INSTRUCTION }],
+    },
+    contents: [
+      {
+        role: "user",
+        parts: [{ text }],
+      },
+    ],
+    generationConfig: {
+      temperature: 0.7,
+      topP: 0.95,
+      maxOutputTokens: 8192,
+    },
+  };
+
+  const headers = {
+    "Content-Type": "application/json",
+    "x-goog-api-key": apiKey,
+  };
+
+  try {
+    const response = await fetch(streamingUrl, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+      signal: abortSignal,
+    });
+
+    if (response.status === 429) {
+      throw new Error("RATE_LIMITED");
+    }
+
+    if (!response.ok) {
+      const errorBody = await response.text().catch(() => "");
+      const errMsg = `API error ${response.status}: ${errorBody.slice(0, 200)}`;
+      console.warn("[Translator] Streaming failed:", errMsg);
+      // Fall back to non-streaming for non-rate-limit errors
+      if (response.status !== 429) {
+        console.log("[Translator] Falling back to non-streaming mode...");
+        const result = await translateNonStreaming(text, apiKey);
+        // Simulate token-by-token output for non-streaming
+        const words = result.split(/(\s+)/);
+        for (const word of words) {
+          if (abortSignal?.aborted) throw new Error("Translation aborted");
+          onToken(word);
+        }
+        return result;
+      }
+      throw new Error(errMsg);
+    }
+
+    if (!response.body) {
+      throw new Error("Response body is null");
+    }
+
+    const reader = response.body.getReader();
+    return await parseGeminiStream(reader, onToken, abortSignal);
+  } catch (err) {
+    // If streaming fails with a network error, try non-streaming
+    const msg = err instanceof Error ? err.message : String(err);
+    if (
+      !msg.includes("RATE_LIMITED") &&
+      !msg.includes("Translation aborted") &&
+      !msg.includes("No translation")
+    ) {
+      console.warn(
+        "[Translator] Streaming error, trying non-streaming:",
+        msg,
+      );
+      try {
+        const fallbackResult = await translateNonStreaming(text, apiKey);
+        const words = fallbackResult.split(/(\s+)/);
+        for (const word of words) {
+          if (abortSignal?.aborted) throw new Error("Translation aborted");
+          onToken(word);
+        }
+        return fallbackResult;
+      } catch (fallbackErr) {
+        // If both fail, throw the original error
+        throw err;
+      }
+    }
+    throw err;
+  }
+}
+
+/**
+ * Non-streaming translation for simpler use (testing, etc.)
+ */
+export async function translateChunkSimple(
+  text: string,
+  apiKey: string,
+): Promise<string> {
+  return translateNonStreaming(text, apiKey);
 }

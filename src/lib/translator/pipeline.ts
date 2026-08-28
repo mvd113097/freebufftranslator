@@ -104,13 +104,13 @@ export class TranslationPipeline {
     const activePromises: Promise<void>[] = [];
 
     const processChunk = async (chunk: TextChunk) => {
-      // Get an available key
-      const apiKey = await this.rateLimiter.waitForAvailableKey(this.keys);
       const progress = this.chunkProgress[chunk.id];
       progress.status = "translating";
       this.reportProgress();
 
       let attempt = 0;
+      let currentKey = await this.rateLimiter.waitForAvailableKey(this.keys);
+
       while (attempt <= this.options.maxRetries) {
         try {
           if (this.abortController?.signal.aborted) {
@@ -121,7 +121,7 @@ export class TranslationPipeline {
 
           const translated = await translateChunk(
             chunk.text,
-            apiKey,
+            currentKey,
             (token) => {
               progress.tokensReceived++;
               progress.translatedText += token;
@@ -138,6 +138,7 @@ export class TranslationPipeline {
           return;
         } catch (err: unknown) {
           const message = err instanceof Error ? err.message : String(err);
+          console.error(`[Pipeline] Chunk ${chunk.id} attempt ${attempt} failed:`, message);
 
           if (message === "Translation aborted") {
             progress.status = "failed";
@@ -145,17 +146,16 @@ export class TranslationPipeline {
             return;
           }
 
-          if (message === "RATE_LIMITED" || attempt < this.options.maxRetries) {
+          if (attempt < this.options.maxRetries) {
             attempt++;
             progress.retries = attempt;
+            progress.error = message;
             const backoffMs = Math.min(2000 * Math.pow(2, attempt - 1), 30000);
             this.reportProgress();
             await new Promise((r) => setTimeout(r, backoffMs));
 
-            // Try a different key on retry
-            const newKey = await this.rateLimiter.waitForAvailableKey(this.keys);
-            // Continue with the pipeline
-            void newKey;
+            // Get a different key for the retry
+            currentKey = await this.rateLimiter.waitForAvailableKey(this.keys);
           } else {
             progress.status = "failed";
             progress.error = message;
