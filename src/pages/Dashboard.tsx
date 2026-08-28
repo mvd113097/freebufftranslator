@@ -23,11 +23,11 @@ import { stitchAndExportEpub } from "@/components/translator/epub-export";
 import { DEFAULT_MODEL, translateChunkSimple } from "@/lib/translator/gemini-api";
 
 const MODEL_OPTIONS = [
-  { value: "google/gemini-2.5-flash", label: "Gemini 2.5 Flash (fast, cheap)" },
-  { value: "google/gemini-2.5-pro-preview-06-05", label: "Gemini 2.5 Pro (quality)" },
-  { value: "qwen/qwen3-235b-a22b", label: "Qwen3 235B (best Chinese)" },
+  { value: "google/gemini-2.5-flash:free", label: "Gemini 2.5 Flash (free, fast)" },
+  { value: "qwen/qwen3-235b-a22b:free", label: "Qwen3 235B (free, best Chinese)" },
   { value: "deepseek/deepseek-chat-v3-0324:free", label: "DeepSeek V3 (free)" },
   { value: "meta-llama/llama-4-maverick:free", label: "Llama 4 Maverick (free)" },
+  { value: "google/gemini-2.5-flash", label: "Gemini 2.5 Flash (paid, faster)" },
 ];
 
 export default function Dashboard() {
@@ -38,8 +38,8 @@ export default function Dashboard() {
   const [isComplete, setIsComplete] = useState(false);
   const [progress, setProgress] = useState<PipelineProgress | null>(null);
   const [chunkProgress, setChunkProgress] = useState<ChunkProgress[]>([]);
-  const [chunkSize, setChunkSize] = useState(25000);
-  const [concurrency, setConcurrency] = useState(1);
+  const [chunkSize, setChunkSize] = useState(4000);
+  const [concurrency, setConcurrency] = useState(5);
   const [finalResults, setFinalResults] = useState<string[]>([]);
   const [selectedModel, setSelectedModel] = useState(DEFAULT_MODEL);
 

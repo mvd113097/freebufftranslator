@@ -33,9 +33,9 @@ export function SettingsPanel({
         </div>
         <input
           type="range"
-          min={5000}
-          max={80000}
-          step={5000}
+          min={1000}
+          max={50000}
+          step={1000}
           value={chunkSize}
           onChange={(e) => onChunkSizeChange(Number(e.target.value))}
           className="w-full h-1.5 rounded-full appearance-none bg-gray-200/80 backdrop-blur-sm cursor-pointer
@@ -45,8 +45,8 @@ export function SettingsPanel({
             [&::-webkit-slider-thumb]:transition-transform [&::-webkit-slider-thumb]:hover:scale-125"
         />
         <div className="flex justify-between text-[10px] text-gray-400">
-          <span>5k (finer)</span>
-          <span>80k (coarser)</span>
+          <span>1k (finer)</span>
+          <span>50k (coarser)</span>
         </div>
       </div>
 

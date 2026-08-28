@@ -12,7 +12,7 @@ const SYSTEM_PROMPT = `You are an expert human literary translator specializing 
 IMPORTANT: Output ONLY the translated English text. Do not include any explanations, notes, commentary, or metadata. Do not wrap your output in quotes or markdown. Just return the raw translated English prose.`;
 
 /** Default model — free or very cheap on OpenRouter */
-export const DEFAULT_MODEL = "google/gemini-2.5-flash";
+export const DEFAULT_MODEL = "google/gemini-2.5-flash:free";
 
 /**
  * Build OpenAI-compatible chat completions payload.

@@ -36,10 +36,10 @@ export interface PipelineOptions {
 }
 
 const DEFAULT_OPTIONS: PipelineOptions = {
-  chunkSize: 25000,
-  concurrency: 1,
+  chunkSize: 4000,
+  concurrency: 5,
   maxRetries: 3,
-  model: "google/gemini-2.5-flash",
+  model: "google/gemini-2.5-flash:free",
 };
 
 export class TranslationPipeline {
