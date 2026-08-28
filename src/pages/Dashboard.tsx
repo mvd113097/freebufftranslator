@@ -25,7 +25,7 @@ import { DEFAULT_MODEL, translateChunkSimple } from "@/lib/translator/gemini-api
 const MODEL_OPTIONS = [
   { value: "openrouter/free", label: "Auto Free (best available)" },
   { value: "inclusionai/ling-3.0-flash-fin:free", label: "Ling 3.0 Flash (free, 262K ctx)" },
-  { value: "qwen/qwen-2.5-72b-instruct:free", label: "Qwen 2.5 72B (free, great Chinese)" },
+  { value: "qwen/qwen3-235b-a22b:free", label: "Qwen3 235B (free, great Chinese)" },
   { value: "google/gemini-2.5-flash", label: "Gemini 2.5 Flash (paid, cheapest)" },
   { value: "google/gemini-3.6-flash", label: "Gemini 3.6 Flash (paid, best)" },
 ];
