@@ -19,7 +19,6 @@ import {
   type PipelineProgress,
   type ChunkProgress,
 } from "@/lib/translator/pipeline";
-import { stitchAndExportEpub } from "@/components/translator/epub-export";
 import { DEFAULT_MODEL, translateChunkSimple } from "@/lib/translator/gemini-api";
 
 const MODEL_OPTIONS = [
@@ -104,15 +103,26 @@ export default function Dashboard() {
 
   const handleExport = useCallback(() => {
     try {
-      stitchAndExportEpub(
-        finalResults,
-        rawText,
-        fileName.replace(/\.txt$/i, "") || "Translated Novel",
-      );
+      const translated = finalResults.filter((c) => c.length > 0);
+      if (translated.length === 0) {
+        alert("No translated content to export.");
+        return;
+      }
+      const stitched = translated.join("\n\n");
+      const blob = new Blob([stitched], { type: "text/plain;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = (fileName.replace(/\.txt$/i, "") || "translated_novel") + ".txt";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
     } catch (err) {
       console.error("Export error:", err);
+      alert("Download failed: " + (err instanceof Error ? err.message : String(err)));
     }
-  }, [finalResults, rawText, fileName]);
+  }, [finalResults, fileName]);
 
   const handleDownloadProgress = useCallback(() => {
     try {
@@ -178,7 +188,7 @@ export default function Dashboard() {
                 className="flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-blue-500 to-indigo-600 px-4 py-2 text-xs font-semibold text-white shadow-lg shadow-blue-500/25 hover:shadow-blue-500/40 transition-all cursor-pointer"
               >
                 <Download className="h-3.5 w-3.5" />
-                Download .epub
+                Download .txt
               </motion.button>
             )}
           </div>
@@ -330,11 +340,13 @@ export default function Dashboard() {
 
           {isComplete && (
             <button
+              type="button"
               onClick={handleExport}
-              className="flex items-center gap-2 rounded-xl border border-blue-200/60 bg-white/50 backdrop-blur-md px-5 py-2.5 text-sm font-medium text-blue-700 hover:bg-blue-50/50 transition-all cursor-pointer"
+              className="relative z-10 flex items-center gap-2 rounded-xl border border-blue-200/60 bg-white/50 backdrop-blur-md px-5 py-2.5 text-sm font-medium text-blue-700 hover:bg-blue-50/50 active:bg-blue-100/60 transition-all"
+              style={{ WebkitTapHighlightColor: "transparent", touchAction: "manipulation" }}
             >
               <Download className="h-4 w-4" />
-              Export .epub
+              Export .txt
             </button>
           )}
 
