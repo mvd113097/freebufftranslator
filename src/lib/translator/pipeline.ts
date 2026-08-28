@@ -35,7 +35,7 @@ export interface PipelineOptions {
 }
 
 const DEFAULT_OPTIONS: PipelineOptions = {
-  chunkSize: 50000,
+  chunkSize: 25000,
   concurrency: 3,
   maxRetries: 3,
 };
