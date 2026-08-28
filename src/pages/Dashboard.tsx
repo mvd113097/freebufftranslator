@@ -126,15 +126,21 @@ export default function Dashboard() {
         return;
       }
 
-      stitchAndExportEpub(
-        completedChunks,
-        rawText,
-        "incomplete_english",
-      );
+      const stitched = completedChunks.join("\n\n");
+      const blob = new Blob([stitched], { type: "text/plain;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "incomplete_english.txt";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
     } catch (err) {
       console.error("Progress export error:", err);
+      alert("Download failed: " + (err instanceof Error ? err.message : String(err)));
     }
-  }, [chunkProgress, rawText]);
+  }, [chunkProgress]);
 
   const handleReset = useCallback(() => {
     pipelineRef.current?.abort();
