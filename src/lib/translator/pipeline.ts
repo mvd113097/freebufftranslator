@@ -52,7 +52,7 @@ export class TranslationPipeline {
 
   constructor() {
     this.options = { ...DEFAULT_OPTIONS };
-    this.rateLimiter = new RateLimiter(3, 2000);
+    this.rateLimiter = new RateLimiter(2, 4500);
   }
 
   setProgressCallback(cb: ProgressCallback) {
@@ -180,9 +180,19 @@ export class TranslationPipeline {
       return runNext();
     };
 
-    // Start N concurrent workers
-    for (let i = 0; i < Math.min(this.options.concurrency, chunks.length); i++) {
-      activePromises.push(runNext());
+    // Start N concurrent workers, staggered to avoid burst traffic
+    const workerCount = Math.min(this.options.concurrency, chunks.length);
+    for (let i = 0; i < workerCount; i++) {
+      // Stagger worker starts by 1.5s each to prevent burst
+      const delay = i * 1500;
+      activePromises.push(
+        new Promise<void>((resolve) => {
+          setTimeout(async () => {
+            await runNext();
+            resolve();
+          }, delay);
+        }),
+      );
     }
 
     await Promise.allSettled(activePromises);

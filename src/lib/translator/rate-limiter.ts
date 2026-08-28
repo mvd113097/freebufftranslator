@@ -1,6 +1,6 @@
 /**
  * Token-bucket rate limiter tracking per-key rolling windows.
- * Free tier: 2 RPM per key, with a 4500ms stagger between key switches.
+ * Gemini free tier: ~2 RPM per key with stagger between requests.
  */
 
 interface KeyBucket {
@@ -13,7 +13,7 @@ export class RateLimiter {
   private maxRPM: number;
   private staggerMs: number;
 
-  constructor(maxRPM = 3, staggerMs = 2000) {
+  constructor(maxRPM = 2, staggerMs = 4500) {
     this.maxRPM = maxRPM;
     this.staggerMs = staggerMs;
   }
@@ -33,8 +33,8 @@ export class RateLimiter {
     return bucket.timestamps.length < this.maxRPM;
   }
 
+  /** Wait until the key is available, then mark it used. */
   async waitForAvailableKey(keys: string[]): Promise<string> {
-    // Filter to valid keys
     const validKeys = keys.filter((k) => k.trim().length > 0);
     if (validKeys.length === 0) {
       throw new Error("No valid API keys provided");
@@ -49,7 +49,7 @@ export class RateLimiter {
           const now = Date.now();
           const timeSinceLastUse = now - bucket.lastUsed;
 
-          // If this key was used recently, apply stagger delay
+          // Apply stagger delay if this key was used recently
           if (bucket.lastUsed > 0 && timeSinceLastUse < this.staggerMs) {
             const waitTime = this.staggerMs - timeSinceLastUse;
             if (waitTime > 0) {
@@ -65,7 +65,7 @@ export class RateLimiter {
       }
 
       // All keys are rate-limited, wait and retry
-      await new Promise((resolve) => setTimeout(resolve, 1000));
+      await new Promise((resolve) => setTimeout(resolve, 2000));
     }
   }
 
