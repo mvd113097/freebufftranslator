@@ -168,7 +168,7 @@ export default function Dashboard() {
     setIsComplete(false);
   }, []);
 
-  // ─── Start translation ──────────────────────────────────────────
+  // ─── Start translation (auto-detects resume) ───────────────────
   const startTranslation = useCallback(async () => {
     if (!canStart) return;
 
@@ -176,18 +176,52 @@ export default function Dashboard() {
     setIsComplete(false);
     setFinalResults([]);
 
+    // Detect if we're resuming (some chunks already completed from IndexedDB)
+    const completedIds = chunkProgress
+      .filter((c) => c.status === "completed")
+      .map((c) => c.id);
+    const pendingIds = chunkProgress
+      .filter((c) => c.status === "pending")
+      .map((c) => c.id);
+    const isResuming = completedIds.length > 0 && pendingIds.length > 0;
+
+    // Save pre-completed translations for merging later
+    const preCompleted = new Map<number, string>();
+    if (isResuming) {
+      chunkProgress.forEach((c) => {
+        if (c.status === "completed") preCompleted.set(c.id, c.translatedText);
+      });
+    }
+
     const pipeline = new TranslationPipeline();
     pipelineRef.current = pipeline;
 
     // Track which chunks we've already persisted to avoid redundant writes
-    const persistedChunks = new Set<number>();
+    const persistedChunks = new Set<number>(isResuming ? completedIds : []);
 
     pipeline.setProgressCallback((p) => {
       setProgress(p);
-      const chunks = [...pipeline.getChunkProgress()];
-      setChunkProgress(chunks);
+      const liveChunks = [...pipeline.getChunkProgress()];
+
+      if (isResuming) {
+        // Merge: show pre-completed chunks as completed in the UI
+        const merged: ChunkProgress[] = liveChunks.map((lc) => {
+          if (preCompleted.has(lc.id)) {
+            return {
+              ...lc,
+              status: "completed" as const,
+              translatedText: preCompleted.get(lc.id) || "",
+            };
+          }
+          return lc;
+        });
+        setChunkProgress(merged);
+      } else {
+        setChunkProgress(liveChunks);
+      }
+
       // Persist newly completed chunks to IndexedDB immediately
-      chunks.forEach((c) => {
+      liveChunks.forEach((c) => {
         if (c.status === "completed" && !persistedChunks.has(c.id)) {
           persistedChunks.add(c.id);
           markChunkCompleted(c.id, c.translatedText);
@@ -196,7 +230,22 @@ export default function Dashboard() {
     });
 
     pipeline.setTokenCallback(() => {
-      setChunkProgress([...pipeline.getChunkProgress()]);
+      const liveChunks = [...pipeline.getChunkProgress()];
+      if (isResuming) {
+        const merged: ChunkProgress[] = liveChunks.map((lc) => {
+          if (preCompleted.has(lc.id)) {
+            return {
+              ...lc,
+              status: "completed" as const,
+              translatedText: preCompleted.get(lc.id) || "",
+            };
+          }
+          return lc;
+        });
+        setChunkProgress(merged);
+      } else {
+        setChunkProgress(liveChunks);
+      }
     });
 
     try {
@@ -205,9 +254,23 @@ export default function Dashboard() {
         concurrency,
         maxRetries: 3,
         model: selectedModel,
+        skipChunkIds: isResuming ? completedIds : undefined,
       });
 
-      setFinalResults(results);
+      // Merge final results: pre-completed + newly translated
+      if (isResuming) {
+        const allResults = new Array<string>(chunkProgress.length).fill("");
+        preCompleted.forEach((text, id) => {
+          allResults[id] = text;
+        });
+        pendingIds.forEach((id, i) => {
+          if (results[i]) allResults[id] = results[i];
+        });
+        setFinalResults(allResults);
+      } else {
+        setFinalResults(results);
+      }
+
       setChunkProgress([...pipeline.getChunkProgress()]);
       setIsComplete(true);
 
@@ -233,126 +296,7 @@ export default function Dashboard() {
     } finally {
       setIsRunning(false);
     }
-  }, [canStart, rawText, keys, chunkSize, concurrency, selectedModel, fileName]);
-
-  // ─── Resume translation (skip completed chunks) ─────────────────
-  const startResumeTranslation = useCallback(async () => {
-    if (!rawText || keys.length === 0) return;
-
-    setIsRunning(true);
-    setIsComplete(false);
-    setFinalResults([]);
-
-    // Find completed and pending chunk IDs
-    const completedIds = chunkProgress
-      .filter((c) => c.status === "completed")
-      .map((c) => c.id);
-    const pendingIds = chunkProgress
-      .filter((c) => c.status === "pending")
-      .map((c) => c.id);
-
-    if (pendingIds.length === 0) {
-      setIsRunning(false);
-      setIsComplete(true);
-      setFinalResults(chunkProgress.map((c) => c.translatedText));
-      return;
-    }
-
-    // Save pre-completed results
-    const preCompleted = new Map<number, string>();
-    chunkProgress.forEach((c) => {
-      if (c.status === "completed") preCompleted.set(c.id, c.translatedText);
-    });
-
-    const pipeline = new TranslationPipeline();
-    pipelineRef.current = pipeline;
-
-    // Track which new chunks we've persisted
-    const persistedChunks = new Set<number>(completedIds);
-
-    pipeline.setProgressCallback((p) => {
-      setProgress(p);
-      // Merge pipeline progress with stored completed chunks
-      const liveChunks = [...pipeline.getChunkProgress()];
-      const merged: ChunkProgress[] = liveChunks.map((lc) => {
-        if (lc.status === "pending" && preCompleted.has(lc.id)) {
-          return {
-            ...lc,
-            status: "completed" as const,
-            translatedText: preCompleted.get(lc.id) || "",
-          };
-        }
-        return lc;
-      });
-      setChunkProgress(merged);
-      // Persist newly completed chunks to IndexedDB
-      liveChunks.forEach((lc) => {
-        if (lc.status === "completed" && !persistedChunks.has(lc.id)) {
-          persistedChunks.add(lc.id);
-          markChunkCompleted(lc.id, lc.translatedText);
-        }
-      });
-    });
-
-    pipeline.setTokenCallback(() => {
-      const liveChunks = [...pipeline.getChunkProgress()];
-      const merged: ChunkProgress[] = liveChunks.map((lc) => {
-        if (lc.status === "pending" && preCompleted.has(lc.id)) {
-          return {
-            ...lc,
-            status: "completed" as const,
-            translatedText: preCompleted.get(lc.id) || "",
-          };
-        }
-        return lc;
-      });
-      setChunkProgress(merged);
-    });
-
-    try {
-      const results = await pipeline.start(rawText, keys, {
-        chunkSize,
-        concurrency,
-        maxRetries: 3,
-        model: selectedModel,
-        skipChunkIds: completedIds, // Skip already-translated chunks
-      });
-
-      // The pipeline returns results only for non-skipped chunks.
-      // Map them back to their correct positions.
-      const allResults = new Array<string>(chunkProgress.length).fill("");
-      preCompleted.forEach((text, id) => {
-        allResults[id] = text;
-      });
-      pendingIds.forEach((id, i) => {
-        if (results[i]) allResults[id] = results[i];
-      });
-
-      setFinalResults(allResults);
-      setIsComplete(true);
-
-      // Persist all completed
-      const session: StoredSession = {
-        id: "current",
-        fileName: fileName || "unknown.txt",
-        rawTextLength: rawText.length,
-        totalChunks: chunkProgress.length,
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-      };
-      const storedChunks: StoredChunk[] = allResults.map((text, i) => ({
-        id: i,
-        text: chunkProgress[i]?.originalText || "",
-        status: "completed",
-        translatedText: text,
-      }));
-      await saveSession(session, storedChunks);
-    } catch (err) {
-      console.error("Resume pipeline error:", err);
-    } finally {
-      setIsRunning(false);
-    }
-  }, [rawText, keys, chunkSize, concurrency, selectedModel, fileName, chunkProgress]);
+  }, [canStart, rawText, keys, chunkSize, concurrency, selectedModel, fileName, chunkProgress]);
 
   // ─── Stop ───────────────────────────────────────────────────────
   const stopTranslation = useCallback(() => {
