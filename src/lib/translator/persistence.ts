@@ -61,6 +61,7 @@ export interface StoredChunk {
 export interface StoredSession {
   id: string;
   fileName: string;
+  rawText: string;
   rawTextLength: number;
   totalChunks: number;
   createdAt: number;

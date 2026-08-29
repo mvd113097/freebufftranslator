@@ -76,7 +76,7 @@ export default function Dashboard() {
           setInterruptedRun(session);
           setPendingChunks(chunks);
           setFileName(session.fileName);
-          setRawText(chunks.map((c) => c.text).join("\n\n"));
+          setRawText(session.rawText || chunks.map((c) => c.text).join("\n\n"));
           setChunkProgress(
             chunks.map((c) => ({
               id: c.id,
@@ -151,6 +151,7 @@ export default function Dashboard() {
       const session: StoredSession = {
         id: "current",
         fileName: name,
+        rawText: content,
         rawTextLength: content.length,
         totalChunks: chunks.length,
         createdAt: Date.now(),
@@ -279,6 +280,7 @@ export default function Dashboard() {
       const session: StoredSession = {
         id: "current",
         fileName: fileName || "unknown.txt",
+        rawText,
         rawTextLength: rawText.length,
         totalChunks: chunks.length,
         createdAt: Date.now(),
