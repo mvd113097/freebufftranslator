@@ -9,6 +9,8 @@ import {
   RotateCcw,
   Zap,
   AlertCircle,
+  ChevronDown,
+  Settings2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { FileUploader } from "@/components/translator/FileUploader";
@@ -57,6 +59,7 @@ export default function Dashboard() {
   // Resume state
   const [interruptedRun, setInterruptedRun] = useState<StoredSession | null>(null);
   const [pendingChunks, setPendingChunks] = useState<StoredChunk[]>([]);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const pipelineRef = useRef<TranslationPipeline | null>(null);
 
@@ -404,19 +407,19 @@ export default function Dashboard() {
 
   // ─── Render ─────────────────────────────────────────────────────
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50/80 via-indigo-50/60 to-violet-50/40">
+    <div className="min-h-screen bg-stone-950">
       {/* Header */}
-      <header className="sticky top-0 z-30 border-b border-white/40 bg-white/60 backdrop-blur-xl">
+      <header className="sticky top-0 z-30 border-b border-stone-800 bg-stone-900/80 backdrop-blur-xl">
         <div className="mx-auto flex max-w-7xl items-center justify-between px-4 sm:px-6 py-3">
           <div className="flex items-center gap-2.5">
-            <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-gradient-to-br from-blue-500 to-indigo-600 shadow-md">
-              <BookOpen className="h-4 w-4 text-white" />
+            <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-gradient-to-br from-amber-500 to-amber-600 shadow-md shadow-amber-500/20">
+              <BookOpen className="h-4 w-4 text-stone-950" />
             </div>
             <div>
-              <h1 className="text-sm font-bold text-gray-900 tracking-tight">
+              <h1 className="text-sm font-bold text-stone-100 tracking-tight">
                 Novel Translator
               </h1>
-              <p className="text-[10px] text-gray-500">Chinese → English via OpenRouter</p>
+              <p className="text-[10px] text-stone-400">Chinese → English via OpenRouter</p>
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -425,7 +428,7 @@ export default function Dashboard() {
                 initial={{ opacity: 0, scale: 0.9 }}
                 animate={{ opacity: 1, scale: 1 }}
                 onClick={handleExport}
-                className="flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-blue-500 to-indigo-600 px-4 py-2 text-xs font-semibold text-white shadow-lg shadow-blue-500/25 hover:shadow-blue-500/40 transition-all cursor-pointer"
+                className="flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-amber-500 to-amber-600 px-4 py-2 text-xs font-semibold text-stone-950 shadow-lg shadow-amber-500/25 hover:shadow-amber-500/40 transition-all cursor-pointer"
               >
                 <Download className="h-3.5 w-3.5" />
                 Download .txt
@@ -445,14 +448,14 @@ export default function Dashboard() {
               exit={{ opacity: 0, y: -12, height: 0 }}
               className="overflow-hidden"
             >
-              <div className="rounded-2xl border border-amber-200/60 bg-amber-50/50 backdrop-blur-xl p-4 shadow-sm">
+              <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 backdrop-blur-xl p-4 shadow-sm">
                 <div className="flex items-start gap-3">
-                  <AlertCircle className="h-5 w-5 text-amber-600 mt-0.5 shrink-0" />
+                  <AlertCircle className="h-5 w-5 text-amber-400 mt-0.5 shrink-0" />
                   <div className="flex-1">
-                    <h3 className="text-sm font-semibold text-amber-800">
+                    <h3 className="text-sm font-semibold text-amber-300">
                       Interrupted run detected
                     </h3>
-                    <p className="text-xs text-amber-700 mt-1">
+                    <p className="text-xs text-amber-200/70 mt-1">
                       <strong>{interruptedRun.fileName}</strong> — {completedCount} of{" "}
                       {interruptedRun.totalChunks} chunks completed.{" "}
                       {pendingChunks.filter((c) => c.status === "pending").length} chunks remaining.
@@ -460,14 +463,14 @@ export default function Dashboard() {
                     <div className="flex items-center gap-3 mt-3">
                       <button
                         onClick={handleResume}
-                        className="flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 px-4 py-2 text-xs font-semibold text-white shadow-md hover:shadow-lg transition-all cursor-pointer"
+                        className="flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 px-4 py-2 text-xs font-semibold text-stone-950 shadow-md hover:shadow-lg transition-all cursor-pointer"
                       >
                         <Play className="h-3.5 w-3.5" />
                         Resume Translation
                       </button>
                       <button
                         onClick={handleReset}
-                        className="flex items-center gap-1.5 rounded-xl border border-gray-200/60 bg-white/50 px-4 py-2 text-xs font-medium text-gray-600 hover:bg-gray-50/50 transition-all cursor-pointer"
+                        className="flex items-center gap-1.5 rounded-xl border border-stone-700 bg-stone-800 px-4 py-2 text-xs font-medium text-stone-300 hover:bg-stone-700 transition-all cursor-pointer"
                       >
                         <RotateCcw className="h-3.5 w-3.5" />
                         Start Over
@@ -490,11 +493,11 @@ export default function Dashboard() {
           >
             <FileUploader onFileContent={handleFileContent} disabled={isRunning} />
             {rawText.length > 0 && (
-              <div className="flex items-center gap-4 text-[11px] text-gray-500 px-1">
+              <div className="flex items-center gap-4 text-[11px] text-stone-400 px-1">
                 <span>📄 {rawText.length.toLocaleString()} characters</span>
                 <span>📦 ~{Math.ceil(rawText.length / chunkSize)} chunks</span>
                 {isComplete && (
-                  <span className="text-green-600 font-medium">✅ Translation complete</span>
+                  <span className="text-amber-400 font-medium">✅ Translation complete</span>
                 )}
               </div>
             )}
@@ -504,7 +507,7 @@ export default function Dashboard() {
             initial={{ opacity: 0, y: 12 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 0.1 }}
-            className="rounded-2xl border border-white/50 bg-white/40 backdrop-blur-xl p-4 shadow-sm"
+            className="rounded-2xl border border-stone-700/50 bg-stone-900/80 backdrop-blur-xl p-4 shadow-sm"
           >
             <KeyManager keys={keys} onKeysChange={setKeys} />
           </motion.div>
@@ -519,13 +522,13 @@ export default function Dashboard() {
             className="space-y-4"
           >
             {/* Model Selector */}
-            <div className="rounded-2xl border border-white/50 bg-white/40 backdrop-blur-xl p-4 shadow-sm">
-              <label className="text-xs font-semibold text-gray-800 block mb-2">Model</label>
+            <div className="rounded-2xl border border-stone-700/50 bg-stone-900/80 backdrop-blur-xl p-4 shadow-sm">
+              <label className="text-xs font-semibold text-stone-200 block mb-2">Model</label>
               <select
                 value={selectedModel}
                 onChange={(e) => setSelectedModel(e.target.value)}
                 disabled={isRunning}
-                className="w-full rounded-xl border border-gray-200/60 bg-white/40 backdrop-blur-md px-3 py-2 text-xs text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-400/30 disabled:opacity-50 cursor-pointer"
+                className="w-full rounded-xl border border-stone-700 bg-stone-800 px-3 py-2 text-xs text-stone-200 focus:outline-none focus:ring-2 focus:ring-amber-400/30 disabled:opacity-50 cursor-pointer"
               >
                 {MODEL_OPTIONS.map((m) => (
                   <option key={m.value} value={m.value}>
@@ -535,20 +538,52 @@ export default function Dashboard() {
               </select>
             </div>
 
-            <SettingsPanel
-              chunkSize={chunkSize}
-              onChunkSizeChange={setChunkSize}
-              concurrency={concurrency}
-              onConcurrencyChange={setConcurrency}
-              disabled={isRunning}
-            />
+            {/* Collapsible Pipeline Settings */}
+            <div className="rounded-2xl border border-stone-700/50 bg-stone-900/80 backdrop-blur-xl shadow-sm overflow-hidden">
+              <button
+                onClick={() => setSettingsOpen(!settingsOpen)}
+                className="w-full flex items-center justify-between p-4 text-left cursor-pointer"
+              >
+                <div className="flex items-center gap-2">
+                  <Settings2 className="h-4 w-4 text-amber-400" />
+                  <span className="text-sm font-semibold text-stone-200">Pipeline Settings</span>
+                </div>
+                <ChevronDown
+                  className={cn(
+                    "h-4 w-4 text-stone-400 transition-transform duration-200",
+                    settingsOpen && "rotate-180"
+                  )}
+                />
+              </button>
+              <AnimatePresence initial={false}>
+                {settingsOpen && (
+                  <motion.div
+                    initial={{ height: 0, opacity: 0 }}
+                    animate={{ height: "auto", opacity: 1 }}
+                    exit={{ height: 0, opacity: 0 }}
+                    transition={{ duration: 0.2, ease: "easeInOut" }}
+                    className="overflow-hidden"
+                  >
+                    <div className="px-4 pb-4 pt-0">
+                      <SettingsPanel
+                        chunkSize={chunkSize}
+                        onChunkSizeChange={setChunkSize}
+                        concurrency={concurrency}
+                        onConcurrencyChange={setConcurrency}
+                        disabled={isRunning}
+                      />
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
           </motion.div>
 
           <motion.div
             initial={{ opacity: 0, y: 12 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 0.2 }}
-            className="lg:col-span-2 rounded-2xl border border-white/50 bg-white/40 backdrop-blur-xl p-4 shadow-sm"
+            className="lg:col-span-2 rounded-2xl border border-stone-700/50 bg-stone-900/80 backdrop-blur-xl p-4 shadow-sm"
           >
             <ProgressPanel
               progress={progress}
@@ -565,8 +600,7 @@ export default function Dashboard() {
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: 0.25 }}
           className="flex items-center gap-3 flex-wrap"
-        >
-          {!isRunning ? (
+        >              {!isRunning ? (
             <>
               <button
                 onClick={startTranslation}
@@ -574,8 +608,8 @@ export default function Dashboard() {
                 className={cn(
                   "flex items-center gap-2 rounded-xl px-6 py-2.5 text-sm font-semibold transition-all shadow-lg cursor-pointer",
                   canStart
-                    ? "bg-gradient-to-r from-blue-500 to-indigo-600 text-white shadow-blue-500/25 hover:shadow-blue-500/40 hover:scale-[1.02] active:scale-[0.98]"
-                    : "bg-gray-200/80 text-gray-400 cursor-not-allowed shadow-none"
+                    ? "bg-gradient-to-r from-amber-500 to-amber-600 text-stone-950 shadow-amber-500/25 hover:shadow-amber-500/40 hover:scale-[1.02] active:scale-[0.98]"
+                    : "bg-stone-800 text-stone-500 cursor-not-allowed shadow-none"
                 )}
               >
                 <Play className="h-4 w-4" />
@@ -596,7 +630,7 @@ export default function Dashboard() {
                       alert(`❌ Key test failed: ${msg.slice(0, 200)}`);
                     }
                   }}
-                  className="flex items-center gap-2 rounded-xl border border-gray-200/60 bg-white/50 backdrop-blur-md px-4 py-2.5 text-xs font-medium text-gray-600 hover:bg-gray-50/50 transition-all cursor-pointer"
+                  className="flex items-center gap-2 rounded-xl border border-stone-700 bg-stone-800 px-4 py-2.5 text-xs font-medium text-stone-300 hover:bg-stone-700 transition-all cursor-pointer"
                 >
                   <Zap className="h-3.5 w-3.5" />
                   Test Key
@@ -617,7 +651,7 @@ export default function Dashboard() {
             <button
               type="button"
               onClick={handleExport}
-              className="relative z-10 flex items-center gap-2 rounded-xl border border-blue-200/60 bg-white/50 backdrop-blur-md px-5 py-2.5 text-sm font-medium text-blue-700 hover:bg-blue-50/50 active:bg-blue-100/60 transition-all"
+              className="relative z-10 flex items-center gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 backdrop-blur-md px-5 py-2.5 text-sm font-medium text-amber-300 hover:bg-amber-500/20 active:bg-amber-500/30 transition-all"
               style={{ WebkitTapHighlightColor: "transparent", touchAction: "manipulation" }}
             >
               <Download className="h-4 w-4" />
@@ -629,7 +663,7 @@ export default function Dashboard() {
             <button
               type="button"
               onClick={handleDownloadProgress}
-              className="relative z-10 flex items-center gap-2 rounded-xl border border-amber-200/60 bg-amber-50/50 backdrop-blur-md px-4 py-2.5 text-sm font-medium text-amber-700 hover:bg-amber-100/50 active:bg-amber-200/60 transition-all"
+              className="relative z-10 flex items-center gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 backdrop-blur-md px-4 py-2.5 text-sm font-medium text-amber-300 hover:bg-amber-500/20 active:bg-amber-500/30 transition-all"
               style={{ WebkitTapHighlightColor: "transparent", touchAction: "manipulation" }}
             >
               <Download className="h-4 w-4" />
@@ -640,7 +674,7 @@ export default function Dashboard() {
           {(isRunning || isComplete || interruptedRun) && (
             <button
               onClick={handleReset}
-              className="flex items-center gap-2 rounded-xl border border-gray-200/60 bg-white/50 backdrop-blur-md px-4 py-2.5 text-sm font-medium text-gray-600 hover:bg-gray-50/50 transition-all cursor-pointer"
+              className="flex items-center gap-2 rounded-xl border border-stone-700 bg-stone-800 px-4 py-2.5 text-sm font-medium text-stone-300 hover:bg-stone-700 transition-all cursor-pointer"
             >
               <RotateCcw className="h-3.5 w-3.5" />
               Reset
@@ -648,7 +682,7 @@ export default function Dashboard() {
           )}
 
           {!canStart && !isRunning && !interruptedRun && (
-            <span className="text-xs text-gray-400 flex items-center gap-1">
+            <span className="text-xs text-stone-500 flex items-center gap-1">
               <Sparkles className="h-3 w-3" />
               {rawText.length === 0
                 ? "Upload a .txt file to begin"

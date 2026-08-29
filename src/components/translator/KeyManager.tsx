@@ -63,17 +63,17 @@ export function KeyManager({ keys, onKeysChange }: KeyManagerProps) {
   return (
     <div className="space-y-3">
       <div className="flex items-center gap-2 mb-2">
-        <KeyRound className="h-4 w-4 text-amber-500" />
-        <h3 className="text-sm font-semibold text-gray-800">API Keys</h3>
+        <KeyRound className="h-4 w-4 text-amber-400" />
+        <h3 className="text-sm font-semibold text-stone-200">API Keys</h3>
         {keys.length > 0 && (
-          <span className="inline-flex items-center rounded-full bg-green-100/80 backdrop-blur-sm px-2 py-0.5 text-xs font-medium text-green-700">
+          <span className="inline-flex items-center rounded-full bg-amber-500/15 px-2 py-0.5 text-xs font-medium text-amber-400">
             {keys.length} key{keys.length !== 1 ? "s" : ""} loaded
           </span>
         )}
       </div>
 
       {keys.length === 0 && (
-        <div className="flex items-start gap-2 rounded-lg bg-blue-50/60 backdrop-blur-sm border border-blue-200/50 px-3 py-2.5 text-xs text-blue-700">
+        <div className="flex items-start gap-2 rounded-lg bg-amber-500/10 border border-amber-500/20 px-3 py-2.5 text-xs text-amber-300">
           <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
           <span>
             Add your OpenRouter API key(s). Get one free at{" "}
@@ -95,20 +95,20 @@ export function KeyManager({ keys, onKeysChange }: KeyManagerProps) {
           {keys.map((key, i) => (
             <div
               key={i}
-              className="flex items-center gap-2 rounded-lg border border-gray-200/60 bg-white/40 backdrop-blur-sm px-3 py-2"
+              className="flex items-center gap-2 rounded-lg border border-stone-700 bg-stone-800 px-3 py-2"
             >
-              <span className="flex-1 font-mono text-xs text-gray-600 truncate">
+              <span className="flex-1 font-mono text-xs text-stone-400 truncate">
                 {showKeys ? key : maskKey(key)}
               </span>
               <button
                 onClick={() => setShowKeys(!showKeys)}
-                className="p-1 rounded-md hover:bg-gray-100/80 text-gray-400 hover:text-gray-600 transition-colors cursor-pointer"
+                className="p-1 rounded-md hover:bg-stone-700 text-stone-500 hover:text-stone-300 transition-colors cursor-pointer"
               >
                 {showKeys ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
               </button>
               <button
                 onClick={() => removeKey(i)}
-                className="p-1 rounded-md hover:bg-red-50 text-gray-400 hover:text-red-500 transition-colors cursor-pointer"
+                className="p-1 rounded-md hover:bg-red-500/10 text-stone-500 hover:text-red-400 transition-colors cursor-pointer"
               >
                 <Trash2 className="h-3.5 w-3.5" />
               </button>
@@ -124,9 +124,9 @@ export function KeyManager({ keys, onKeysChange }: KeyManagerProps) {
           onChange={(e) => setInputValue(e.target.value)}
           placeholder={"Paste OpenRouter API key(s) here, one per line\nsk-or-v1-xxxxxxxxxxxxxxxx\nsk-or-v1-yyyyyyyyyyyyyyyy"}
           className={cn(
-            "w-full rounded-xl border border-gray-200/60 bg-white/40 backdrop-blur-md px-3 py-2.5",
-            "text-xs font-mono text-gray-700 placeholder:text-gray-400",
-            "focus:outline-none focus:ring-2 focus:ring-blue-400/30 focus:border-blue-300",
+            "w-full rounded-xl border border-stone-700 bg-stone-800 px-3 py-2.5",
+            "text-xs font-mono text-stone-200 placeholder:text-stone-500",
+            "focus:outline-none focus:ring-2 focus:ring-amber-400/30 focus:border-amber-500/50",
             "resize-none transition-all",
             "min-h-[60px]",
           )}
@@ -138,8 +138,8 @@ export function KeyManager({ keys, onKeysChange }: KeyManagerProps) {
           className={cn(
             "flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition-all cursor-pointer",
             inputValue.trim()
-              ? "bg-blue-500/90 backdrop-blur-sm text-white hover:bg-blue-600 shadow-sm"
-              : "bg-gray-100/80 text-gray-400 cursor-not-allowed",
+              ? "bg-amber-500 text-stone-950 hover:bg-amber-400 shadow-sm"
+              : "bg-stone-800 text-stone-500 cursor-not-allowed",
           )}
         >
           <Plus className="h-3.5 w-3.5" />
