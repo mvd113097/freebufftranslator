@@ -179,9 +179,20 @@ export default function Dashboard() {
     const pipeline = new TranslationPipeline();
     pipelineRef.current = pipeline;
 
+    // Track which chunks we've already persisted to avoid redundant writes
+    const persistedChunks = new Set<number>();
+
     pipeline.setProgressCallback((p) => {
       setProgress(p);
-      setChunkProgress([...pipeline.getChunkProgress()]);
+      const chunks = [...pipeline.getChunkProgress()];
+      setChunkProgress(chunks);
+      // Persist newly completed chunks to IndexedDB immediately
+      chunks.forEach((c) => {
+        if (c.status === "completed" && !persistedChunks.has(c.id)) {
+          persistedChunks.add(c.id);
+          markChunkCompleted(c.id, c.translatedText);
+        }
+      });
     });
 
     pipeline.setTokenCallback(() => {
@@ -232,7 +243,10 @@ export default function Dashboard() {
     setIsComplete(false);
     setFinalResults([]);
 
-    // Find pending chunk IDs to translate
+    // Find completed and pending chunk IDs
+    const completedIds = chunkProgress
+      .filter((c) => c.status === "completed")
+      .map((c) => c.id);
     const pendingIds = chunkProgress
       .filter((c) => c.status === "pending")
       .map((c) => c.id);
@@ -253,6 +267,9 @@ export default function Dashboard() {
     const pipeline = new TranslationPipeline();
     pipelineRef.current = pipeline;
 
+    // Track which new chunks we've persisted
+    const persistedChunks = new Set<number>(completedIds);
+
     pipeline.setProgressCallback((p) => {
       setProgress(p);
       // Merge pipeline progress with stored completed chunks
@@ -268,6 +285,13 @@ export default function Dashboard() {
         return lc;
       });
       setChunkProgress(merged);
+      // Persist newly completed chunks to IndexedDB
+      liveChunks.forEach((lc) => {
+        if (lc.status === "completed" && !persistedChunks.has(lc.id)) {
+          persistedChunks.add(lc.id);
+          markChunkCompleted(lc.id, lc.translatedText);
+        }
+      });
     });
 
     pipeline.setTokenCallback(() => {
@@ -291,7 +315,7 @@ export default function Dashboard() {
         concurrency,
         maxRetries: 3,
         model: selectedModel,
-        skipChunkIds: pendingIds,
+        skipChunkIds: completedIds, // Skip already-translated chunks
       });
 
       // The pipeline returns results only for non-skipped chunks.
