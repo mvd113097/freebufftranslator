@@ -9,6 +9,13 @@ export interface TextChunk {
  * Split raw text into paragraph-aware chunks.
  * Tries to break at paragraph boundaries (\n\n) to preserve context.
  */
+/**
+ * Convenience wrapper that returns just the text strings.
+ */
+export function chunkTexts(rawText: string, targetChars: number): string[] {
+  return chunkText(rawText, targetChars).map((c) => c.text);
+}
+
 export function chunkText(
   rawText: string,
   targetChars: number,

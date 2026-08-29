@@ -33,6 +33,8 @@ export interface PipelineOptions {
   concurrency: number;
   maxRetries: number;
   model: string;
+  /** Chunk IDs to skip (already completed in a prior session). */
+  skipChunkIds?: number[];
 }
 
 const DEFAULT_OPTIONS: PipelineOptions = {
@@ -104,9 +106,15 @@ export class TranslationPipeline {
     this.reportProgress();
 
     const results: string[] = new Array(chunks.length).fill("");
+    const skipSet = new Set(this.options.skipChunkIds ?? []);
 
     const processChunk = async (chunk: TextChunk) => {
       const progress = this.chunkProgress[chunk.id];
+      if (skipSet.has(chunk.id)) {
+        progress.status = "completed";
+        progress.translatedText = "[skipped]";
+        return;
+      }
       progress.status = "translating";
       this.reportProgress();
 
@@ -184,14 +192,15 @@ export class TranslationPipeline {
       }
     };
 
-    // Process chunks
+    // Process chunks (skip already-completed ones)
+    const chunksToProcess = chunks.filter((c) => !skipSet.has(c.id));
     if (this.options.concurrency <= 1) {
-      for (const chunk of chunks) {
+      for (const chunk of chunksToProcess) {
         if (this.abortController?.signal.aborted) break;
         await processChunk(chunk);
       }
     } else {
-      const pendingChunks = [...chunks];
+      const pendingChunks = [...chunksToProcess];
       const activePromises: Promise<void>[] = [];
 
       const runNext = async (): Promise<void> => {
@@ -202,7 +211,7 @@ export class TranslationPipeline {
         return runNext();
       };
 
-      const workerCount = Math.min(this.options.concurrency, chunks.length);
+      const workerCount = Math.min(this.options.concurrency, chunksToProcess.length);
       for (let i = 0; i < workerCount; i++) {
         const delay = i * 2000; // 2s stagger between workers
         activePromises.push(
@@ -218,6 +227,10 @@ export class TranslationPipeline {
       await Promise.allSettled(activePromises);
     }
 
+    // If there were skipped chunks, return only the newly-translated results
+    if (skipSet.size > 0) {
+      return chunksToProcess.map((c) => results[c.id]);
+    }
     return results;
   }
 
