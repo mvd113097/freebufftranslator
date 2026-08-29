@@ -190,7 +190,9 @@ export default function Dashboard() {
     const preCompleted = new Map<number, string>();
     if (isResuming) {
       chunkProgress.forEach((c) => {
-        if (c.status === "completed") preCompleted.set(c.id, c.translatedText);
+        if (c.status === "completed" && c.translatedText) {
+          preCompleted.set(c.id, c.translatedText);
+        }
       });
     }
 
@@ -258,38 +260,52 @@ export default function Dashboard() {
         skipChunkIds: isResuming ? completedIds : undefined,
       });
 
-      // Merge final results: pre-completed + newly translated
+      // ─── FIX: Merge pipeline results INTO existing chunkProgress ───
+      // Don't replace chunkProgress — the pipeline sets "[skipped]" for
+      // completed chunks which would erase the real translations.
       if (isResuming) {
-        const allResults = new Array<string>(chunkProgress.length).fill("");
-        preCompleted.forEach((text, id) => {
-          allResults[id] = text;
-        });
-        pendingIds.forEach((id, i) => {
-          if (results[i]) allResults[id] = results[i];
-        });
-        setFinalResults(allResults);
+        const pipelineChunks = pipeline.getChunkProgress();
+        setChunkProgress((prev) =>
+          prev.map((c) => {
+            const pc = pipelineChunks.find((p) => p.id === c.id);
+            if (pc && pc.status === "completed" && c.status !== "completed") {
+              // This chunk was newly translated by the pipeline
+              return { ...c, status: "completed", translatedText: pc.translatedText };
+            }
+            // Keep the existing chunk (pre-completed or pending+failed)
+            return c;
+          })
+        );
       } else {
-        setFinalResults(results);
+        setChunkProgress([...pipeline.getChunkProgress()]);
       }
 
-      setChunkProgress([...pipeline.getChunkProgress()]);
       setIsComplete(true);
 
-      // Persist completed chunks
-      const chunks = pipeline.getChunkProgress();
+      // Persist all completed chunks to IndexedDB
+      const allChunks = isResuming
+        ? chunkProgress.map((c) => {
+            const pc = pipeline.getChunkProgress().find((p) => p.id === c.id);
+            if (pc && pc.status === "completed" && c.status !== "completed") {
+              return { ...c, status: "completed" as const, translatedText: pc.translatedText };
+            }
+            return c;
+          })
+        : pipeline.getChunkProgress();
+
       const session: StoredSession = {
         id: "current",
         fileName: fileName || "unknown.txt",
         rawText,
         rawTextLength: rawText.length,
-        totalChunks: chunks.length,
+        totalChunks: allChunks.length,
         createdAt: Date.now(),
         updatedAt: Date.now(),
       };
-      const storedChunks: StoredChunk[] = chunks.map((c) => ({
+      const storedChunks: StoredChunk[] = allChunks.map((c) => ({
         id: c.id,
         text: c.originalText,
-        status: "completed",
+        status: c.status === "completed" ? "completed" : ("pending" as const),
         translatedText: c.translatedText,
       }));
       await saveSession(session, storedChunks);
@@ -306,10 +322,20 @@ export default function Dashboard() {
     setIsRunning(false);
   }, []);
 
-  // ─── Export (final) ─────────────────────────────────────────────
+  // ─── Export (final) — reads from chunkProgress as source of truth ─
   const handleExport = useCallback(async () => {
     try {
-      const translated = finalResults.filter((c) => c.length > 0);
+      // Build ordered translations directly from chunkProgress (always up-to-date)
+      const translated = chunkProgress
+        .filter(
+          (c) =>
+            c.status === "completed" &&
+            c.translatedText.length > 0 &&
+            c.translatedText !== "[skipped]"
+        )
+        .sort((a, b) => a.id - b.id)
+        .map((c) => c.translatedText);
+
       if (translated.length === 0) {
         alert("No translated content to export.");
         return;
@@ -331,7 +357,7 @@ export default function Dashboard() {
       console.error("Export error:", err);
       alert("Download failed: " + (err instanceof Error ? err.message : String(err)));
     }
-  }, [finalResults, fileName]);
+  }, [chunkProgress, fileName]);
 
   // ─── Download progress (mid-translation) ────────────────────────
   const handleDownloadProgress = useCallback(() => {
@@ -394,7 +420,7 @@ export default function Dashboard() {
             </div>
           </div>
           <div className="flex items-center gap-2">
-            {isComplete && finalResults.length > 0 && (
+            {isComplete && (
               <motion.button
                 initial={{ opacity: 0, scale: 0.9 }}
                 animate={{ opacity: 1, scale: 1 }}
