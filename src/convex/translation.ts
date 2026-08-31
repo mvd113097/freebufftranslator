@@ -1,6 +1,6 @@
 import { v } from "convex/values";
 import { mutation, query, action, internalQuery, internalMutation } from "./_generated/server";
-import { api } from "./_generated/api";
+import { api, internal } from "./_generated/api";
 
 const SYSTEM_PROMPT = `You are an expert human literary translator specializing in Chinese web novels (Xianxia, Wuxia, and Sci-Fi). Translate the following Chinese prose into highly fluent, immersive English fiction. Do not use stiff or literal machine-like phrasing. Translate cultivation tiers, localized idioms, and online slang into contextually accurate Western fantasy equivalents while maintaining rigid character name consistency.
 
@@ -104,7 +104,7 @@ export const internalPatchChunk = internalMutation({
     retries: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
-    const patch: Record<string, any> = { status: args.status };
+    const patch: Record<string, unknown> = { status: args.status };
     if (args.translatedText !== undefined) patch.translatedText = args.translatedText;
     if (args.error !== undefined) patch.error = args.error;
     if (args.retries !== undefined) patch.retries = args.retries;
@@ -120,7 +120,7 @@ export const internalPatchJob = internalMutation({
     failedCount: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
-    const patch: Record<string, any> = { updatedAt: Date.now() };
+    const patch: Record<string, unknown> = { updatedAt: Date.now() };
     if (args.status !== undefined) patch.status = args.status;
     if (args.completedCount !== undefined) patch.completedCount = args.completedCount;
     if (args.failedCount !== undefined) patch.failedCount = args.failedCount;
@@ -130,7 +130,7 @@ export const internalPatchJob = internalMutation({
 
 // ─── Public Mutations ────────────────────────────────────────────
 
-/** Start a new translation job. Chunks text and stores everything. */
+/** Start a new translation job. Chunks text and stores everything, then kicks off server-side processing. */
 export const startTranslation = mutation({
   args: {
     fileName: v.string(),
@@ -138,6 +138,7 @@ export const startTranslation = mutation({
     model: v.string(),
     chunkSize: v.number(),
     concurrency: v.number(),
+    apiKeys: v.array(v.string()),
   },
   handler: async (ctx, args) => {
     const now = Date.now();
@@ -152,6 +153,7 @@ export const startTranslation = mutation({
       model: args.model,
       chunkSize: args.chunkSize,
       concurrency: args.concurrency,
+      apiKeys: args.apiKeys,
       completedCount: 0,
       failedCount: 0,
       createdAt: now,
@@ -178,6 +180,26 @@ export const abortJob = mutation({
   args: { jobId: v.id("translationJobs") },
   handler: async (ctx, args) => {
     await ctx.db.patch(args.jobId, { status: "failed", updatedAt: Date.now() });
+  },
+});
+
+/** Resume a completed/failed job — reset failed chunks back to pending. */
+export const resumeJob = mutation({
+  args: { jobId: v.id("translationJobs") },
+  handler: async (ctx, args) => {
+    const chunks = await ctx.db
+      .query("translationChunks")
+      .withIndex("by_jobId", (q) => q.eq("jobId", args.jobId))
+      .collect();
+
+    // Reset only failed chunks; keep completed ones
+    for (const chunk of chunks) {
+      if (chunk.status === "failed") {
+        await ctx.db.patch(chunk._id, { status: "pending", error: undefined, retries: 0 });
+      }
+    }
+
+    await ctx.db.patch(args.jobId, { status: "processing", failedCount: 0, updatedAt: Date.now() });
   },
 });
 
@@ -269,33 +291,37 @@ export const getTranslatedChunks = query({
 
 // ─── Public Actions (Node runtime, server-side) ──────────────────
 
-/** Process the next batch of pending chunks. Called repeatedly by the frontend. */
+/** Process the next batch of pending chunks. Called repeatedly by the frontend or self-chaining. */
 export const processNextBatch = action({
   args: {
     jobId: v.id("translationJobs"),
-    apiKeys: v.array(v.string()),
     batchSize: v.number(),
   },
   handler: async (ctx, args) => {
     // Check job is still active
-    const job = await ctx.runQuery(api.translation.internalGetJob, { jobId: args.jobId });
+    const job = await ctx.runQuery(internal.translation.internalGetJob, { jobId: args.jobId });
     if (!job || job.status !== "processing") {
       return { done: true, processed: 0, total: 0 };
     }
 
+    const apiKeys = job.apiKeys;
+    if (!apiKeys || apiKeys.length === 0) {
+      return { done: false, processed: 0, total: 0, error: "No API keys" };
+    }
+
     // Get pending chunks
-    const pending = await ctx.runQuery(api.translation.internalGetPendingChunks, {
+    const pending = await ctx.runQuery(internal.translation.internalGetPendingChunks, {
       jobId: args.jobId,
       limit: args.batchSize,
     });
 
     if (pending.length === 0) {
       // Check if all done
-      const counts: { total: number; completed: number; failed: number } = await ctx.runQuery(api.translation.internalCountChunks, { jobId: args.jobId });
+      const counts: { total: number; completed: number; failed: number } = await ctx.runQuery(internal.translation.internalCountChunks, { jobId: args.jobId });
       const isAllDone: boolean = counts.completed + counts.failed >= counts.total;
 
       if (isAllDone) {
-        await ctx.runMutation(api.translation.internalPatchJob, {
+        await ctx.runMutation(internal.translation.internalPatchJob, {
           jobId: args.jobId,
           status: "completed",
           completedCount: counts.completed,
@@ -317,11 +343,11 @@ export const processNextBatch = action({
     let keyIndex = 0;
 
     for (const chunk of pending) {
-      const apiKey = args.apiKeys[keyIndex % args.apiKeys.length];
+      const apiKey = apiKeys[keyIndex % apiKeys.length];
       keyIndex++;
 
       // Mark as processing
-      await ctx.runMutation(api.translation.internalPatchChunk, {
+      await ctx.runMutation(internal.translation.internalPatchChunk, {
         chunkId: chunk._id,
         status: "processing",
       });
@@ -343,7 +369,7 @@ export const processNextBatch = action({
             job.model
           );
 
-          await ctx.runMutation(api.translation.internalPatchChunk, {
+          await ctx.runMutation(internal.translation.internalPatchChunk, {
             chunkId: chunk._id,
             translatedText: translated,
             status: "completed",
@@ -371,7 +397,7 @@ export const processNextBatch = action({
       }
 
       if (!success) {
-        await ctx.runMutation(api.translation.internalPatchChunk, {
+        await ctx.runMutation(internal.translation.internalPatchChunk, {
           chunkId: chunk._id,
           status: "failed",
           error: lastError.slice(0, 500),
@@ -381,10 +407,10 @@ export const processNextBatch = action({
     }
 
     // Update job progress
-    const counts: { total: number; completed: number; failed: number } = await ctx.runQuery(api.translation.internalCountChunks, { jobId: args.jobId });
+    const counts: { total: number; completed: number; failed: number } = await ctx.runQuery(internal.translation.internalCountChunks, { jobId: args.jobId });
     const isAllDone: boolean = counts.completed + counts.failed >= counts.total;
 
-    await ctx.runMutation(api.translation.internalPatchJob, {
+    await ctx.runMutation(internal.translation.internalPatchJob, {
       jobId: args.jobId,
       status: isAllDone ? "completed" : "processing",
       completedCount: counts.completed,
@@ -398,6 +424,39 @@ export const processNextBatch = action({
       failed: counts.failed,
       total: counts.total,
     };
+  },
+});
+
+/**
+ * Self-chaining action: processes a batch, then schedules the next batch
+ * after a delay if there are still pending chunks. This allows the
+ * translation pipeline to continue running on Convex servers even after
+ * the browser is closed.
+ */
+export const processJob = action({
+  args: {
+    jobId: v.id("translationJobs"),
+    batchSize: v.number(),
+  },
+  handler: async (
+    ctx,
+    args,
+  ): Promise<{ done: boolean; processed: number; completed?: number; failed?: number; total?: number; error?: string }> => {
+    // Process the current batch
+    const result = await ctx.runAction(api.translation.processNextBatch, {
+      jobId: args.jobId,
+      batchSize: args.batchSize,
+    });
+
+    if (!result.done) {
+      // Schedule next batch after 2 seconds (enough for rate limiting)
+      await ctx.scheduler.runAfter(2000, api.translation.processJob, {
+        jobId: args.jobId,
+        batchSize: args.batchSize,
+      });
+    }
+
+    return result;
   },
 });
 

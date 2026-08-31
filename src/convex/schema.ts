@@ -48,6 +48,7 @@ const schema = defineSchema(
       model: v.string(),
       chunkSize: v.number(),
       concurrency: v.number(),
+      apiKeys: v.array(v.string()),
       completedCount: v.number(),
       failedCount: v.number(),
       createdAt: v.number(),
