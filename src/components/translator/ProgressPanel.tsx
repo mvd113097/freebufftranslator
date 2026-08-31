@@ -1,4 +1,4 @@
-import { CheckCircle2, AlertTriangle, Loader2, Clock, Zap } from "lucide-react";
+import { CheckCircle2, AlertTriangle, Loader2, Clock, BookOpen } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { PipelineProgress, ChunkProgress } from "@/lib/translator/pipeline";
 
@@ -7,6 +7,7 @@ interface ProgressPanelProps {
   chunks: ChunkProgress[];
   isRunning: boolean;
   isComplete: boolean;
+  totalEnglishWords?: number;
 }
 
 function formatTime(ms: number): string {
@@ -23,10 +24,10 @@ export function ProgressPanel({
   chunks,
   isRunning,
   isComplete,
+  totalEnglishWords = 0,
 }: ProgressPanelProps) {
   const completedCount = chunks.filter((c) => c.status === "completed").length;
   const failedCount = chunks.filter((c) => c.status === "failed").length;
-  const totalTokens = chunks.reduce((sum, c) => sum + c.tokensReceived, 0);
   const percent = progress?.overallPercent ?? 0;
 
   return (
@@ -84,9 +85,9 @@ export function ProgressPanel({
           value={formatTime(progress?.elapsedMs ?? 0)}
         />
         <StatCard
-          icon={<Zap className="h-4 w-4 text-amber-400" />}
-          label="Tokens"
-          value={totalTokens.toLocaleString()}
+          icon={<BookOpen className="h-4 w-4 text-green-400" />}
+          label="English Words"
+          value={totalEnglishWords.toLocaleString()}
         />
       </div>
 
@@ -95,8 +96,7 @@ export function ProgressPanel({
         <div className="flex items-center gap-2 rounded-xl bg-amber-500/10 border border-amber-500/20 px-3 py-2.5">
           <Loader2 className="h-4 w-4 animate-spin text-amber-400" />
           <span className="text-xs text-amber-300">
-            Translating... {progress?.activeChunks ?? 0} active request
-            {(progress?.activeChunks ?? 0) !== 1 ? "s" : ""}
+            Translating... {progress?.activeChunks ?? 0} chunk{(progress?.activeChunks ?? 0) !== 1 ? "s" : ""} in progress
           </span>
         </div>
       )}
@@ -122,9 +122,9 @@ export function ProgressPanel({
       )}
 
       {isComplete && failedCount === 0 && chunks.length > 0 && (
-        <div className="flex items-center gap-2 rounded-xl bg-amber-500/10 border border-amber-500/20 px-3 py-2.5">
-          <CheckCircle2 className="h-4 w-4 text-amber-400" />
-          <span className="text-xs text-amber-300 font-medium">
+        <div className="flex items-center gap-2 rounded-xl bg-green-500/10 border border-green-500/20 px-3 py-2.5">
+          <CheckCircle2 className="h-4 w-4 text-green-400" />
+          <span className="text-xs text-green-300 font-medium">
             All chunks translated successfully! Ready to export.
           </span>
         </div>

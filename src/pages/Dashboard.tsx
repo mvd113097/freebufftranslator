@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo, useEffect, useRef } from "react";
+import { useState, useCallback, useMemo, useEffect } from "react";
 import { useMutation, useAction, useQuery } from "convex/react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
@@ -63,10 +63,10 @@ export default function Dashboard() {
     activeJobId ? { jobId: activeJobId } : "skip"
   );
 
-  // Export data — query the actual translated chunks text
+  // Always query translated chunks (for partial download AND final export)
   const translatedChunks = useQuery(
     api.translation.getTranslatedChunks,
-    activeJobId && jobStatus?.status === "completed" ? { jobId: activeJobId } : "skip"
+    activeJobId ? { jobId: activeJobId } : "skip"
   );
 
   // ─── Persist settings to localStorage on change ─────────────────
@@ -87,6 +87,8 @@ export default function Dashboard() {
   const completedCount = jobStatus?.completedCount ?? 0;
   const failedCount = jobStatus?.failedCount ?? 0;
   const totalChunks = jobStatus?.totalChunks ?? 0;
+  const totalEnglishWords = jobStatus?.totalEnglishWords ?? 0;
+  const processingCount = jobStatus?.processingCount ?? 0;
 
   // Convert job chunks to ChunkProgress format for ProgressPanel
   const chunkProgress = useMemo(() => {
@@ -108,13 +110,19 @@ export default function Dashboard() {
       totalChunks: jobStatus.totalChunks,
       completedChunks: jobStatus.completedCount,
       failedChunks: jobStatus.failedCount,
-      activeChunks: chunkProgress.filter((c) => c.status === "translating").length,
+      activeChunks: processingCount,
       overallPercent: jobStatus.percent,
-      currentChunk: isRunning ? "Processing on server..." : isComplete ? "Complete" : isFailed ? "Failed" : "Paused",
+      currentChunk: isRunning
+        ? `Processing chunk ${completedCount + 1} of ${totalChunks}...`
+        : isComplete
+          ? "All done!"
+          : isFailed
+            ? "Stopped"
+            : "Ready",
       elapsedMs: 0,
       estimatedRemainingMs: 0,
     };
-  }, [jobStatus, isRunning, isComplete, isFailed, chunkProgress]);
+  }, [jobStatus, isRunning, isComplete, isFailed, processingCount, completedCount, totalChunks]);
 
   // ─── File upload handler ────────────────────────────────────────
   const handleFileContent = useCallback((content: string, name: string) => {
@@ -141,16 +149,20 @@ export default function Dashboard() {
       });
 
       setActiveJobId(jobId);
+      setIsStarting(false);
 
-      // Kick off the self-chaining server-side pipeline
-      await processJobAction({
+      // Fire-and-forget: start the server-side pipeline.
+      // Don't await — the action runs on Convex servers and self-chains.
+      // If we await, isStarting may never clear because the action can take a long time.
+      processJobAction({
         jobId,
         batchSize: concurrency,
+      }).catch((err) => {
+        console.error("Pipeline action failed:", err);
       });
     } catch (err) {
       console.error("Failed to start translation:", err);
       alert("Failed to start: " + (err instanceof Error ? err.message : String(err)));
-    } finally {
       setIsStarting(false);
     }
   }, [canStart, rawText, keys, chunkSize, concurrency, selectedModel, fileName, startTranslationMutation, processJobAction]);
@@ -171,37 +183,60 @@ export default function Dashboard() {
     if (!activeJobId) return;
     try {
       await resumeJobMutation({ jobId: activeJobId });
-      await processJobAction({
+      // Fire-and-forget
+      processJobAction({
         jobId: activeJobId,
         batchSize: concurrency,
+      }).catch((err) => {
+        console.error("Pipeline resume failed:", err);
       });
     } catch (err) {
       console.error("Failed to resume:", err);
     }
   }, [activeJobId, concurrency, resumeJobMutation, processJobAction]);
 
-  // ─── Export (final) — stitch all completed chunks ───────────────
+  // ─── Download helper (works for both partial and final) ─────────
+  const downloadTranslation = useCallback(
+    (chunks: { index: number; text: string }[], label: string) => {
+      if (chunks.length === 0) {
+        alert("No translated content to download yet.");
+        return;
+      }
+      const stitched = chunks
+        .sort((a, b) => a.index - b.index)
+        .map((c) => c.text)
+        .join("\n\n");
+      const blob = new Blob([stitched], { type: "text/plain;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = label;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+    },
+    []
+  );
+
+  // ─── Export (final) ─────────────────────────────────────────────
   const handleExport = useCallback(() => {
     if (!translatedChunks || translatedChunks.length === 0) {
       alert("No translated content to export yet.");
       return;
     }
+    const baseName = (fileName.replace(/\.txt$/i, "") || "translated_novel") + ".txt";
+    downloadTranslation(translatedChunks, baseName);
+  }, [translatedChunks, fileName, downloadTranslation]);
 
-    const stitched = translatedChunks
-      .sort((a, b) => a.index - b.index)
-      .map((c) => c.text)
-      .join("\n\n");
-
-    const blob = new Blob([stitched], { type: "text/plain;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = (fileName.replace(/\.txt$/i, "") || "translated_novel") + ".txt";
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    setTimeout(() => URL.revokeObjectURL(url), 5000);
-  }, [translatedChunks, fileName]);
+  // ─── Download Progress (partial, while running) ─────────────────
+  const handleDownloadProgress = useCallback(() => {
+    if (!translatedChunks || translatedChunks.length === 0) {
+      alert("No translated chunks available yet.");
+      return;
+    }
+    downloadTranslation(translatedChunks, "incomplete_english.txt");
+  }, [translatedChunks, downloadTranslation]);
 
   // ─── Reset ──────────────────────────────────────────────────────
   const handleReset = useCallback(async () => {
@@ -216,6 +251,8 @@ export default function Dashboard() {
     setRawText("");
     setFileName("");
   }, [activeJobId, deleteJobMutation]);
+
+  const hasTranslatedChunks = translatedChunks && translatedChunks.length > 0;
 
   // ─── Render ─────────────────────────────────────────────────────
   return (
@@ -236,9 +273,9 @@ export default function Dashboard() {
           </div>
           <div className="flex items-center gap-2">
             {isRunning && (
-              <div className="flex items-center gap-1.5 rounded-lg bg-amber-500/10 border border-amber-500/20 px-3 py-1.5 text-[10px] text-amber-400">
+              <div className="flex items-center gap-1.5 rounded-lg bg-green-500/10 border border-green-500/20 px-3 py-1.5 text-[10px] text-green-400">
                 <Server className="h-3 w-3" />
-                Server-side processing active
+                Server active
               </div>
             )}
           </div>
@@ -264,7 +301,7 @@ export default function Dashboard() {
                     </h3>
                     <p className="text-xs text-green-200/70 mt-1">
                       This translation continues even if you close the browser tab.
-                      Come back anytime to check progress — it will resume automatically.
+                      Come back anytime to check progress.
                     </p>
                   </div>
                 </div>
@@ -273,7 +310,7 @@ export default function Dashboard() {
           )}
         </AnimatePresence>
 
-        {/* Interrupted/completed run info */}
+        {/* Interrupted run info */}
         <AnimatePresence>
           {isFailed && !isRunning && (
             <motion.div
@@ -291,8 +328,8 @@ export default function Dashboard() {
                     </h3>
                     <p className="text-xs text-amber-200/70 mt-1">
                       <strong>{jobStatus?.fileName}</strong> — {completedCount} of{" "}
-                      {totalChunks} chunks completed.{" "}
-                      {failedCount > 0 ? `${failedCount} failed.` : ""}
+                      {totalChunks} chunks completed.
+                      {failedCount > 0 ? ` ${failedCount} failed.` : ""}
                     </p>
                     <div className="flex items-center gap-3 mt-3">
                       <button
@@ -424,6 +461,7 @@ export default function Dashboard() {
               chunks={chunkProgress}
               isRunning={!!isRunning}
               isComplete={!!isComplete}
+              totalEnglishWords={totalEnglishWords}
             />
           </motion.div>
         </div>
@@ -494,14 +532,27 @@ export default function Dashboard() {
             </button>
           )}
 
-          {isComplete && translatedChunks && translatedChunks.length > 0 && (
+          {/* Download Progress — available while running AND when complete */}
+          {isRunning && hasTranslatedChunks && (
             <button
-              onClick={handleExport}
-              className="relative z-10 flex items-center gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 backdrop-blur-md px-5 py-2.5 text-sm font-medium text-amber-300 hover:bg-amber-500/20 active:bg-amber-500/30 transition-all"
+              onClick={handleDownloadProgress}
+              className="relative z-10 flex items-center gap-2 rounded-xl border border-green-500/30 bg-green-500/10 backdrop-blur-md px-4 py-2.5 text-sm font-medium text-green-300 hover:bg-green-500/20 active:bg-green-500/30 transition-all cursor-pointer"
               style={{ WebkitTapHighlightColor: "transparent", touchAction: "manipulation" }}
             >
               <Download className="h-4 w-4" />
-              Download Complete ({translatedChunks.length} chunks)
+              Download Progress ({translatedChunks!.length} chunks)
+            </button>
+          )}
+
+          {/* Export Complete — only when fully done */}
+          {isComplete && hasTranslatedChunks && (
+            <button
+              onClick={handleExport}
+              className="relative z-10 flex items-center gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 backdrop-blur-md px-5 py-2.5 text-sm font-medium text-amber-300 hover:bg-amber-500/20 active:bg-amber-500/30 transition-all cursor-pointer"
+              style={{ WebkitTapHighlightColor: "transparent", touchAction: "manipulation" }}
+            >
+              <Download className="h-4 w-4" />
+              Download Complete ({translatedChunks!.length} chunks)
             </button>
           )}
 

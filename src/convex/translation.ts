@@ -234,12 +234,25 @@ export const getJobStatus = query({
     const failed = chunks.filter((c) => c.status === "failed").length;
     const total = chunks.length;
 
+    // Count English words in completed translations
+    let totalEnglishWords = 0;
+    for (const c of chunks) {
+      if (c.status === "completed" && c.translatedText.length > 0) {
+        totalEnglishWords += c.translatedText.split(/\s+/).filter((w) => w.length > 0).length;
+      }
+    }
+
+    // Count processing chunks (active in-flight)
+    const processing = chunks.filter((c) => c.status === "processing").length;
+
     return {
       fileName: job.fileName,
       totalChunks: job.totalChunks,
       status: job.status,
       completedCount: completed,
       failedCount: failed,
+      processingCount: processing,
+      totalEnglishWords,
       percent: total > 0 ? Math.round(((completed + failed) / total) * 100) : 0,
       chunks: chunks
         .sort((a, b) => a.chunkIndex - b.chunkIndex)
