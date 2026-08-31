@@ -370,6 +370,10 @@ export const processNextBatch = action({
     let keyIndex = 0;
     const modelChain = getFallbackChain(job.model);
 
+    // Track last-use time per key for per-key rate limiting
+    // Only wait between requests using the SAME key
+    const keyLastUsed: Map<string, number> = new Map();
+
     for (const chunk of pending) {
       // Re-check job status before each chunk — if paused/stopped, bail immediately
       const currentJob: { status: string } | null = await ctx.runQuery(internal.translation.internalGetJob, { jobId: args.jobId });
@@ -410,11 +414,18 @@ export const processNextBatch = action({
           }
 
           try {
-            // Rate limit stagger
-            if (attempt > 0 || processedCount > 0) {
-              await new Promise((r) => setTimeout(r, 4500));
+            // Per-key rate limit: only wait if this key was used recently
+            const lastUse = keyLastUsed.get(apiKey) ?? 0;
+            const timeSinceLastUse = Date.now() - lastUse;
+            const MIN_KEY_GAP = 4500; // 4.5s between uses of the same key
+            if (timeSinceLastUse < MIN_KEY_GAP && attempt === 0 && modelIdx === 0) {
+              await new Promise((r) => setTimeout(r, MIN_KEY_GAP - timeSinceLastUse));
+            } else if (attempt > 0) {
+              // Retrying same request — standard backoff
+              await new Promise((r) => setTimeout(r, 3000));
             }
 
+            keyLastUsed.set(apiKey, Date.now());
             console.log(`[Translation] Chunk ${chunk.chunkIndex}: trying model ${tryModel} (attempt ${attempt + 1})`);
 
             const translated = await callOpenRouter(
