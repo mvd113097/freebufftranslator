@@ -6,6 +6,7 @@ interface SettingsPanelProps {
   concurrency: number;
   onConcurrencyChange: (v: number) => void;
   disabled?: boolean;
+  chunkSizeDisabled?: boolean;
 }
 
 export function SettingsPanel({
@@ -14,11 +15,12 @@ export function SettingsPanel({
   concurrency,
   onConcurrencyChange,
   disabled,
+  chunkSizeDisabled,
 }: SettingsPanelProps) {
   return (
-    <div className={cn("space-y-4", disabled && "opacity-50 pointer-events-none")}>
-      {/* Chunk Size Slider */}
-      <div className="space-y-2">
+    <div className="space-y-4">
+      {/* Chunk Size Slider — locked during translation (chunks already created) */}
+      <div className={cn("space-y-2", chunkSizeDisabled && "opacity-50 pointer-events-none")}>
         <div className="flex items-center justify-between">
           <label className="text-xs text-stone-400">Characters per Chunk</label>
           <span className="text-xs font-mono font-semibold text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded-md">

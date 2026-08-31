@@ -85,6 +85,7 @@ export default function Dashboard() {
   const deleteJobMutation = useMutation(api.translation.deleteJob);
   const resumeJobMutation = useMutation(api.translation.resumeJob);
   const pauseJobMutation = useMutation(api.translation.pauseJob);
+  const updateJobSettingsMutation = useMutation(api.translation.updateJobSettings);
 
   // List all jobs for auto-recovery detection
   const allJobs = useQuery(api.translation.listJobs);
@@ -105,6 +106,8 @@ export default function Dashboard() {
   useEffect(() => {
     saveSettings({ keys, model: selectedModel, chunkSize, concurrency });
   }, [keys, selectedModel, chunkSize, concurrency]);
+
+
 
   // ─── Persist activeJobId to localStorage on change ──────────────
   useEffect(() => {
@@ -187,6 +190,20 @@ export default function Dashboard() {
       estimatedRemainingMs: 0,
     };
   }, [jobStatus, isRunning, isComplete, isFailed, isPaused, processingCount, completedCount, totalChunks]);
+
+  // ─── Sync concurrency/model changes to Convex job mid-translation ─
+  useEffect(() => {
+    if (!activeJobId || !isRunning) return;
+    // Debounce: only update after user stops dragging
+    const timer = setTimeout(() => {
+      updateJobSettingsMutation({
+        jobId: activeJobId,
+        concurrency,
+        model: selectedModel,
+      }).catch((err) => console.error("Failed to update job settings:", err));
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [concurrency, selectedModel, activeJobId, isRunning, updateJobSettingsMutation]);
 
   // ─── File upload handler ────────────────────────────────────────
   const handleFileContent = useCallback((content: string, name: string) => {
@@ -522,7 +539,7 @@ export default function Dashboard() {
               <select
                 value={selectedModel}
                 onChange={(e) => setSelectedModel(e.target.value)}
-                disabled={isRunning || isStarting || isPaused}
+                disabled={isStarting}
                 className="w-full rounded-xl border border-stone-700 bg-stone-800 px-3 py-2 text-xs text-stone-200 focus:outline-none focus:ring-2 focus:ring-amber-400/30 disabled:opacity-50 cursor-pointer"
               >
                 {MODEL_OPTIONS.map((m) => (
@@ -565,7 +582,7 @@ export default function Dashboard() {
                         onChunkSizeChange={setChunkSize}
                         concurrency={concurrency}
                         onConcurrencyChange={setConcurrency}
-                        disabled={isRunning || isStarting || isPaused}
+                        chunkSizeDisabled={isRunning || isStarting || isPaused}
                       />
                     </div>
                   </motion.div>

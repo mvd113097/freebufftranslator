@@ -211,6 +211,21 @@ export const resumeJob = mutation({
   },
 });
 
+/** Update job settings mid-translation (concurrency, model). */
+export const updateJobSettings = mutation({
+  args: {
+    jobId: v.id("translationJobs"),
+    concurrency: v.optional(v.number()),
+    model: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const patch: Record<string, unknown> = { updatedAt: Date.now() };
+    if (args.concurrency !== undefined) patch.concurrency = args.concurrency;
+    if (args.model !== undefined) patch.model = args.model;
+    await ctx.db.patch(args.jobId, patch);
+  },
+});
+
 /** Delete a job and all its chunks. */
 export const deleteJob = mutation({
   args: { jobId: v.id("translationJobs") },
@@ -336,10 +351,13 @@ export const processNextBatch = action({
       return { done: false, processed: 0, total: 0, error: "No API keys" };
     }
 
+    // Use the job's current concurrency (may have been updated mid-translation)
+    const effectiveBatchSize = job.concurrency || args.batchSize;
+
     // Get pending chunks
     const pending = await ctx.runQuery(internal.translation.internalGetPendingChunks, {
       jobId: args.jobId,
-      limit: args.batchSize,
+      limit: effectiveBatchSize,
     });
 
     if (pending.length === 0) {
@@ -525,10 +543,14 @@ export const processJob = action({
     ctx,
     args,
   ): Promise<{ done: boolean; processed: number; completed?: number; failed?: number; total?: number; error?: string }> => {
+    // Read current job settings (concurrency may have changed mid-translation)
+    const currentJob = await ctx.runQuery(internal.translation.internalGetJob, { jobId: args.jobId });
+    const currentBatchSize = currentJob?.concurrency ?? args.batchSize;
+
     // Process the current batch
     const result = await ctx.runAction(api.translation.processNextBatch, {
       jobId: args.jobId,
-      batchSize: args.batchSize,
+      batchSize: currentBatchSize,
     });
 
     if (!result.done) {
@@ -540,7 +562,7 @@ export const processJob = action({
       // Schedule next batch after 2 seconds (enough for rate limiting)
       await ctx.scheduler.runAfter(2000, api.translation.processJob, {
         jobId: args.jobId,
-        batchSize: args.batchSize,
+        batchSize: currentBatchSize,
       });
     }
 
