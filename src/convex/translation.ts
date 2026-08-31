@@ -4,13 +4,33 @@ import { api, internal } from "./_generated/api";
 
 const SYSTEM_PROMPT = `You are an expert human literary translator specializing in Chinese web novels (Xianxia, Wuxia, and Sci-Fi). Translate the following Chinese prose into highly fluent, immersive English fiction. Do not use stiff or literal machine-like phrasing. Translate cultivation tiers, localized idioms, and online slang into contextually accurate Western fantasy equivalents while maintaining rigid character name consistency.
 
-CRITICAL FORMATTING RULES:
-- Preserve ALL paragraph breaks from the original text. Separate every paragraph with a blank line (double newline). The output must have clear visual spacing between paragraphs, matching the input's paragraph structure.
-- If the input has a line break between paragraphs, your output MUST have a blank line between those same paragraphs.
-- Preserve dialogue formatting and paragraph indentation style.
-- Do NOT merge paragraphs together. Each paragraph in the input becomes its own paragraph in the output.
+## FORMATTING RULES (VERY IMPORTANT - FOLLOW EXACTLY):
 
-IMPORTANT: Output ONLY the translated English text. Do not include any explanations, notes, commentary, or metadata. Do not wrap your output in quotes or markdown. Just return the raw translated English prose with proper paragraph spacing.`;
+You MUST separate EVERY paragraph with a BLANK LINE. This means each paragraph ends with TWO newline characters (\n\n). This is non-negotiable.
+
+Example of CORRECT formatting:
+Paragraph one text here.
+
+Paragraph two text here.
+
+Paragraph three text here.
+
+Example of WRONG formatting (DO NOT DO THIS):
+Paragraph one text here.
+Paragraph two text here.
+Paragraph three text here.
+
+- Count the paragraphs in the input. Your output MUST have the SAME number of paragraphs.
+- Each paragraph in the input becomes exactly ONE paragraph in the output, separated by a blank line.
+- Preserve dialogue formatting and paragraph indentation style.
+- Do NOT merge paragraphs together.
+- Do NOT output everything as one continuous block of text.
+
+## OUTPUT RULES:
+- Output ONLY the translated English text.
+- Do NOT include any explanations, notes, commentary, or metadata.
+- Do NOT wrap your output in quotes or markdown code blocks.
+- Just return the raw translated English prose with proper paragraph spacing (blank lines between paragraphs).`;
 
 // ─── Chunking helper (pure, server-safe) ─────────────────────────
 
@@ -642,5 +662,36 @@ async function callOpenRouter(text: string, apiKey: string, model: string): Prom
   if (typeof content !== "string" || !content) {
     throw new Error("No translation content in response");
   }
-  return content;
+  return normalizeParagraphs(content);
+}
+
+/**
+ * Post-process translated text to ensure proper paragraph spacing.
+ * Some models collapse paragraph breaks into single newlines or no breaks.
+ * This function normalizes the output to always have blank lines between paragraphs.
+ */
+function normalizeParagraphs(text: string): string {
+  // Step 1: Normalize line endings
+  let result = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+
+  // Step 2: If there are NO double newlines at all, the model collapsed paragraphs.
+  // In this case, treat single newlines as paragraph breaks.
+  const hasDoubleNewlines = /\n\n/.test(result);
+  if (!hasDoubleNewlines && result.includes("\n")) {
+    // Convert single newlines to double newlines (paragraph breaks)
+    result = result.replace(/\n/g, "\n\n");
+  }
+
+  // Step 3: Collapse 3+ consecutive newlines into exactly 2 (one blank line)
+  result = result.replace(/\n{3,}/g, "\n\n");
+
+  // Step 4: Trim leading/trailing whitespace
+  result = result.trim();
+
+  // Step 5: Ensure the text ends with a single newline
+  if (!result.endsWith("\n")) {
+    result += "\n";
+  }
+
+  return result;
 }
