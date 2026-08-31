@@ -68,6 +68,7 @@ const schema = defineSchema(
       ),
       error: v.optional(v.string()),
       retries: v.number(),
+      usedModel: v.optional(v.string()),
     }).index("by_jobId", ["jobId"]),
   },
   {

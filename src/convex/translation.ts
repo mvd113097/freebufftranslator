@@ -102,12 +102,14 @@ export const internalPatchChunk = internalMutation({
     translatedText: v.optional(v.string()),
     error: v.optional(v.string()),
     retries: v.optional(v.number()),
+    usedModel: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const patch: Record<string, unknown> = { status: args.status };
     if (args.translatedText !== undefined) patch.translatedText = args.translatedText;
     if (args.error !== undefined) patch.error = args.error;
     if (args.retries !== undefined) patch.retries = args.retries;
+    if (args.usedModel !== undefined) patch.usedModel = args.usedModel;
     await ctx.db.patch(args.chunkId, patch);
   },
 });
@@ -366,6 +368,7 @@ export const processNextBatch = action({
     // Process each chunk
     let processedCount = 0;
     let keyIndex = 0;
+    const modelChain = getFallbackChain(job.model);
 
     for (const chunk of pending) {
       // Re-check job status before each chunk — if paused/stopped, bail immediately
@@ -389,45 +392,79 @@ export const processNextBatch = action({
 
       let success = false;
       let lastError = "";
-      const maxRetries = 3;
 
-      for (let attempt = 0; attempt < maxRetries; attempt++) {
-        try {
-          // Rate limit stagger: 4.5s between requests
-          if (attempt > 0 || processedCount > 0) {
-            await new Promise((r) => setTimeout(r, 4500));
+      // Try each model in the fallback chain
+      for (let modelIdx = 0; modelIdx < modelChain.length; modelIdx++) {
+        const tryModel = modelChain[modelIdx];
+        const attemptsForModel = modelIdx === 0 ? 3 : 2; // Primary gets 3 tries, fallbacks get 2
+
+        for (let attempt = 0; attempt < attemptsForModel; attempt++) {
+          // Re-check job status before each attempt
+          const checkJob: { status: string } | null = await ctx.runQuery(internal.translation.internalGetJob, { jobId: args.jobId });
+          if (!checkJob || checkJob.status !== "processing") {
+            return {
+              done: false,
+              processed: processedCount,
+              reason: checkJob?.status ?? "missing",
+            };
           }
 
-          const translated = await callOpenRouter(
-            chunk.originalText,
-            apiKey,
-            job.model
-          );
+          try {
+            // Rate limit stagger
+            if (attempt > 0 || processedCount > 0) {
+              await new Promise((r) => setTimeout(r, 4500));
+            }
 
-          await ctx.runMutation(internal.translation.internalPatchChunk, {
-            chunkId: chunk._id,
-            translatedText: translated,
-            status: "completed",
-            retries: attempt,
-          });
+            console.log(`[Translation] Chunk ${chunk.chunkIndex}: trying model ${tryModel} (attempt ${attempt + 1})`);
 
-          processedCount++;
-          success = true;
-          break;
-        } catch (err: unknown) {
-          lastError = err instanceof Error ? err.message : String(err);
-          console.error(
-            `[Translation] Chunk ${chunk.chunkIndex} attempt ${attempt + 1} failed:`,
-            lastError
-          );
-
-          if (lastError.includes("RATE_LIMITED") || lastError.includes("429")) {
-            await new Promise((r) => setTimeout(r, 30000 * (attempt + 1)));
-          } else if (attempt < maxRetries - 1) {
-            await new Promise((r) =>
-              setTimeout(r, Math.min(3000 * Math.pow(2, attempt), 20000))
+            const translated = await callOpenRouter(
+              chunk.originalText,
+              apiKey,
+              tryModel
             );
+
+            await ctx.runMutation(internal.translation.internalPatchChunk, {
+              chunkId: chunk._id,
+              translatedText: translated,
+              status: "completed",
+              retries: attempt + (modelIdx * attemptsForModel),
+              usedModel: tryModel,
+            });
+
+            processedCount++;
+            success = true;
+            break;
+          } catch (err: unknown) {
+            lastError = err instanceof Error ? err.message : String(err);
+            console.error(
+              `[Translation] Chunk ${chunk.chunkIndex} model=${tryModel} attempt ${attempt + 1} failed:`,
+              lastError
+            );
+
+            // Rate limited — wait longer before retrying
+            if (lastError.includes("RATE_LIMITED") || lastError.includes("429")) {
+              await new Promise((r) => setTimeout(r, 30000 * (attempt + 1)));
+            } else if (lastError.includes("401") || lastError.includes("403")) {
+              // Auth error — don't retry this model, try next fallback
+              break;
+            } else if (lastError.includes("502") || lastError.includes("503") || lastError.includes("overloaded")) {
+              // Server error — try next fallback model faster
+              await new Promise((r) => setTimeout(r, 5000));
+              break;
+            } else if (attempt < attemptsForModel - 1) {
+              await new Promise((r) =>
+                setTimeout(r, Math.min(3000 * Math.pow(2, attempt), 20000))
+              );
+            }
           }
+        }
+
+        if (success) break;
+
+        // Before switching to next model, wait a bit
+        if (modelIdx < modelChain.length - 1) {
+          console.log(`[Translation] Chunk ${chunk.chunkIndex}: model ${tryModel} exhausted, switching to next fallback`);
+          await new Promise((r) => setTimeout(r, 3000));
         }
       }
 
@@ -436,7 +473,7 @@ export const processNextBatch = action({
           chunkId: chunk._id,
           status: "failed",
           error: lastError.slice(0, 500),
-          retries: maxRetries,
+          retries: 5,
         });
       }
     }
@@ -500,6 +537,25 @@ export const processJob = action({
   },
 });
 
+// ─── Model fallback chain ───────────────────────────────────────
+// If the primary model fails, try these in order. These are all free models
+// on OpenRouter with decent context windows suitable for novel translation.
+const FALLBACK_MODELS = [
+  "minimax/minimax-m3:free",
+  "nvidia/nemotron-3-ultra-550b-a55b:free",
+  "inclusionai/ling-3.0-flash-fin:free",
+  "google/gemini-2.5-flash",
+];
+
+function getFallbackChain(primaryModel: string): string[] {
+  // Build a chain: primary first, then fallbacks (excluding the primary)
+  const chain = [primaryModel];
+  for (const m of FALLBACK_MODELS) {
+    if (m !== primaryModel) chain.push(m);
+  }
+  return chain;
+}
+
 // ─── OpenRouter API call (server-side) ───────────────────────────
 
 async function callOpenRouter(text: string, apiKey: string, model: string): Promise<string> {
@@ -528,12 +584,27 @@ async function callOpenRouter(text: string, apiKey: string, model: string): Prom
     throw new Error("RATE_LIMITED");
   }
 
+  if (response.status === 401 || response.status === 403) {
+    throw new Error(`AUTH_ERROR_${response.status}: Invalid or expired API key`);
+  }
+
   if (!response.ok) {
     const body = await response.text().catch(() => "");
+    // Detect overloaded server errors
+    if (body.includes("overloaded") || body.includes("503") || body.includes("502")) {
+      throw new Error(`SERVER_ERROR_${response.status}: Model overloaded`);
+    }
     throw new Error(`API error ${response.status}: ${body.slice(0, 200)}`);
   }
 
   const data = await response.json();
+
+  // OpenRouter sometimes returns errors in the response body even with 200
+  if (data.error) {
+    const errMsg = typeof data.error === "string" ? data.error : data.error.message || JSON.stringify(data.error);
+    throw new Error(`MODEL_ERROR: ${errMsg.slice(0, 200)}`);
+  }
+
   const content = data.choices?.[0]?.message?.content;
   if (typeof content !== "string" || !content) {
     throw new Error("No translation content in response");
