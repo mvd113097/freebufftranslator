@@ -32,12 +32,42 @@ const schema = defineSchema(
       role: v.optional(roleValidator), // role of the user. do not remove
     }).index("email", ["email"]), // index for the email. do not remove or modify
 
-    // add other tables here
+    // ─── Translation Jobs ────────────────────────────────────────
+    translationJobs: defineTable({
+      userId: v.optional(v.string()),
+      fileName: v.string(),
+      rawText: v.string(),
+      rawTextLength: v.number(),
+      totalChunks: v.number(),
+      status: v.union(
+        v.literal("pending"),
+        v.literal("processing"),
+        v.literal("completed"),
+        v.literal("failed")
+      ),
+      model: v.string(),
+      chunkSize: v.number(),
+      concurrency: v.number(),
+      completedCount: v.number(),
+      failedCount: v.number(),
+      createdAt: v.number(),
+      updatedAt: v.number(),
+    }),
 
-    // tableName: defineTable({
-    //   ...
-    //   // table fields
-    // }).index("by_field", ["field"])
+    translationChunks: defineTable({
+      jobId: v.id("translationJobs"),
+      chunkIndex: v.number(),
+      originalText: v.string(),
+      translatedText: v.string(),
+      status: v.union(
+        v.literal("pending"),
+        v.literal("processing"),
+        v.literal("completed"),
+        v.literal("failed")
+      ),
+      error: v.optional(v.string()),
+      retries: v.number(),
+    }).index("by_jobId", ["jobId"]),
   },
   {
     schemaValidation: false,
