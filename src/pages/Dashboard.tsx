@@ -13,6 +13,8 @@ import {
   Settings2,
   Server,
   Loader2,
+  Pause,
+  Play,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { FileUploader } from "@/components/translator/FileUploader";
@@ -36,6 +38,28 @@ const MODEL_OPTIONS = [
   { value: "google/gemini-2.5-flash", label: "Gemini 2.5 Flash (paid)" },
 ];
 
+// ─── localStorage helpers for active job persistence ──────────────
+
+const ACTIVE_JOB_KEY = "novelTranslator_activeJobId";
+
+function saveActiveJobId(jobId: string | null) {
+  try {
+    if (jobId) {
+      localStorage.setItem(ACTIVE_JOB_KEY, jobId);
+    } else {
+      localStorage.removeItem(ACTIVE_JOB_KEY);
+    }
+  } catch { /* ignore */ }
+}
+
+function loadActiveJobId(): string | null {
+  try {
+    return localStorage.getItem(ACTIVE_JOB_KEY);
+  } catch {
+    return null;
+  }
+}
+
 export default function Dashboard() {
   // ─── State ──────────────────────────────────────────────────────
   const [keys, setKeys] = useState<string[]>(() => loadSettings().keys);
@@ -46,9 +70,13 @@ export default function Dashboard() {
   const [selectedModel, setSelectedModel] = useState(() => loadSettings().model);
   const [settingsOpen, setSettingsOpen] = useState(false);
 
-  // Active job tracking
-  const [activeJobId, setActiveJobId] = useState<Id<"translationJobs"> | null>(null);
+  // Active job tracking — persisted to localStorage
+  const [activeJobId, setActiveJobId] = useState<Id<"translationJobs"> | null>(() => {
+    const saved = loadActiveJobId();
+    return saved ? (saved as Id<"translationJobs">) : null;
+  });
   const [isStarting, setIsStarting] = useState(false);
+  const [hasRecovered, setHasRecovered] = useState(false);
 
   // ─── Convex mutations/queries ────────────────────────────────────
   const startTranslationMutation = useMutation(api.translation.startTranslation);
@@ -56,6 +84,10 @@ export default function Dashboard() {
   const abortJobMutation = useMutation(api.translation.abortJob);
   const deleteJobMutation = useMutation(api.translation.deleteJob);
   const resumeJobMutation = useMutation(api.translation.resumeJob);
+  const pauseJobMutation = useMutation(api.translation.pauseJob);
+
+  // List all jobs for auto-recovery detection
+  const allJobs = useQuery(api.translation.listJobs);
 
   // Reactive query for active job status (updates in real-time via Convex subscriptions)
   const jobStatus = useQuery(
@@ -74,6 +106,35 @@ export default function Dashboard() {
     saveSettings({ keys, model: selectedModel, chunkSize, concurrency });
   }, [keys, selectedModel, chunkSize, concurrency]);
 
+  // ─── Persist activeJobId to localStorage on change ──────────────
+  useEffect(() => {
+    saveActiveJobId(activeJobId);
+  }, [activeJobId]);
+
+  // ─── Auto-recover running/paused jobs on page reload ────────────
+  useEffect(() => {
+    if (hasRecovered || !allJobs) return;
+    setHasRecovered(true);
+
+    // If we already have an activeJobId, check if it's still valid
+    if (activeJobId) {
+      const job = allJobs.find((j) => j._id === activeJobId);
+      if (!job) {
+        // Job was deleted — clear
+        setActiveJobId(null);
+      }
+      return;
+    }
+
+    // Look for the most recent processing or paused job
+    const recoverable = allJobs.find(
+      (j) => j.status === "processing" || j.status === "paused"
+    );
+    if (recoverable) {
+      setActiveJobId(recoverable._id);
+    }
+  }, [allJobs, activeJobId, hasRecovered]);
+
   // ─── Derived state ──────────────────────────────────────────────
   const canStart = useMemo(
     () => rawText.length > 0 && keys.length > 0 && !activeJobId,
@@ -81,6 +142,7 @@ export default function Dashboard() {
   );
 
   const isRunning = jobStatus?.status === "processing";
+  const isPaused = jobStatus?.status === "paused";
   const isComplete = jobStatus?.status === "completed";
   const isFailed = jobStatus?.status === "failed";
 
@@ -114,15 +176,17 @@ export default function Dashboard() {
       overallPercent: jobStatus.percent,
       currentChunk: isRunning
         ? `Processing chunk ${completedCount + 1} of ${totalChunks}...`
-        : isComplete
-          ? "All done!"
-          : isFailed
-            ? "Stopped"
-            : "Ready",
+        : isPaused
+          ? `Paused — ${completedCount} of ${totalChunks} done`
+          : isComplete
+            ? "All done!"
+            : isFailed
+              ? "Stopped"
+              : "Ready",
       elapsedMs: 0,
       estimatedRemainingMs: 0,
     };
-  }, [jobStatus, isRunning, isComplete, isFailed, processingCount, completedCount, totalChunks]);
+  }, [jobStatus, isRunning, isComplete, isFailed, isPaused, processingCount, completedCount, totalChunks]);
 
   // ─── File upload handler ────────────────────────────────────────
   const handleFileContent = useCallback((content: string, name: string) => {
@@ -149,11 +213,10 @@ export default function Dashboard() {
       });
 
       setActiveJobId(jobId);
+      saveActiveJobId(jobId);
       setIsStarting(false);
 
       // Fire-and-forget: start the server-side pipeline.
-      // Don't await — the action runs on Convex servers and self-chains.
-      // If we await, isStarting may never clear because the action can take a long time.
       processJobAction({
         jobId,
         batchSize: concurrency,
@@ -167,7 +230,18 @@ export default function Dashboard() {
     }
   }, [canStart, rawText, keys, chunkSize, concurrency, selectedModel, fileName, startTranslationMutation, processJobAction]);
 
-  // ─── Stop translation ───────────────────────────────────────────
+  // ─── Pause translation (stops self-chaining, keeps state) ───────
+  const pauseTranslation = useCallback(async () => {
+    if (activeJobId) {
+      try {
+        await pauseJobMutation({ jobId: activeJobId });
+      } catch (err) {
+        console.error("Failed to pause:", err);
+      }
+    }
+  }, [activeJobId, pauseJobMutation]);
+
+  // ─── Stop translation (hard stop — marks as failed) ─────────────
   const stopTranslation = useCallback(async () => {
     if (activeJobId) {
       try {
@@ -178,7 +252,7 @@ export default function Dashboard() {
     }
   }, [activeJobId, abortJobMutation]);
 
-  // ─── Resume translation (after stop/failure) ────────────────────
+  // ─── Resume translation (after pause/stop/failure) ──────────────
   const resumeTranslation = useCallback(async () => {
     if (!activeJobId) return;
     try {
@@ -248,6 +322,7 @@ export default function Dashboard() {
       }
     }
     setActiveJobId(null);
+    saveActiveJobId(null);
     setRawText("");
     setFileName("");
   }, [activeJobId, deleteJobMutation]);
@@ -276,6 +351,12 @@ export default function Dashboard() {
               <div className="flex items-center gap-1.5 rounded-lg bg-green-500/10 border border-green-500/20 px-3 py-1.5 text-[10px] text-green-400">
                 <Server className="h-3 w-3" />
                 Server active
+              </div>
+            )}
+            {isPaused && (
+              <div className="flex items-center gap-1.5 rounded-lg bg-yellow-500/10 border border-yellow-500/20 px-3 py-1.5 text-[10px] text-yellow-400">
+                <Pause className="h-3 w-3" />
+                Paused
               </div>
             )}
           </div>
@@ -310,7 +391,50 @@ export default function Dashboard() {
           )}
         </AnimatePresence>
 
-        {/* Interrupted run info */}
+        {/* Paused banner */}
+        <AnimatePresence>
+          {isPaused && (
+            <motion.div
+              initial={{ opacity: 0, y: -12, height: 0 }}
+              animate={{ opacity: 1, y: 0, height: "auto" }}
+              exit={{ opacity: 0, y: -12, height: 0 }}
+              className="overflow-hidden"
+            >
+              <div className="rounded-2xl border border-yellow-500/30 bg-yellow-500/10 backdrop-blur-xl p-4 shadow-sm">
+                <div className="flex items-start gap-3">
+                  <Pause className="h-5 w-5 text-yellow-400 mt-0.5 shrink-0" />
+                  <div className="flex-1">
+                    <h3 className="text-sm font-semibold text-yellow-300">
+                      Translation paused
+                    </h3>
+                    <p className="text-xs text-yellow-200/70 mt-1">
+                      <strong>{jobStatus?.fileName}</strong> — {completedCount} of{" "}
+                      {totalChunks} chunks completed. The server pipeline has stopped.
+                    </p>
+                    <div className="flex items-center gap-3 mt-3">
+                      <button
+                        onClick={resumeTranslation}
+                        className="flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 px-4 py-2 text-xs font-semibold text-stone-950 shadow-md hover:shadow-lg transition-all cursor-pointer"
+                      >
+                        <Play className="h-3.5 w-3.5" />
+                        Resume Translation
+                      </button>
+                      <button
+                        onClick={handleReset}
+                        className="flex items-center gap-1.5 rounded-xl border border-stone-700 bg-stone-800 px-4 py-2 text-xs font-medium text-stone-300 hover:bg-stone-700 transition-all cursor-pointer"
+                      >
+                        <RotateCcw className="h-3.5 w-3.5" />
+                        Start Over
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Interrupted/Failed run info */}
         <AnimatePresence>
           {isFailed && !isRunning && (
             <motion.div
@@ -324,7 +448,7 @@ export default function Dashboard() {
                   <AlertCircle className="h-5 w-5 text-amber-400 mt-0.5 shrink-0" />
                   <div className="flex-1">
                     <h3 className="text-sm font-semibold text-amber-300">
-                      Translation stopped
+                      Interrupted run detected
                     </h3>
                     <p className="text-xs text-amber-200/70 mt-1">
                       <strong>{jobStatus?.fileName}</strong> — {completedCount} of{" "}
@@ -362,7 +486,7 @@ export default function Dashboard() {
             transition={{ delay: 0.05 }}
             className="lg:col-span-2 space-y-3"
           >
-            <FileUploader onFileContent={handleFileContent} disabled={isRunning || isStarting} />
+            <FileUploader onFileContent={handleFileContent} disabled={isRunning || isStarting || isPaused} />
             {rawText.length > 0 && (
               <div className="flex items-center gap-4 text-[11px] text-stone-400 px-1">
                 <span>📄 {rawText.length.toLocaleString()} characters</span>
@@ -398,7 +522,7 @@ export default function Dashboard() {
               <select
                 value={selectedModel}
                 onChange={(e) => setSelectedModel(e.target.value)}
-                disabled={isRunning || isStarting}
+                disabled={isRunning || isStarting || isPaused}
                 className="w-full rounded-xl border border-stone-700 bg-stone-800 px-3 py-2 text-xs text-stone-200 focus:outline-none focus:ring-2 focus:ring-amber-400/30 disabled:opacity-50 cursor-pointer"
               >
                 {MODEL_OPTIONS.map((m) => (
@@ -441,7 +565,7 @@ export default function Dashboard() {
                         onChunkSizeChange={setChunkSize}
                         concurrency={concurrency}
                         onConcurrencyChange={setConcurrency}
-                        disabled={isRunning || isStarting}
+                        disabled={isRunning || isStarting || isPaused}
                       />
                     </div>
                   </motion.div>
@@ -522,18 +646,39 @@ export default function Dashboard() {
             </button>
           )}
 
+          {/* Running: Pause + Stop */}
           {isRunning && (
+            <>
+              <button
+                onClick={pauseTranslation}
+                className="flex items-center gap-2 rounded-xl bg-yellow-500/90 backdrop-blur-sm px-5 py-2.5 text-sm font-semibold text-stone-950 shadow-lg shadow-yellow-500/25 hover:bg-yellow-400 transition-all cursor-pointer"
+              >
+                <Pause className="h-4 w-4" />
+                Pause
+              </button>
+              <button
+                onClick={stopTranslation}
+                className="flex items-center gap-2 rounded-xl bg-red-500/90 backdrop-blur-sm px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-red-500/25 hover:bg-red-600 transition-all cursor-pointer"
+              >
+                <Square className="h-4 w-4" />
+                Stop
+              </button>
+            </>
+          )}
+
+          {/* Paused: Resume */}
+          {isPaused && !isRunning && (
             <button
-              onClick={stopTranslation}
-              className="flex items-center gap-2 rounded-xl bg-red-500/90 backdrop-blur-sm px-6 py-2.5 text-sm font-semibold text-white shadow-lg shadow-red-500/25 hover:bg-red-600 transition-all cursor-pointer"
+              onClick={resumeTranslation}
+              className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 px-6 py-2.5 text-sm font-semibold text-stone-950 shadow-lg shadow-amber-500/25 hover:shadow-amber-500/40 hover:scale-[1.02] active:scale-[0.98] transition-all cursor-pointer"
             >
-              <Square className="h-4 w-4" />
-              Stop
+              <Play className="h-4 w-4" />
+              Resume Translation
             </button>
           )}
 
-          {/* Download Progress — available while running AND when complete */}
-          {isRunning && hasTranslatedChunks && (
+          {/* Download Progress — available while running, paused, or failed with chunks */}
+          {(isRunning || isPaused || isFailed) && hasTranslatedChunks && (
             <button
               onClick={handleDownloadProgress}
               className="relative z-10 flex items-center gap-2 rounded-xl border border-green-500/30 bg-green-500/10 backdrop-blur-md px-4 py-2.5 text-sm font-medium text-green-300 hover:bg-green-500/20 active:bg-green-500/30 transition-all cursor-pointer"
@@ -556,7 +701,7 @@ export default function Dashboard() {
             </button>
           )}
 
-          {(isRunning || isComplete || isFailed || isStarting) && (
+          {(isRunning || isComplete || isFailed || isPaused || isStarting) && (
             <button
               onClick={handleReset}
               className="flex items-center gap-2 rounded-xl border border-stone-700 bg-stone-800 px-4 py-2.5 text-sm font-medium text-stone-300 hover:bg-stone-700 transition-all cursor-pointer"

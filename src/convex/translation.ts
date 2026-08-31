@@ -115,7 +115,7 @@ export const internalPatchChunk = internalMutation({
 export const internalPatchJob = internalMutation({
   args: {
     jobId: v.id("translationJobs"),
-    status: v.optional(v.union(v.literal("pending"), v.literal("processing"), v.literal("completed"), v.literal("failed"))),
+    status: v.optional(v.union(v.literal("pending"), v.literal("processing"), v.literal("paused"), v.literal("completed"), v.literal("failed"))),
     completedCount: v.optional(v.number()),
     failedCount: v.optional(v.number()),
   },
@@ -173,7 +173,15 @@ export const startTranslation = mutation({
   },
 });
 
-/** Mark a job as aborted. */
+/** Pause a running job — the self-chaining loop will stop scheduling new batches. */
+export const pauseJob = mutation({
+  args: { jobId: v.id("translationJobs") },
+  handler: async (ctx, args) => {
+    await ctx.db.patch(args.jobId, { status: "paused", updatedAt: Date.now() });
+  },
+});
+
+/** Mark a job as aborted/stopped. */
 export const abortJob = mutation({
   args: { jobId: v.id("translationJobs") },
   handler: async (ctx, args) => {
@@ -181,7 +189,7 @@ export const abortJob = mutation({
   },
 });
 
-/** Resume a completed/failed job — reset failed chunks back to pending. */
+/** Resume a paused/failed/completed job — reset failed chunks back to pending. */
 export const resumeJob = mutation({
   args: { jobId: v.id("translationJobs") },
   handler: async (ctx, args) => {
@@ -253,6 +261,7 @@ export const getJobStatus = query({
       failedCount: failed,
       processingCount: processing,
       totalEnglishWords,
+      createdAt: job.createdAt,
       percent: total > 0 ? Math.round(((completed + failed) / total) * 100) : 0,
       chunks: chunks
         .sort((a, b) => a.chunkIndex - b.chunkIndex)
@@ -266,7 +275,7 @@ export const getJobStatus = query({
   },
 });
 
-/** List all jobs. */
+/** List all jobs — used for auto-recovery on page reload. */
 export const listJobs = query({
   handler: async (ctx) => {
     const jobs = await ctx.db.query("translationJobs").order("desc").collect();
@@ -310,11 +319,14 @@ export const processNextBatch = action({
     jobId: v.id("translationJobs"),
     batchSize: v.number(),
   },
-  handler: async (ctx, args) => {
+  handler: async (
+    ctx,
+    args,
+  ): Promise<{ done: boolean; processed: number; completed?: number; failed?: number; total?: number; error?: string; reason?: string }> => {
     // Check job is still active
     const job = await ctx.runQuery(internal.translation.internalGetJob, { jobId: args.jobId });
     if (!job || job.status !== "processing") {
-      return { done: true, processed: 0, total: 0 };
+      return { done: true, processed: 0, total: 0, reason: job?.status ?? "missing" };
     }
 
     const apiKeys = job.apiKeys;
@@ -356,6 +368,16 @@ export const processNextBatch = action({
     let keyIndex = 0;
 
     for (const chunk of pending) {
+      // Re-check job status before each chunk — if paused/stopped, bail immediately
+      const currentJob: { status: string } | null = await ctx.runQuery(internal.translation.internalGetJob, { jobId: args.jobId });
+      if (!currentJob || currentJob.status !== "processing") {
+        return {
+          done: false,
+          processed: processedCount,
+          reason: currentJob?.status ?? "missing",
+        };
+      }
+
       const apiKey = apiKeys[keyIndex % apiKeys.length];
       keyIndex++;
 
@@ -462,6 +484,11 @@ export const processJob = action({
     });
 
     if (!result.done) {
+      // If the batch was paused/stopped mid-processing, don't reschedule
+      if (result.reason === "paused" || result.reason === "failed" || result.reason === "missing") {
+        return result;
+      }
+
       // Schedule next batch after 2 seconds (enough for rate limiting)
       await ctx.scheduler.runAfter(2000, api.translation.processJob, {
         jobId: args.jobId,

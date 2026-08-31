@@ -41,6 +41,7 @@ const schema = defineSchema(
       status: v.union(
         v.literal("pending"),
         v.literal("processing"),
+        v.literal("paused"),
         v.literal("completed"),
         v.literal("failed")
       ),
