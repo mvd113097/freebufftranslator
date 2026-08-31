@@ -130,11 +130,11 @@ export const internalPatchJob = internalMutation({
 
 // ─── Public Mutations ────────────────────────────────────────────
 
-/** Start a new translation job. Chunks text and stores everything, then kicks off server-side processing. */
+/** Start a new translation job. Accepts pre-chunked text to avoid document size limits. */
 export const startTranslation = mutation({
   args: {
     fileName: v.string(),
-    rawText: v.string(),
+    chunks: v.array(v.object({ text: v.string() })),
     model: v.string(),
     chunkSize: v.number(),
     concurrency: v.number(),
@@ -142,13 +142,11 @@ export const startTranslation = mutation({
   },
   handler: async (ctx, args) => {
     const now = Date.now();
-    const chunks = chunkText(args.rawText, args.chunkSize);
 
     const jobId = await ctx.db.insert("translationJobs", {
       fileName: args.fileName,
-      rawText: args.rawText,
-      rawTextLength: args.rawText.length,
-      totalChunks: chunks.length,
+      rawTextLength: args.chunks.reduce((sum, c) => sum + c.text.length, 0),
+      totalChunks: args.chunks.length,
       status: "processing",
       model: args.model,
       chunkSize: args.chunkSize,
@@ -160,18 +158,18 @@ export const startTranslation = mutation({
       updatedAt: now,
     });
 
-    for (const chunk of chunks) {
+    for (let i = 0; i < args.chunks.length; i++) {
       await ctx.db.insert("translationChunks", {
         jobId,
-        chunkIndex: chunk.id,
-        originalText: chunk.text,
+        chunkIndex: i,
+        originalText: args.chunks[i].text,
         translatedText: "",
         status: "pending",
         retries: 0,
       });
     }
 
-    return { jobId, totalChunks: chunks.length };
+    return { jobId, totalChunks: args.chunks.length };
   },
 });
 
@@ -237,7 +235,9 @@ export const getJobStatus = query({
     const total = chunks.length;
 
     return {
-      ...job,
+      fileName: job.fileName,
+      totalChunks: job.totalChunks,
+      status: job.status,
       completedCount: completed,
       failedCount: failed,
       percent: total > 0 ? Math.round(((completed + failed) / total) * 100) : 0,

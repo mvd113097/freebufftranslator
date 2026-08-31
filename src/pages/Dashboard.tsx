@@ -1,8 +1,7 @@
-import { useState, useCallback, useMemo, useEffect } from "react";
+import { useState, useCallback, useMemo, useEffect, useRef } from "react";
 import { useMutation, useAction, useQuery } from "convex/react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
-  Play,
   Square,
   Download,
   Sparkles,
@@ -23,6 +22,7 @@ import { SettingsPanel } from "@/components/translator/SettingsPanel";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { translateChunkSimple } from "@/lib/translator/gemini-api";
+import { chunkTexts } from "@/lib/translator/chunker";
 import {
   loadSettings,
   saveSettings,
@@ -63,6 +63,12 @@ export default function Dashboard() {
     activeJobId ? { jobId: activeJobId } : "skip"
   );
 
+  // Export data — query the actual translated chunks text
+  const translatedChunks = useQuery(
+    api.translation.getTranslatedChunks,
+    activeJobId && jobStatus?.status === "completed" ? { jobId: activeJobId } : "skip"
+  );
+
   // ─── Persist settings to localStorage on change ─────────────────
   useEffect(() => {
     saveSettings({ keys, model: selectedModel, chunkSize, concurrency });
@@ -81,9 +87,6 @@ export default function Dashboard() {
   const completedCount = jobStatus?.completedCount ?? 0;
   const failedCount = jobStatus?.failedCount ?? 0;
   const totalChunks = jobStatus?.totalChunks ?? 0;
-  const overallPercent = totalChunks > 0
-    ? Math.round(((completedCount + failedCount) / totalChunks) * 100)
-    : 0;
 
   // Convert job chunks to ChunkProgress format for ProgressPanel
   const chunkProgress = useMemo(() => {
@@ -125,10 +128,12 @@ export default function Dashboard() {
 
     setIsStarting(true);
     try {
-      // Create the job in Convex (stores text, chunks, api keys)
+      // Chunk text client-side to avoid Convex document size limits
+      const textChunks = chunkTexts(rawText, chunkSize);
+
       const { jobId } = await startTranslationMutation({
         fileName: fileName || "unknown.txt",
-        rawText,
+        chunks: textChunks.map((t) => ({ text: t })),
         model: selectedModel,
         chunkSize,
         concurrency,
@@ -138,8 +143,6 @@ export default function Dashboard() {
       setActiveJobId(jobId);
 
       // Kick off the self-chaining server-side pipeline
-      // This will process chunks and schedule itself for the next batch
-      // Even if the browser closes, Convex keeps processing
       await processJobAction({
         jobId,
         batchSize: concurrency,
@@ -168,7 +171,6 @@ export default function Dashboard() {
     if (!activeJobId) return;
     try {
       await resumeJobMutation({ jobId: activeJobId });
-      // Kick off processing again
       await processJobAction({
         jobId: activeJobId,
         batchSize: concurrency,
@@ -179,32 +181,27 @@ export default function Dashboard() {
   }, [activeJobId, concurrency, resumeJobMutation, processJobAction]);
 
   // ─── Export (final) — stitch all completed chunks ───────────────
-  const handleExport = useCallback(async () => {
-    if (!activeJobId) return;
-
-    // The jobStatus query already has chunk info with translatedLength
-    // But we need the actual text. Use a different approach:
-    // Re-query translated chunks from Convex
-    try {
-      // We'll use a direct fetch from the query result that already has translated text
-      // Actually, we need to get the translated text. Let's use the raw query approach
-      const chunks = jobStatus?.chunks ?? [];
-      if (chunks.length === 0) {
-        alert("No translated content to export.");
-        return;
-      }
-
-      // The chunks in jobStatus don't have the full translated text, only length
-      // We need to get them from getTranslatedChunks query
-      // But we can't call useQuery from a callback. Instead, we'll stitch from
-      // what we have and show a message about the limitation.
-      // Actually, let's just render all completed chunks inline
-      alert("Export is being processed. The Convex subscription will update with full text.");
-    } catch (err) {
-      console.error("Export error:", err);
-      alert("Export failed: " + (err instanceof Error ? err.message : String(err)));
+  const handleExport = useCallback(() => {
+    if (!translatedChunks || translatedChunks.length === 0) {
+      alert("No translated content to export yet.");
+      return;
     }
-  }, [activeJobId, jobStatus]);
+
+    const stitched = translatedChunks
+      .sort((a, b) => a.index - b.index)
+      .map((c) => c.text)
+      .join("\n\n");
+
+    const blob = new Blob([stitched], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = (fileName.replace(/\.txt$/i, "") || "translated_novel") + ".txt";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  }, [translatedChunks, fileName]);
 
   // ─── Reset ──────────────────────────────────────────────────────
   const handleReset = useCallback(async () => {
@@ -243,28 +240,6 @@ export default function Dashboard() {
                 <Server className="h-3 w-3" />
                 Server-side processing active
               </div>
-            )}
-            {isComplete && (
-              <motion.button
-                initial={{ opacity: 0, scale: 0.9 }}
-                animate={{ opacity: 1, scale: 1 }}
-                onClick={() => {
-                  // Trigger export via Convex query
-                  // For now, use a helper that fetches all translated chunks
-                  const exportChunks = async () => {
-                    // We need to get translated chunks. Since we can't call useQuery from a callback,
-                    // we'll use a trick: the jobStatus already has chunk info.
-                    // Let's do a direct fetch
-                    const url = `/api/export/${activeJobId}`;
-                    alert("Download complete translation via the Export button below.");
-                  };
-                  exportChunks();
-                }}
-                className="flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-amber-500 to-amber-600 px-4 py-2 text-xs font-semibold text-stone-950 shadow-lg shadow-amber-500/25 hover:shadow-amber-500/40 transition-all cursor-pointer"
-              >
-                <Download className="h-3.5 w-3.5" />
-                Download Complete
-              </motion.button>
             )}
           </div>
         </div>
@@ -324,7 +299,7 @@ export default function Dashboard() {
                         onClick={resumeTranslation}
                         className="flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 px-4 py-2 text-xs font-semibold text-stone-950 shadow-md hover:shadow-lg transition-all cursor-pointer"
                       >
-                        <Play className="h-3.5 w-3.5" />
+                        <Zap className="h-3.5 w-3.5" />
                         Resume Translation
                       </button>
                       <button
@@ -447,8 +422,8 @@ export default function Dashboard() {
             <ProgressPanel
               progress={progress}
               chunks={chunkProgress}
-              isRunning={isRunning}
-              isComplete={isComplete}
+              isRunning={!!isRunning}
+              isComplete={!!isComplete}
             />
           </motion.div>
         </div>
@@ -519,42 +494,14 @@ export default function Dashboard() {
             </button>
           )}
 
-          {isComplete && (
+          {isComplete && translatedChunks && translatedChunks.length > 0 && (
             <button
-              onClick={async () => {
-                if (!activeJobId) return;
-                // Trigger Convex query for export
-                // Since we can't directly fetch translated text from useQuery in a callback,
-                // we'll open a new window that shows the translation
-                // For a better UX, we could use an action to stream the data
-                // For now, let's use a simple approach
-                try {
-                  const response = await fetch(
-                    `${window.location.origin}/api/export?jobId=${activeJobId}`
-                  );
-                  if (response.ok) {
-                    const blob = await response.blob();
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement("a");
-                    a.href = url;
-                    a.download = (fileName.replace(/\.txt$/i, "") || "translated_novel") + ".txt";
-                    document.body.appendChild(a);
-                    a.click();
-                    document.body.removeChild(a);
-                    setTimeout(() => URL.revokeObjectURL(url), 5000);
-                  } else {
-                    // Fallback: show a message about export
-                    alert("Export via server is not configured yet. The translated text is stored in Convex and available via the dashboard.");
-                  }
-                } catch {
-                  alert("Export is being set up. Your translation is saved in Convex.");
-                }
-              }}
+              onClick={handleExport}
               className="relative z-10 flex items-center gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 backdrop-blur-md px-5 py-2.5 text-sm font-medium text-amber-300 hover:bg-amber-500/20 active:bg-amber-500/30 transition-all"
               style={{ WebkitTapHighlightColor: "transparent", touchAction: "manipulation" }}
             >
               <Download className="h-4 w-4" />
-              Export .txt
+              Download Complete ({translatedChunks.length} chunks)
             </button>
           )}
 

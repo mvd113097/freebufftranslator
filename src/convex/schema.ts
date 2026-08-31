@@ -36,7 +36,6 @@ const schema = defineSchema(
     translationJobs: defineTable({
       userId: v.optional(v.string()),
       fileName: v.string(),
-      rawText: v.string(),
       rawTextLength: v.number(),
       totalChunks: v.number(),
       status: v.union(
