@@ -634,18 +634,18 @@ export const processNextBatch = action({
     const prevPercent = Math.round(((job.completedCount + job.failedCount) / job.totalChunks) * 100);
     const crossedTenPercent = Math.floor(percentNow / 10) > Math.floor(prevPercent / 10);
 
-    if (isAllDone || crossedTenPercent || (processedCount > 0 && counts.completed > 0)) {
-      // Build a detailed notification with word count, elapsed time, model info
-      const elapsed = Date.now() - job.createdAt;
+    // Helper to build detailed notification text
+    const buildProgressText = async (pct: number, countsRef: { completed: number; failed: number; total: number }, jobRef: typeof job) => {
+      const elapsed = Date.now() - jobRef.createdAt;
       const elapsedMin = Math.floor(elapsed / 60_000);
       const elapsedSec = Math.floor((elapsed % 60_000) / 1000);
       const elapsedStr = elapsedMin > 0 ? `${elapsedMin}m ${elapsedSec}s` : `${elapsedSec}s`;
-      const chunksDone = counts.completed;
-      const chunksTotal = counts.total;
-      const chunksPending = chunksTotal - chunksDone - counts.failed;
+      const chunksDone = countsRef.completed;
+      const chunksTotal = countsRef.total;
+      const chunksPending = chunksTotal - chunksDone - countsRef.failed;
       const rate = elapsedMin > 0 ? (chunksDone / elapsedMin).toFixed(1) : "—";
+      const wordCount: number = await ctx.runQuery(internal.translation.internalCountWords, { jobId: jobRef._id });
 
-      // Estimate remaining time
       let etaStr = "";
       if (chunksDone > 0 && chunksPending > 0) {
         const avgPerChunk = elapsed / chunksDone;
@@ -655,34 +655,35 @@ export const processNextBatch = action({
         etaStr = etaMin > 0 ? `~${etaMin}m ${etaSec}s` : `~${etaSec}s`;
       }
 
-      if (isAllDone) {
-        const finalWordCount: number = await ctx.runQuery(internal.translation.internalCountWords, { jobId: args.jobId });
-        await notifyJob(
-          job,
-          `✅ <b>Translation Complete!</b>\n` +
-          `📄 ${job.fileName}\n` +
-          `📊 ${counts.completed}/${counts.total} chunks translated\n` +
-          `📝 ${finalWordCount.toLocaleString()} English words\n` +
-          `⏱️ Total time: ${elapsedStr}\n` +
-          `🤖 Model: ${job.model}\n` +
-          `${counts.failed > 0 ? `⚠️ ${counts.failed} chunks failed\n` : ""}` +
-          `📥 Ready to download!`,
-          "complete",
-        );
-      } else if (processedCount > 0) {
-        // Get word count for progress notification
-        const wordCount: number = await ctx.runQuery(internal.translation.internalCountWords, { jobId: args.jobId });
-        await notifyJob(
-          job,
-          `📊 <b>Progress: ${percentNow}%</b>\n` +
-          `📄 ${job.fileName}\n` +
-          `✅ ${chunksDone}/${chunksTotal} chunks done\n` +
-          `${counts.failed > 0 ? `❌ ${counts.failed} failed\n` : ""}` +
+      return {
+        elapsedStr, chunksDone, chunksTotal, chunksPending, rate, wordCount, etaStr,
+        text: `📄 ${jobRef.fileName}\n` +
+          `📊 ${chunksDone}/${chunksTotal} chunks (${pct}%)\n` +
           `📝 ${wordCount.toLocaleString()} English words\n` +
-          `🤖 Model: ${job.model}\n` +
+          `🤖 Model: ${jobRef.model}\n` +
           `⏱️ Elapsed: ${elapsedStr}\n` +
           `📈 Rate: ~${rate} chunks/min` +
-          `${etaStr ? `\n⏳ ETA: ${etaStr}` : ""}`,
+          (countsRef.failed > 0 ? `\n❌ ${countsRef.failed} chunks failed` : "") +
+          (etaStr ? `\n⏳ ETA: ${etaStr}` : ""),
+      };
+    };
+
+    // Only send notifications if there were actual changes
+    if (processedCount > 0 || isAllDone) {
+      const pct = Math.round(((counts.completed + counts.failed) / counts.total) * 100);
+      const detail = await buildProgressText(pct, counts, job);
+
+      if (isAllDone) {
+        await notifyJob(
+          job,
+          `✅ <b>Translation Complete!</b>\n${detail.text}\n📥 Ready to download!`,
+          "complete",
+        );
+      } else if (crossedTenPercent) {
+        // 10% milestone — uses "progress" type (respects checkbox)
+        await notifyJob(
+          job,
+          `📊 <b>Progress: ${pct}%</b>\n${detail.text}`,
           "progress",
         );
       }
