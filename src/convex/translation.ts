@@ -141,12 +141,14 @@ export const internalPatchJob = internalMutation({
     status: v.optional(v.union(v.literal("pending"), v.literal("processing"), v.literal("paused"), v.literal("completed"), v.literal("failed"))),
     completedCount: v.optional(v.number()),
     failedCount: v.optional(v.number()),
+    lastHeartbeat: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
     const patch: Record<string, unknown> = { updatedAt: Date.now() };
     if (args.status !== undefined) patch.status = args.status;
     if (args.completedCount !== undefined) patch.completedCount = args.completedCount;
     if (args.failedCount !== undefined) patch.failedCount = args.failedCount;
+    if (args.lastHeartbeat !== undefined) patch.lastHeartbeat = args.lastHeartbeat;
     await ctx.db.patch(args.jobId, patch);
   },
 });
@@ -177,6 +179,7 @@ export const startTranslation = mutation({
       apiKeys: args.apiKeys,
       completedCount: 0,
       failedCount: 0,
+      lastHeartbeat: now,
       createdAt: now,
       updatedAt: now,
     });
@@ -301,6 +304,7 @@ export const getJobStatus = query({
       failedCount: failed,
       processingCount: processing,
       totalEnglishWords,
+      lastHeartbeat: job.lastHeartbeat,
       createdAt: job.createdAt,
       percent: total > 0 ? Math.round(((completed + failed) / total) * 100) : 0,
       chunks: chunks
@@ -539,6 +543,7 @@ export const processNextBatch = action({
       status: isAllDone ? "completed" : "processing",
       completedCount: counts.completed,
       failedCount: counts.failed,
+      lastHeartbeat: Date.now(),
     });
 
     return {

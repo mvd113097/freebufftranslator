@@ -152,6 +152,12 @@ export default function Dashboard() {
   const isComplete = jobStatus?.status === "completed";
   const isFailed = jobStatus?.status === "failed";
 
+  // Detect stale jobs: status is "processing" but no heartbeat in 60 seconds
+  // This means the server-side pipeline chain likely broke
+  const isStale = isRunning && jobStatus?.lastHeartbeat
+    ? (Date.now() - jobStatus.lastHeartbeat) > 60_000
+    : false;
+
   const completedCount = jobStatus?.completedCount ?? 0;
   const failedCount = jobStatus?.failedCount ?? 0;
   const totalChunks = jobStatus?.totalChunks ?? 0;
@@ -405,6 +411,49 @@ export default function Dashboard() {
                       This translation continues even if you close the browser tab.
                       Come back anytime to check progress.
                     </p>
+                  </div>
+                </div>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Stale job banner — pipeline stopped, needs resume */}
+        <AnimatePresence>
+          {isStale && (
+            <motion.div
+              initial={{ opacity: 0, y: -12, height: 0 }}
+              animate={{ opacity: 1, y: 0, height: "auto" }}
+              exit={{ opacity: 0, y: -12, height: 0 }}
+              className="overflow-hidden"
+            >
+              <div className="rounded-2xl border border-orange-500/30 bg-orange-500/10 backdrop-blur-xl p-4 shadow-sm">
+                <div className="flex items-start gap-3">
+                  <AlertCircle className="h-5 w-5 text-orange-400 mt-0.5 shrink-0" />
+                  <div className="flex-1">
+                    <h3 className="text-sm font-semibold text-orange-300">
+                      Translation pipeline stopped
+                    </h3>
+                    <p className="text-xs text-orange-200/70 mt-1">
+                      The server-side pipeline appears to have stopped. {completedCount} of {totalChunks} chunks completed.
+                      Click Resume to continue from where it left off.
+                    </p>
+                    <div className="flex items-center gap-3 mt-3">
+                      <button
+                        onClick={resumeTranslation}
+                        className="flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 px-4 py-2 text-xs font-semibold text-stone-950 shadow-md hover:shadow-lg transition-all cursor-pointer"
+                      >
+                        <Play className="h-3.5 w-3.5" />
+                        Resume Translation
+                      </button>
+                      <button
+                        onClick={handleReset}
+                        className="flex items-center gap-1.5 rounded-xl border border-stone-700 bg-stone-800 px-4 py-2 text-xs font-medium text-stone-300 hover:bg-stone-700 transition-all cursor-pointer"
+                      >
+                        <RotateCcw className="h-3.5 w-3.5" />
+                        Start Over
+                      </button>
+                    </div>
                   </div>
                 </div>
               </div>

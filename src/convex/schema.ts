@@ -51,6 +51,7 @@ const schema = defineSchema(
       apiKeys: v.array(v.string()),
       completedCount: v.number(),
       failedCount: v.number(),
+      lastHeartbeat: v.number(),
       createdAt: v.number(),
       updatedAt: v.number(),
     }),
