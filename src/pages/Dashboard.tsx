@@ -102,6 +102,7 @@ export default function Dashboard() {
   const resumeJobMutation = useMutation(api.translation.resumeJob);
   const pauseJobMutation = useMutation(api.translation.pauseJob);
   const updateJobSettingsMutation = useMutation(api.translation.updateJobSettings);
+  const retranslateChineseMutation = useMutation(api.translation.retranslateChineseChunks);
 
   // List all jobs for auto-recovery detection
   const allJobs = useQuery(api.translation.listJobs);
@@ -988,17 +989,35 @@ export default function Dashboard() {
               exit={{ opacity: 0, y: 12, height: 0 }}
               className="overflow-hidden"
             >
-              <div className="rounded-2xl border border-purple-500/30 bg-purple-500/10 backdrop-blur-xl p-4 shadow-sm">
-                <div className="flex items-center justify-between mb-3">
+              <div className="rounded-2xl border border-purple-500/30 bg-purple-500/10 backdrop-blur-xl p-4 shadow-sm">                  <div className="flex items-center justify-between mb-3">
                   <h3 className="text-sm font-semibold text-purple-300">
                     Chinese Character Scan Results
                   </h3>
-                  <button
-                    onClick={() => setShowScanResults(false)}
-                    className="text-xs text-purple-400 hover:text-purple-300 cursor-pointer"
-                  >
-                    Close
-                  </button>
+                  <div className="flex items-center gap-3">
+                    {scanResults.chunksWithChinese.length > 0 && activeJobId && (
+                      <button
+                        onClick={async () => {
+                          try {
+                            const result = await retranslateChineseMutation({ jobId: activeJobId });
+                            setShowScanResults(false);
+                            processJobAction({ jobId: activeJobId, batchSize: concurrency }).catch(console.error);
+                            alert(`Reset ${result.resetCount} chunks for re-translation. Pipeline restarted.`);
+                          } catch (err) {
+                            alert("Failed: " + (err instanceof Error ? err.message : String(err)));
+                          }
+                        }}
+                        className="rounded-lg bg-gradient-to-r from-purple-500 to-pink-500 px-3 py-1.5 text-[11px] font-semibold text-white shadow-md hover:shadow-lg transition-all cursor-pointer"
+                      >
+                        Re-translate {scanResults.chunksWithChinese.length} chunks
+                      </button>
+                    )}
+                    <button
+                      onClick={() => setShowScanResults(false)}
+                      className="text-xs text-purple-400 hover:text-purple-300 cursor-pointer"
+                    >
+                      Close
+                    </button>
+                  </div>
                 </div>
                 {scanResults.totalScanned === 0 ? (
                   <p className="text-xs text-stone-400">No completed chunks found.</p>

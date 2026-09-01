@@ -285,6 +285,49 @@ export const resumeJob = mutation({
   },
 });
 
+/** Retranslate only chunks that contain Chinese characters. Resets them to pending and restarts. */
+export const retranslateChineseChunks = mutation({
+  args: { jobId: v.id("translationJobs") },
+  handler: async (ctx, args) => {
+    const userId = await getAuthUserId(ctx);
+    const job = await ctx.db.get(args.jobId);
+    if (!job || (userId && job.userId !== userId as string)) throw new Error("Unauthorized");
+
+    const chunks = await ctx.db
+      .query("translationChunks")
+      .withIndex("by_jobId", (q) => q.eq("jobId", args.jobId))
+      .collect();
+
+    const chineseRegex = /[\u4e00-\u9fff]+/;
+    let resetCount = 0;
+
+    for (const chunk of chunks) {
+      if (chunk.status === "completed" && chunk.translatedText.length > 0) {
+        if (chineseRegex.test(chunk.translatedText)) {
+          await ctx.db.patch(chunk._id, {
+            status: "pending",
+            translatedText: "",
+            error: undefined,
+            retries: 0,
+          });
+          resetCount++;
+        }
+      }
+    }
+
+    if (resetCount > 0) {
+      await ctx.db.patch(args.jobId, {
+        status: "processing",
+        completedCount: chunks.filter((c) => c.status === "completed" && !chineseRegex.test(c.translatedText)).length,
+        lastHeartbeat: Date.now(),
+        updatedAt: Date.now(),
+      });
+    }
+
+    return { resetCount };
+  },
+});
+
 /** Update job settings mid-translation (concurrency, model, apiKeys). */
 export const updateJobSettings = mutation({
   args: {
@@ -602,6 +645,14 @@ export const processNextBatch = action({
               }
 
               const translated = await callOpenRouter(chunk.originalText, apiKey, tryModel);
+
+              // Quality gate: reject if output still contains Chinese characters
+              const chineseRegex = /[\u4e00-\u9fff]+/;
+              if (chineseRegex.test(translated) && attempt < attemptsForModel - 1) {
+                console.warn(`[Quality] Chunk ${chunk.chunkIndex} contains Chinese characters, retrying...`);
+                await new Promise((r) => setTimeout(r, 2000));
+                continue; // retry same model
+              }
 
               await ctx.runMutation(internal.translation.internalPatchChunk, {
                 chunkId: chunk._id,
