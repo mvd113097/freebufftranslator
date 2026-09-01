@@ -83,6 +83,7 @@ export default function Dashboard() {
   const [telegramStatusInterval, setTelegramStatusInterval] = useState(() => loadSettings().telegramStatusInterval);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [showScanResults, setShowScanResults] = useState(false);
+  const [recentlyDeletedIds, setRecentlyDeletedIds] = useState<Set<string>>(new Set());
 
   // Active job tracking — persisted to localStorage
   const [activeJobId, setActiveJobId] = useState<Id<"translationJobs"> | null>(() => {
@@ -143,11 +144,10 @@ export default function Dashboard() {
     if (hasRecovered || !allJobs) return;
     setHasRecovered(true);
 
-    // If we already have an activeJobId, check if it still exists in the list
+    // If we already have an activeJobId, check if it still exists
     if (activeJobId) {
-      const job = allJobs.find((j) => j._id === activeJobId);
+      const job = allJobs.find((j) => j._id === activeJobId && !recentlyDeletedIds.has(j._id));
       if (!job) {
-        // Job was deleted or no longer exists — clear immediately
         setActiveJobId(null);
         saveActiveJobId(null);
       }
@@ -157,13 +157,15 @@ export default function Dashboard() {
     // Look for the most recent non-deleted job (any status) to recover
     // Priority: processing > paused > completed/failed > any
     const recoverable =
-      allJobs.find((j) => j.status === "processing") ??
-      allJobs.find((j) => j.status === "paused") ??
-      allJobs.find((j) => j.status === "completed" || j.status === "failed");
+      allJobs.find((j) => j.status === "processing" && !recentlyDeletedIds.has(j._id)) ??
+      allJobs.find((j) => j.status === "paused" && !recentlyDeletedIds.has(j._id)) ??
+      allJobs.find((j) => (j.status === "completed" || j.status === "failed") && !recentlyDeletedIds.has(j._id));
     if (recoverable) {
       setActiveJobId(recoverable._id);
+      // Restore fileName from the recovered job
+      setFileName(recoverable.fileName || "");
     }
-  }, [allJobs, activeJobId, hasRecovered]);
+  }, [allJobs, activeJobId, hasRecovered, recentlyDeletedIds]);
 
   // ─── Clear activeJobId if query returns no data (job was deleted) ─
   useEffect(() => {
@@ -418,11 +420,13 @@ export default function Dashboard() {
   // ─── Reset ──────────────────────────────────────────────────────
   const handleReset = useCallback(async () => {
     if (activeJobId) {
+      const jobIdToDelete = activeJobId;
       try {
         await deleteJobMutation({ jobId: activeJobId });
       } catch (err) {
         console.error("Failed to delete job:", err);
       }
+      setRecentlyDeletedIds((prev) => new Set(prev).add(jobIdToDelete as string));
     }
     setActiveJobId(null);
     saveActiveJobId(null);
@@ -1065,7 +1069,9 @@ export default function Dashboard() {
         </AnimatePresence>
 
         {/* Past Translations list */}
-        {allJobs && allJobs.length > 0 && (
+        {(() => {
+          const visibleJobs = allJobs?.filter((j) => !recentlyDeletedIds.has(j._id)) ?? [];
+          return visibleJobs.length > 0 ? (
           <motion.div
             initial={{ opacity: 0, y: 12 }}
             animate={{ opacity: 1, y: 0 }}
@@ -1073,10 +1079,10 @@ export default function Dashboard() {
             className="space-y-3"
           >
             <h3 className="text-xs font-semibold text-stone-400 uppercase tracking-wider px-1">
-              Past Translations ({allJobs.length})
+              Past Translations ({visibleJobs.length})
             </h3>
             <div className="space-y-2">
-              {allJobs.map((job) => (
+              {visibleJobs.map((job) => (
                 <div
                   key={job._id}
                   onClick={() => {
@@ -1119,6 +1125,7 @@ export default function Dashboard() {
                         e.stopPropagation();
                         setActiveJobId(job._id);
                         saveActiveJobId(job._id);
+                        setFileName(job.fileName || "");
                       }}
                       className="rounded-lg border border-stone-700 bg-stone-800 px-2.5 py-1 text-[10px] font-medium text-stone-400 hover:bg-stone-700 hover:text-stone-200 transition-all cursor-pointer"
                     >
@@ -1130,9 +1137,11 @@ export default function Dashboard() {
                         if (!confirm(`Delete ${job.fileName}?`)) return;
                         try {
                           await deleteJobMutation({ jobId: job._id });
+                          setRecentlyDeletedIds((prev) => new Set(prev).add(job._id as string));
                           if (activeJobId === job._id) {
                             setActiveJobId(null);
                             saveActiveJobId(null);
+                            setFileName("");
                           }
                         } catch (err) {
                           console.error("Failed to delete:", err);
@@ -1147,7 +1156,8 @@ export default function Dashboard() {
               ))}
             </div>
           </motion.div>
-        )}
+          ) : null;
+        })()}
       </main>
     </div>
   );
