@@ -678,21 +678,26 @@ function normalizeParagraphs(text: string): string {
   // Step 1: Normalize line endings
   let result = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 
-  // Step 2: If there are NO double newlines at all, the model collapsed paragraphs.
-  // In this case, treat single newlines as paragraph breaks.
-  const hasDoubleNewlines = /\n\n/.test(result);
-  if (!hasDoubleNewlines && result.includes("\n")) {
-    // Convert single newlines to double newlines (paragraph breaks)
-    result = result.replace(/\n/g, "\n\n");
-  }
+  // Step 2: Convert ALL single newlines between text lines to double newlines.
+  // This ensures every paragraph has a blank line after it, regardless of
+  // whether the model already used some double newlines.
+  // Pattern: a single \n that is NOT part of \n\n, and sits between
+  // non-empty lines (text on both sides = paragraph break).
+  result = result.replace(/([^\n])\n([^\n])/g, "$1\n\n$2");
 
   // Step 3: Collapse 3+ consecutive newlines into exactly 2 (one blank line)
   result = result.replace(/\n{3,}/g, "\n\n");
 
-  // Step 4: Trim leading/trailing whitespace
+  // Step 4: Trim leading/trailing whitespace on each line
+  result = result
+    .split("\n")
+    .map((line) => line.trim())
+    .join("\n");
+
+  // Step 5: Trim leading/trailing whitespace of the whole text
   result = result.trim();
 
-  // Step 5: Ensure the text ends with a single newline
+  // Step 6: Ensure the text ends with a single newline
   if (!result.endsWith("\n")) {
     result += "\n";
   }
