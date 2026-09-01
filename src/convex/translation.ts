@@ -676,8 +676,12 @@ export const processNextBatch = action({
 
               if (lastError.includes("RATE_LIMITED") || lastError.includes("429")) {
                 await new Promise((r) => setTimeout(r, 10000 * (attempt + 1))); // 10s backoff
-              } else if (lastError.includes("401") || lastError.includes("403")) {
-                break; // Auth error — skip to next model
+              } else if (lastError.includes("403")) {
+                // Transient auth error on free models — retry with backoff
+                console.warn(`[Retry] Chunk ${chunk.chunkIndex} got 403 on ${tryModel}, retrying in 5s...`);
+                await new Promise((r) => setTimeout(r, 5000 * (attempt + 1)));
+              } else if (lastError.includes("401")) {
+                break; // Real invalid key — skip to next model
               } else if (lastError.includes("502") || lastError.includes("503") || lastError.includes("overloaded")) {
                 await new Promise((r) => setTimeout(r, 3000)); // 3s for overloaded
                 break;
