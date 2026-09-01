@@ -467,141 +467,109 @@ export const processNextBatch = action({
       );
     }
 
-    // Process each chunk
-    let processedCount = 0;
-    let keyIndex = 0;
-    const modelChain = getFallbackChain(job.model);
+    // Assign each chunk to a key (round-robin)
+    const chunkAssignments = pending.map((chunk, i) => ({
+      chunk,
+      apiKey: apiKeys[i % apiKeys.length],
+    }));
 
-    // Track last-use time per key for per-key rate limiting
-    // Only wait between requests using the SAME key
-    const keyLastUsed: Map<string, number> = new Map();
-
-    for (const chunk of pending) {
-      // Re-check job status before each chunk — if paused/stopped, bail immediately
-      const currentJob: { status: string } | null = await ctx.runQuery(internal.translation.internalGetJob, { jobId: args.jobId });
-      if (!currentJob || currentJob.status !== "processing") {
-        // Notify if pipeline was paused/stopped externally
-        if (currentJob?.status === "paused") {
-          await notifyJob(job, `⏸️ <b>Translation Paused</b>\nOpen the browser to resume.`);
-        } else if (currentJob?.status === "failed") {
-          await notifyJob(job, `🛑 <b>Translation Stopped</b>\nOpen the browser to resume or reset.`);
-        }
-        return {
-          done: false,
-          processed: processedCount,
-          reason: currentJob?.status ?? "missing",
-        };
+    // Re-check job status before launching parallel batch
+    const preCheck: { status: string } | null = await ctx.runQuery(internal.translation.internalGetJob, { jobId: args.jobId });
+    if (!preCheck || preCheck.status !== "processing") {
+      if (preCheck?.status === "paused") {
+        await notifyJob(job, `⏸️ <b>Translation Paused</b>\nOpen the browser to resume.`);
+      } else if (preCheck?.status === "failed") {
+        await notifyJob(job, `🛑 <b>Translation Stopped</b>\nOpen the browser to resume or reset.`);
       }
+      return { done: false, processed: 0, reason: preCheck?.status ?? "missing" };
+    }
 
-      const apiKey = apiKeys[keyIndex % apiKeys.length];
-      keyIndex++;
-
-      // Mark as processing
+    // Mark all chunks as processing upfront
+    for (const { chunk } of chunkAssignments) {
       await ctx.runMutation(internal.translation.internalPatchChunk, {
         chunkId: chunk._id,
         status: "processing",
       });
+    }
 
-      let success = false;
-      let lastError = "";
+    // Process ALL chunks in parallel (one per key)
+    let processedCount = 0;
+    const modelChain = getFallbackChain(job.model);
 
-      // Try each model in the fallback chain
-      for (let modelIdx = 0; modelIdx < modelChain.length; modelIdx++) {
-        const tryModel = modelChain[modelIdx];
-        const attemptsForModel = modelIdx === 0 ? 3 : 2; // Primary gets 3 tries, fallbacks get 2
+    const results = await Promise.all(
+      chunkAssignments.map(async ({ chunk, apiKey }) => {
+        let success = false;
+        let lastError = "";
 
-        for (let attempt = 0; attempt < attemptsForModel; attempt++) {
-          // Re-check job status before each attempt
-          const checkJob: { status: string } | null = await ctx.runQuery(internal.translation.internalGetJob, { jobId: args.jobId });
-          if (!checkJob || checkJob.status !== "processing") {
-            return {
-              done: false,
-              processed: processedCount,
-              reason: checkJob?.status ?? "missing",
-            };
-          }
+        for (let modelIdx = 0; modelIdx < modelChain.length; modelIdx++) {
+          const tryModel = modelChain[modelIdx];
+          const attemptsForModel = modelIdx === 0 ? 2 : 1; // Primary: 2 tries, fallbacks: 1
 
-          try {
-            // Per-key rate limit: only wait if this key was used recently
-            const lastUse = keyLastUsed.get(apiKey) ?? 0;
-            const timeSinceLastUse = Date.now() - lastUse;
-            const MIN_KEY_GAP = 4500; // 4.5s between uses of the same key
-            if (timeSinceLastUse < MIN_KEY_GAP && attempt === 0 && modelIdx === 0) {
-              await new Promise((r) => setTimeout(r, MIN_KEY_GAP - timeSinceLastUse));
-            } else if (attempt > 0) {
-              // Retrying same request — standard backoff
-              await new Promise((r) => setTimeout(r, 3000));
+          for (let attempt = 0; attempt < attemptsForModel; attempt++) {
+            // Re-check job status
+            const checkJob: { status: string } | null = await ctx.runQuery(internal.translation.internalGetJob, { jobId: args.jobId });
+            if (!checkJob || checkJob.status !== "processing") {
+              return { success: false, chunkIndex: chunk.chunkIndex, error: "job_stopped" };
             }
 
-            keyLastUsed.set(apiKey, Date.now());
-            console.log(`[Translation] Chunk ${chunk.chunkIndex}: trying model ${tryModel} (attempt ${attempt + 1})`);
+            try {
+              // Retry backoff (only on retries, not first attempt)
+              if (attempt > 0) {
+                await new Promise((r) => setTimeout(r, 2000));
+              }
 
-            const translated = await callOpenRouter(
-              chunk.originalText,
-              apiKey,
-              tryModel
-            );
+              const translated = await callOpenRouter(chunk.originalText, apiKey, tryModel);
 
-            await ctx.runMutation(internal.translation.internalPatchChunk, {
-              chunkId: chunk._id,
-              translatedText: translated,
-              status: "completed",
-              retries: attempt + (modelIdx * attemptsForModel),
-              usedModel: tryModel,
-            });
+              await ctx.runMutation(internal.translation.internalPatchChunk, {
+                chunkId: chunk._id,
+                translatedText: translated,
+                status: "completed",
+                retries: attempt + (modelIdx * attemptsForModel),
+                usedModel: tryModel,
+              });
 
-            processedCount++;
-            success = true;
-            break;
-          } catch (err: unknown) {
-            lastError = err instanceof Error ? err.message : String(err);
-            console.error(
-              `[Translation] Chunk ${chunk.chunkIndex} model=${tryModel} attempt ${attempt + 1} failed:`,
-              lastError
-            );
-
-            // Rate limited — wait longer before retrying
-            if (lastError.includes("RATE_LIMITED") || lastError.includes("429")) {
-              await new Promise((r) => setTimeout(r, 30000 * (attempt + 1)));
-            } else if (lastError.includes("401") || lastError.includes("403")) {
-              // Auth error — don't retry this model, try next fallback
+              success = true;
               break;
-            } else if (lastError.includes("502") || lastError.includes("503") || lastError.includes("overloaded")) {
-              // Server error — try next fallback model faster
-              await new Promise((r) => setTimeout(r, 5000));
-              break;
-            } else if (attempt < attemptsForModel - 1) {
-              await new Promise((r) =>
-                setTimeout(r, Math.min(3000 * Math.pow(2, attempt), 20000))
-              );
+            } catch (err: unknown) {
+              lastError = err instanceof Error ? err.message : String(err);
+              console.error(`[Translation] Chunk ${chunk.chunkIndex} model=${tryModel} attempt ${attempt + 1} failed:`, lastError);
+
+              if (lastError.includes("RATE_LIMITED") || lastError.includes("429")) {
+                await new Promise((r) => setTimeout(r, 10000 * (attempt + 1))); // 10s backoff
+              } else if (lastError.includes("401") || lastError.includes("403")) {
+                break; // Auth error — skip to next model
+              } else if (lastError.includes("502") || lastError.includes("503") || lastError.includes("overloaded")) {
+                await new Promise((r) => setTimeout(r, 3000)); // 3s for overloaded
+                break;
+              } else if (attempt < attemptsForModel - 1) {
+                await new Promise((r) => setTimeout(r, 2000));
+              }
             }
           }
+          if (success) break;
+          // Model exhausted — try next immediately (no delay)
         }
 
-        if (success) break;
-
-        // Before switching to next model, wait a bit
-        if (modelIdx < modelChain.length - 1) {
-          console.log(`[Translation] Chunk ${chunk.chunkIndex}: model ${tryModel} exhausted, switching to next fallback`);
-          await new Promise((r) => setTimeout(r, 3000));
+        if (!success) {
+          await ctx.runMutation(internal.translation.internalPatchChunk, {
+            chunkId: chunk._id,
+            status: "failed",
+            error: lastError.slice(0, 500),
+            retries: 5,
+          });
+          await notifyJob(
+            job,
+            `❌ <b>Chunk ${chunk.chunkIndex + 1} failed</b>\nError: ${lastError.slice(0, 200)}`,
+          );
         }
-      }
 
-      if (!success) {
-        await ctx.runMutation(internal.translation.internalPatchChunk, {
-          chunkId: chunk._id,
-          status: "failed",
-          error: lastError.slice(0, 500),
-          retries: 5,
-        });
-        // Notify on failure
-        await notifyJob(
-          job,
-          `❌ <b>Chunk ${chunk.chunkIndex + 1} failed</b>\n` +
-          `Error: ${lastError.slice(0, 200)}\n` +
-          `All fallback models exhausted.`,
-        );
-      }
+        return { success, chunkIndex: chunk.chunkIndex, error: lastError };
+      })
+    );
+
+    // Count results
+    for (const r of results) {
+      if (r.success) processedCount++;
     }
 
     // Update job progress
