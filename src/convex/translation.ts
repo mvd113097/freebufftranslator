@@ -102,6 +102,23 @@ export const internalGetPendingChunks = internalQuery({
   },
 });
 
+export const internalCountWords = internalQuery({
+  args: { jobId: v.id("translationJobs") },
+  handler: async (ctx, args) => {
+    const chunks = await ctx.db
+      .query("translationChunks")
+      .withIndex("by_jobId", (q) => q.eq("jobId", args.jobId))
+      .collect();
+    let words = 0;
+    for (const c of chunks) {
+      if (c.status === "completed" && c.translatedText.length > 0) {
+        words += c.translatedText.split(/\s+/).filter((w) => w.length > 0).length;
+      }
+    }
+    return words;
+  },
+});
+
 export const internalCountChunks = internalQuery({
   args: { jobId: v.id("translationJobs") },
   handler: async (ctx, args) => {
@@ -617,25 +634,53 @@ export const processNextBatch = action({
     const prevPercent = Math.round(((job.completedCount + job.failedCount) / job.totalChunks) * 100);
     const crossedTenPercent = Math.floor(percentNow / 10) > Math.floor(prevPercent / 10);
 
-    if (isAllDone) {
-      await notifyJob(
-        job,
-        `✅ <b>Translation Complete!</b>\n` +
-        `📄 ${job.fileName}\n` +
-        `📊 ${counts.completed}/${counts.total} chunks translated\n` +
-        `${counts.failed > 0 ? `⚠️ ${counts.failed} chunks failed\n` : ""}` +
-        `📥 Ready to download!`,
-        "complete",
-      );
-    } else if (crossedTenPercent && processedCount > 0) {
-      await notifyJob(
-        job,
-        `📊 <b>Progress: ${percentNow}%</b>\n` +
-        `✅ ${counts.completed}/${counts.total} chunks done\n` +
-        `${counts.failed > 0 ? `❌ ${counts.failed} failed\n` : ""}` +
-        `⏱️ Still translating...`,
-        "progress",
-      );
+    if (isAllDone || crossedTenPercent || (processedCount > 0 && counts.completed > 0)) {
+      // Build a detailed notification with word count, elapsed time, model info
+      const elapsed = Date.now() - job.createdAt;
+      const elapsedMin = Math.floor(elapsed / 60_000);
+      const elapsedSec = Math.floor((elapsed % 60_000) / 1000);
+      const elapsedStr = elapsedMin > 0 ? `${elapsedMin}m ${elapsedSec}s` : `${elapsedSec}s`;
+      const chunksDone = counts.completed;
+      const chunksTotal = counts.total;
+      const chunksPending = chunksTotal - chunksDone - counts.failed;
+      const rate = elapsedMin > 0 ? (chunksDone / elapsedMin).toFixed(1) : "—";
+
+      // Estimate remaining time
+      let etaStr = "";
+      if (chunksDone > 0 && chunksPending > 0) {
+        const avgPerChunk = elapsed / chunksDone;
+        const etaMs = avgPerChunk * chunksPending;
+        const etaMin = Math.floor(etaMs / 60_000);
+        const etaSec = Math.floor((etaMs % 60_000) / 1000);
+        etaStr = etaMin > 0 ? `~${etaMin}m ${etaSec}s` : `~${etaSec}s`;
+      }
+
+      if (isAllDone) {
+        await notifyJob(
+          job,
+          `✅ <b>Translation Complete!</b>\n` +
+          `📄 ${job.fileName}\n` +
+          `📊 ${counts.completed}/${counts.total} chunks translated\n` +
+          `⏱️ Total time: ${elapsedStr}\n` +
+          `🤖 Model: ${job.model}\n` +
+          `${counts.failed > 0 ? `⚠️ ${counts.failed} chunks failed\n` : ""}` +
+          `📥 Ready to download!`,
+          "complete",
+        );
+      } else if (processedCount > 0) {
+        await notifyJob(
+          job,
+          `📊 <b>Progress: ${percentNow}%</b>\n` +
+          `📄 ${job.fileName}\n` +
+          `✅ ${chunksDone}/${chunksTotal} chunks done\n` +
+          `${counts.failed > 0 ? `❌ ${counts.failed} failed\n` : ""}` +
+          `🤖 Model: ${job.model}\n` +
+          `⏱️ Elapsed: ${elapsedStr}\n` +
+          `📈 Rate: ~${rate} chunks/min` +
+          `${etaStr ? `\n⏳ ETA: ${etaStr}` : ""}`,
+          "progress",
+        );
+      }
     }
 
     // Periodic status update (every N minutes if configured)
@@ -644,31 +689,42 @@ export const processNextBatch = action({
       const lastNotify = job.lastStatusNotifyAt ?? 0;
       const minutesSince = (Date.now() - lastNotify) / 60_000;
       if (minutesSince >= statusIntervalMin && !isAllDone) {
-        // Count English words from completed chunks
-        const allChunks = await ctx.runQuery(internal.translation.internalCountChunks, { jobId: args.jobId });
-        // Get actual word count by querying completed chunks
-        const chunksForWords = await ctx.runQuery(internal.translation.internalGetPendingChunks, { jobId: args.jobId, limit: 0 }); // just to get job ref
         const elapsed = Date.now() - job.createdAt;
         const elapsedMin = Math.floor(elapsed / 60_000);
         const elapsedSec = Math.floor((elapsed % 60_000) / 1000);
-        const chunksDone = allChunks.completed;
-        const chunksTotal = allChunks.total;
-        const chunksPending = chunksTotal - chunksDone - allChunks.failed;
+        const chunksDone = counts.completed;
+        const chunksTotal = counts.total;
+        const chunksPending = chunksTotal - chunksDone - counts.failed;
         const percent = chunksTotal > 0 ? Math.round((chunksDone / chunksTotal) * 100) : 0;
         const rate = elapsedMin > 0 ? (chunksDone / elapsedMin).toFixed(1) : "—";
+
+        let etaStr2 = "";
+        if (chunksDone > 0 && chunksPending > 0) {
+          const avgPerChunk = elapsed / chunksDone;
+          const etaMs = avgPerChunk * chunksPending;
+          const etaMin = Math.floor(etaMs / 60_000);
+          const etaSec = Math.floor((etaMs % 60_000) / 1000);
+          etaStr2 = etaMin > 0 ? `~${etaMin}m ${etaSec}s` : `~${etaSec}s`;
+        }
+
+        // Count English words via internal query
+        const totalWords: number = await ctx.runQuery(internal.translation.internalCountWords, { jobId: args.jobId });
 
         await notifyJob(
           job,
           `📋 <b>Status Update</b>\n` +
           `📄 ${job.fileName}\n` +
           `📊 ${chunksDone}/${chunksTotal} chunks (${percent}%)\n` +
+          `📝 ${totalWords.toLocaleString()} English words translated\n` +
           `🤖 Model: ${job.model}\n` +
+          `🔑 API Keys: ${job.apiKeys.length}\n` +
+          `⚡ Concurrency: ${job.concurrency}\n` +
           `⏱️ Elapsed: ${elapsedMin}m ${elapsedSec}s\n` +
           `📈 Rate: ~${rate} chunks/min\n` +
+          `${etaStr2 ? `⏳ ETA: ${etaStr2}\n` : ""}` +
           `${chunksPending > 0 ? `⏳ ${chunksPending} chunks remaining` : `✅ All done!`}`,
           "status",
         );
-        // Update last notify timestamp
         await ctx.runMutation(internal.translation.internalPatchJob, {
           jobId: args.jobId,
           lastStatusNotifyAt: Date.now(),
