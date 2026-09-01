@@ -16,6 +16,8 @@ export interface AppSettings {
   model: string;
   chunkSize: number;
   concurrency: number;
+  telegramBotToken: string;
+  telegramChatId: string;
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -23,6 +25,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   model: "openrouter/free",
   chunkSize: 4000,
   concurrency: 5,
+  telegramBotToken: "",
+  telegramChatId: "",
 };
 
 export function loadSettings(): AppSettings {

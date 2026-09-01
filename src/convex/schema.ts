@@ -54,6 +54,8 @@ const schema = defineSchema(
       lastHeartbeat: v.number(),
       createdAt: v.number(),
       updatedAt: v.number(),
+      telegramBotToken: v.optional(v.string()),
+      telegramChatId: v.optional(v.string()),
     }).index("by_userId", ["userId"]),
 
     translationChunks: defineTable({

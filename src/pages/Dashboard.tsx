@@ -15,6 +15,7 @@ import {
   Loader2,
   Pause,
   Play,
+  Send,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { FileUploader } from "@/components/translator/FileUploader";
@@ -71,6 +72,8 @@ export default function Dashboard() {
   const [chunkSize, setChunkSize] = useState(() => loadSettings().chunkSize);
   const [concurrency, setConcurrency] = useState(() => loadSettings().concurrency);
   const [selectedModel, setSelectedModel] = useState(() => loadSettings().model);
+  const [telegramBotToken, setTelegramBotToken] = useState(() => loadSettings().telegramBotToken);
+  const [telegramChatId, setTelegramChatId] = useState(() => loadSettings().telegramChatId);
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   // Active job tracking — persisted to localStorage
@@ -110,8 +113,8 @@ export default function Dashboard() {
 
   // ─── Persist settings to localStorage on change ─────────────────
   useEffect(() => {
-    saveSettings({ keys, model: selectedModel, chunkSize, concurrency });
-  }, [keys, selectedModel, chunkSize, concurrency]);
+    saveSettings({ keys, model: selectedModel, chunkSize, concurrency, telegramBotToken, telegramChatId });
+  }, [keys, selectedModel, chunkSize, concurrency, telegramBotToken, telegramChatId]);
 
 
 
@@ -268,6 +271,8 @@ export default function Dashboard() {
         chunkSize,
         concurrency,
         apiKeys: keys,
+        telegramBotToken: telegramBotToken || undefined,
+        telegramChatId: telegramChatId || undefined,
       });
 
       setActiveJobId(jobId);
@@ -688,6 +693,56 @@ export default function Dashboard() {
                   </motion.div>
                 )}
               </AnimatePresence>
+            </div>
+
+            {/* Telegram Notifications */}
+            <div className="rounded-2xl border border-stone-700/50 bg-stone-900/80 backdrop-blur-xl shadow-sm overflow-hidden mt-4">
+              <button
+                onClick={() => {
+                  const el = document.getElementById("telegram-settings");
+                  if (el) el.style.display = el.style.display === "none" ? "block" : "none";
+                }}
+                className="w-full flex items-center justify-between p-4 text-left cursor-pointer"
+              >
+                <div className="flex items-center gap-2">
+                  <Send className="h-4 w-4 text-blue-400" />
+                  <span className="text-sm font-semibold text-stone-200">Telegram Notifications</span>
+                  {telegramBotToken && telegramChatId && (
+                    <span className="inline-flex items-center rounded-full bg-green-500/15 px-2 py-0.5 text-[10px] font-medium text-green-400">
+                      Active
+                    </span>
+                  )}
+                </div>
+                <ChevronDown className="h-4 w-4 text-stone-400" />
+              </button>
+              <div id="telegram-settings" style={{ display: "none" }} className="px-4 pb-4 pt-0 space-y-3">
+                <p className="text-[11px] text-stone-500">
+                  Get notified about translation progress, errors, and completion. Optional — leave blank to disable.
+                </p>
+                <div className="space-y-2">
+                  <label className="text-xs font-medium text-stone-400">Bot Token</label>
+                  <input
+                    type="password"
+                    value={telegramBotToken}
+                    onChange={(e) => setTelegramBotToken(e.target.value)}
+                    placeholder="1234567890:ABCdefGHIjklMNOpqrsTUVwxyz"
+                    className="w-full rounded-xl border border-stone-700 bg-stone-800 px-3 py-2 text-xs font-mono text-stone-200 placeholder:text-stone-500 focus:outline-none focus:ring-2 focus:ring-blue-400/30"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-xs font-medium text-stone-400">Chat ID</label>
+                  <input
+                    type="text"
+                    value={telegramChatId}
+                    onChange={(e) => setTelegramChatId(e.target.value)}
+                    placeholder="123456789"
+                    className="w-full rounded-xl border border-stone-700 bg-stone-800 px-3 py-2 text-xs font-mono text-stone-200 placeholder:text-stone-500 focus:outline-none focus:ring-2 focus:ring-blue-400/30"
+                  />
+                  <p className="text-[10px] text-stone-600">
+                    Message @userinfobot on Telegram to find your Chat ID.
+                  </p>
+                </div>
+              </div>
             </div>
           </motion.div>
 

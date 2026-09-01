@@ -165,6 +165,8 @@ export const startTranslation = mutation({
     chunkSize: v.number(),
     concurrency: v.number(),
     apiKeys: v.array(v.string()),
+    telegramBotToken: v.optional(v.string()),
+    telegramChatId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const now = Date.now();
@@ -187,6 +189,8 @@ export const startTranslation = mutation({
       lastHeartbeat: now,
       createdAt: now,
       updatedAt: now,
+      telegramBotToken: args.telegramBotToken,
+      telegramChatId: args.telegramChatId,
     });
 
     for (let i = 0; i < args.chunks.length; i++) {
@@ -257,6 +261,8 @@ export const updateJobSettings = mutation({
     concurrency: v.optional(v.number()),
     model: v.optional(v.string()),
     apiKeys: v.optional(v.array(v.string())),
+    telegramBotToken: v.optional(v.string()),
+    telegramChatId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const userId = await getAuthUserId(ctx);
@@ -266,6 +272,8 @@ export const updateJobSettings = mutation({
     if (args.concurrency !== undefined) patch.concurrency = args.concurrency;
     if (args.model !== undefined) patch.model = args.model;
     if (args.apiKeys !== undefined) patch.apiKeys = args.apiKeys;
+    if (args.telegramBotToken !== undefined) patch.telegramBotToken = args.telegramBotToken;
+    if (args.telegramChatId !== undefined) patch.telegramChatId = args.telegramChatId;
     await ctx.db.patch(args.jobId, patch);
   },
 });
@@ -446,6 +454,19 @@ export const processNextBatch = action({
       };
     }
 
+    // Send "started" notification on first batch
+    const wasJustStarted = job.completedCount === 0 && job.failedCount === 0;
+    if (wasJustStarted) {
+      await notifyJob(
+        job,
+        `🚀 <b>Translation Started</b>\n` +
+        `📄 ${job.fileName}\n` +
+        `📊 ${job.totalChunks} chunks to process\n` +
+        `🤖 Model: ${job.model}\n` +
+        `⚡ Concurrency: ${job.concurrency}`,
+      );
+    }
+
     // Process each chunk
     let processedCount = 0;
     let keyIndex = 0;
@@ -459,6 +480,12 @@ export const processNextBatch = action({
       // Re-check job status before each chunk — if paused/stopped, bail immediately
       const currentJob: { status: string } | null = await ctx.runQuery(internal.translation.internalGetJob, { jobId: args.jobId });
       if (!currentJob || currentJob.status !== "processing") {
+        // Notify if pipeline was paused/stopped externally
+        if (currentJob?.status === "paused") {
+          await notifyJob(job, `⏸️ <b>Translation Paused</b>\nOpen the browser to resume.`);
+        } else if (currentJob?.status === "failed") {
+          await notifyJob(job, `🛑 <b>Translation Stopped</b>\nOpen the browser to resume or reset.`);
+        }
         return {
           done: false,
           processed: processedCount,
@@ -567,6 +594,13 @@ export const processNextBatch = action({
           error: lastError.slice(0, 500),
           retries: 5,
         });
+        // Notify on failure
+        await notifyJob(
+          job,
+          `❌ <b>Chunk ${chunk.chunkIndex + 1} failed</b>\n` +
+          `Error: ${lastError.slice(0, 200)}\n` +
+          `All fallback models exhausted.`,
+        );
       }
     }
 
@@ -581,6 +615,30 @@ export const processNextBatch = action({
       failedCount: counts.failed,
       lastHeartbeat: Date.now(),
     });
+
+    // Send progress notification every 10% or on completion
+    const percentNow = Math.round(((counts.completed + counts.failed) / counts.total) * 100);
+    const prevPercent = Math.round(((job.completedCount + job.failedCount) / job.totalChunks) * 100);
+    const crossedTenPercent = Math.floor(percentNow / 10) > Math.floor(prevPercent / 10);
+
+    if (isAllDone) {
+      await notifyJob(
+        job,
+        `✅ <b>Translation Complete!</b>\n` +
+        `📄 ${job.fileName}\n` +
+        `📊 ${counts.completed}/${counts.total} chunks translated\n` +
+        `${counts.failed > 0 ? `⚠️ ${counts.failed} chunks failed\n` : ""}` +
+        `📥 Ready to download!`,
+      );
+    } else if (crossedTenPercent && processedCount > 0) {
+      await notifyJob(
+        job,
+        `📊 <b>Progress: ${percentNow}%</b>\n` +
+        `✅ ${counts.completed}/${counts.total} chunks done\n` +
+        `${counts.failed > 0 ? `❌ ${counts.failed} failed\n` : ""}` +
+        `⏱️ Still translating...`,
+      );
+    }
 
     return {
       done: isAllDone,
@@ -633,6 +691,33 @@ export const processJob = action({
     return result;
   },
 });
+
+// ─── Telegram notifications ─────────────────────────────────────
+
+async function sendTelegram(botToken: string, chatId: string, message: string): Promise<void> {
+  try {
+    await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text: message,
+        parse_mode: "HTML",
+      }),
+    });
+  } catch (err) {
+    console.error("[Telegram] Failed to send notification:", err);
+  }
+}
+
+async function notifyJob(
+  job: { telegramBotToken?: string; telegramChatId?: string; fileName: string; totalChunks: number },
+  message: string,
+): Promise<void> {
+  if (job.telegramBotToken && job.telegramChatId) {
+    await sendTelegram(job.telegramBotToken, job.telegramChatId, message);
+  }
+}
 
 // ─── Model fallback chain ───────────────────────────────────────
 // If the primary model fails, try these in order. These are all free models
