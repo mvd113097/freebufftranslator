@@ -240,7 +240,7 @@ export default function Dashboard() {
     };
   }, [jobStatus, isRunning, isComplete, isFailed, isPaused, processingCount, completedCount, failedCount, totalChunks, elapsedMs]);
 
-  // ─── Sync concurrency/model/apiKeys changes to Convex job mid-translation ─
+  // ─── Sync all settings (including Telegram prefs) to Convex job mid-translation ─
   useEffect(() => {
     if (!activeJobId || !isRunning) return;
     // Debounce: only update after user stops making changes
@@ -250,10 +250,18 @@ export default function Dashboard() {
         concurrency,
         model: selectedModel,
         apiKeys: keys,
+        telegramBotToken: telegramBotToken || undefined,
+        telegramChatId: telegramChatId || undefined,
+        telegramNotifyOnStart,
+        telegramNotifyOnProgress,
+        telegramNotifyOnError,
+        telegramNotifyOnComplete,
+        telegramNotifyOnPause,
+        telegramStatusInterval,
       }).catch((err) => console.error("Failed to update job settings:", err));
     }, 500);
     return () => clearTimeout(timer);
-  }, [concurrency, selectedModel, keys, activeJobId, isRunning, updateJobSettingsMutation]);
+  }, [concurrency, selectedModel, keys, activeJobId, isRunning, updateJobSettingsMutation, telegramBotToken, telegramChatId, telegramNotifyOnStart, telegramNotifyOnProgress, telegramNotifyOnError, telegramNotifyOnComplete, telegramNotifyOnPause, telegramStatusInterval]);
 
   // ─── File upload handler ────────────────────────────────────────
   const handleFileContent = useCallback((content: string, name: string) => {
