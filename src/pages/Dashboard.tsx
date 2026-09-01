@@ -143,12 +143,13 @@ export default function Dashboard() {
     if (hasRecovered || !allJobs) return;
     setHasRecovered(true);
 
-    // If we already have an activeJobId, check if it's still valid
+    // If we already have an activeJobId, check if it still exists in the list
     if (activeJobId) {
       const job = allJobs.find((j) => j._id === activeJobId);
       if (!job) {
-        // Job was deleted — clear
+        // Job was deleted or no longer exists — clear immediately
         setActiveJobId(null);
+        saveActiveJobId(null);
       }
       return;
     }
@@ -163,6 +164,19 @@ export default function Dashboard() {
       setActiveJobId(recoverable._id);
     }
   }, [allJobs, activeJobId, hasRecovered]);
+
+  // ─── Clear activeJobId if query returns no data (job was deleted) ─
+  useEffect(() => {
+    if (hasRecovered && activeJobId && jobStatus === undefined) {
+      // Query returned undefined (not null) — means skip or loading
+      // Only clear if we've already loaded once
+    }
+    if (hasRecovered && activeJobId && jobStatus === null) {
+      // Job no longer exists on server
+      setActiveJobId(null);
+      saveActiveJobId(null);
+    }
+  }, [jobStatus, activeJobId, hasRecovered]);
 
   // ─── Derived state ──────────────────────────────────────────────
   const canStart = useMemo(
