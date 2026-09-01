@@ -144,10 +144,12 @@ export default function Dashboard() {
       return;
     }
 
-    // Look for the most recent processing or paused job
-    const recoverable = allJobs.find(
-      (j) => j.status === "processing" || j.status === "paused"
-    );
+    // Look for the most recent non-deleted job (any status) to recover
+    // Priority: processing > paused > completed/failed > any
+    const recoverable =
+      allJobs.find((j) => j.status === "processing") ??
+      allJobs.find((j) => j.status === "paused") ??
+      allJobs.find((j) => j.status === "completed" || j.status === "failed");
     if (recoverable) {
       setActiveJobId(recoverable._id);
     }
@@ -960,6 +962,91 @@ export default function Dashboard() {
             </span>
           )}
         </motion.div>
+
+        {/* Past Translations list */}
+        {allJobs && allJobs.length > 0 && (
+          <motion.div
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.3 }}
+            className="space-y-3"
+          >
+            <h3 className="text-xs font-semibold text-stone-400 uppercase tracking-wider px-1">
+              Past Translations ({allJobs.length})
+            </h3>
+            <div className="space-y-2">
+              {allJobs.map((job) => (
+                <div
+                  key={job._id}
+                  onClick={() => {
+                    if (activeJobId !== job._id) {
+                      setActiveJobId(job._id);
+                      saveActiveJobId(job._id);
+                    }
+                  }}
+                  className={cn(
+                    "flex items-center justify-between rounded-xl border px-4 py-3 transition-all cursor-pointer",
+                    activeJobId === job._id
+                      ? "border-amber-500/30 bg-amber-500/10"
+                      : "border-stone-700/50 bg-stone-900/80 hover:bg-stone-800/80 hover:border-stone-600/50",
+                  )}
+                >
+                  <div className="flex items-center gap-3 min-w-0">
+                    <div className={cn(
+                      "h-2 w-2 rounded-full shrink-0",
+                      job.status === "processing"
+                        ? "bg-green-400 animate-pulse"
+                        : job.status === "paused"
+                          ? "bg-yellow-400"
+                          : job.status === "completed"
+                            ? "bg-blue-400"
+                            : job.status === "failed"
+                              ? "bg-red-400"
+                              : "bg-stone-500",
+                    )} />
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium text-stone-200 truncate">{job.fileName}</p>
+                      <p className="text-[10px] text-stone-500">
+                        {job.completedCount}/{job.totalChunks} chunks • {job.percent}%
+                        {job.status === "completed" ? " • ✅ Done" : job.status === "processing" ? " • ⏳ Running..." : job.status === "paused" ? " • ⏸️ Paused" : job.status === "failed" ? " • ❌ Failed" : ""}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setActiveJobId(job._id);
+                        saveActiveJobId(job._id);
+                      }}
+                      className="rounded-lg border border-stone-700 bg-stone-800 px-2.5 py-1 text-[10px] font-medium text-stone-400 hover:bg-stone-700 hover:text-stone-200 transition-all cursor-pointer"
+                    >
+                      View
+                    </button>
+                    <button
+                      onClick={async (e) => {
+                        e.stopPropagation();
+                        if (!confirm(`Delete ${job.fileName}?`)) return;
+                        try {
+                          await deleteJobMutation({ jobId: job._id });
+                          if (activeJobId === job._id) {
+                            setActiveJobId(null);
+                            saveActiveJobId(null);
+                          }
+                        } catch (err) {
+                          console.error("Failed to delete:", err);
+                        }
+                      }}
+                      className="rounded-lg border border-stone-700 bg-stone-800 px-2.5 py-1 text-[10px] font-medium text-stone-500 hover:bg-red-500/10 hover:text-red-400 hover:border-red-500/30 transition-all cursor-pointer"
+                    >
+                      Delete
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </motion.div>
+        )}
       </main>
     </div>
   );
