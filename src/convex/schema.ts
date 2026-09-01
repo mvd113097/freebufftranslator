@@ -54,7 +54,7 @@ const schema = defineSchema(
       lastHeartbeat: v.number(),
       createdAt: v.number(),
       updatedAt: v.number(),
-    }),
+    }).index("by_userId", ["userId"]),
 
     translationChunks: defineTable({
       jobId: v.id("translationJobs"),

@@ -1,6 +1,7 @@
 import { v } from "convex/values";
 import { mutation, query, action, internalQuery, internalMutation } from "./_generated/server";
 import { api, internal } from "./_generated/api";
+import { getAuthUserId } from "@convex-dev/auth/server";
 
 const SYSTEM_PROMPT = `You are an expert human literary translator specializing in Chinese web novels (Xianxia, Wuxia, and Sci-Fi). Translate the following Chinese prose into highly fluent, immersive English fiction. Do not use stiff or literal machine-like phrasing. Translate cultivation tiers, localized idioms, and online slang into contextually accurate Western fantasy equivalents while maintaining rigid character name consistency.
 
@@ -168,7 +169,11 @@ export const startTranslation = mutation({
   handler: async (ctx, args) => {
     const now = Date.now();
 
+    const userId = await getAuthUserId(ctx);
+    if (!userId) throw new Error("Not authenticated");
+
     const jobId = await ctx.db.insert("translationJobs", {
+      userId: userId as string,
       fileName: args.fileName,
       rawTextLength: args.chunks.reduce((sum, c) => sum + c.text.length, 0),
       totalChunks: args.chunks.length,
@@ -203,6 +208,9 @@ export const startTranslation = mutation({
 export const pauseJob = mutation({
   args: { jobId: v.id("translationJobs") },
   handler: async (ctx, args) => {
+    const userId = await getAuthUserId(ctx);
+    const job = await ctx.db.get(args.jobId);
+    if (!job || (userId && job.userId !== userId as string)) throw new Error("Unauthorized");
     await ctx.db.patch(args.jobId, { status: "paused", updatedAt: Date.now() });
   },
 });
@@ -211,6 +219,9 @@ export const pauseJob = mutation({
 export const abortJob = mutation({
   args: { jobId: v.id("translationJobs") },
   handler: async (ctx, args) => {
+    const userId = await getAuthUserId(ctx);
+    const job = await ctx.db.get(args.jobId);
+    if (!job || (userId && job.userId !== userId as string)) throw new Error("Unauthorized");
     await ctx.db.patch(args.jobId, { status: "failed", updatedAt: Date.now() });
   },
 });
@@ -219,6 +230,10 @@ export const abortJob = mutation({
 export const resumeJob = mutation({
   args: { jobId: v.id("translationJobs") },
   handler: async (ctx, args) => {
+    const userId = await getAuthUserId(ctx);
+    const job = await ctx.db.get(args.jobId);
+    if (!job || (userId && job.userId !== userId as string)) throw new Error("Unauthorized");
+
     const chunks = await ctx.db
       .query("translationChunks")
       .withIndex("by_jobId", (q) => q.eq("jobId", args.jobId))
@@ -244,6 +259,9 @@ export const updateJobSettings = mutation({
     apiKeys: v.optional(v.array(v.string())),
   },
   handler: async (ctx, args) => {
+    const userId = await getAuthUserId(ctx);
+    const job = await ctx.db.get(args.jobId);
+    if (!job || (userId && job.userId !== userId as string)) throw new Error("Unauthorized");
     const patch: Record<string, unknown> = { updatedAt: Date.now() };
     if (args.concurrency !== undefined) patch.concurrency = args.concurrency;
     if (args.model !== undefined) patch.model = args.model;
@@ -256,6 +274,9 @@ export const updateJobSettings = mutation({
 export const deleteJob = mutation({
   args: { jobId: v.id("translationJobs") },
   handler: async (ctx, args) => {
+    const userId = await getAuthUserId(ctx);
+    const job = await ctx.db.get(args.jobId);
+    if (!job || (userId && job.userId !== userId as string)) throw new Error("Unauthorized");
     const chunks = await ctx.db
       .query("translationChunks")
       .withIndex("by_jobId", (q) => q.eq("jobId", args.jobId))
@@ -273,8 +294,11 @@ export const deleteJob = mutation({
 export const getJobStatus = query({
   args: { jobId: v.id("translationJobs") },
   handler: async (ctx, args) => {
+    const userId = await getAuthUserId(ctx);
     const job = await ctx.db.get(args.jobId);
     if (!job) return null;
+    // Only return this job if it belongs to the current user
+    if (userId && job.userId && job.userId !== userId as string) return null;
 
     const chunks = await ctx.db
       .query("translationChunks")
@@ -319,10 +343,16 @@ export const getJobStatus = query({
   },
 });
 
-/** List all jobs — used for auto-recovery on page reload. */
+/** List all jobs for the current user — used for auto-recovery on page reload. */
 export const listJobs = query({
   handler: async (ctx) => {
-    const jobs = await ctx.db.query("translationJobs").order("desc").collect();
+    const userId = await getAuthUserId(ctx);
+    if (!userId) return [];
+    const jobs = await ctx.db
+      .query("translationJobs")
+      .withIndex("by_userId", (q) => q.eq("userId", userId as string))
+      .order("desc")
+      .collect();
     return jobs.map((j) => ({
       _id: j._id,
       fileName: j.fileName,
@@ -343,6 +373,12 @@ export const listJobs = query({
 export const getTranslatedChunks = query({
   args: { jobId: v.id("translationJobs") },
   handler: async (ctx, args) => {
+    const userId = await getAuthUserId(ctx);
+    // Verify ownership
+    const job = await ctx.db.get(args.jobId);
+    if (!job) return [];
+    if (userId && job.userId && job.userId !== userId as string) return [];
+
     const chunks = await ctx.db
       .query("translationChunks")
       .withIndex("by_jobId", (q) => q.eq("jobId", args.jobId))

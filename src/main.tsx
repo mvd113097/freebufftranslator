@@ -124,7 +124,7 @@ createRoot(document.getElementById("root")!).render(
                 path="/auth"
                 element={<AuthPage redirectAfterAuth="/dashboard" />}
               />
-              <Route path="/dashboard" element={<Dashboard />} />
+              <Route path="/dashboard" element={<RequireAuth><Dashboard /></RequireAuth>} />
               <Route path="*" element={<NotFound />} />
             </Routes>
           </Suspense>
