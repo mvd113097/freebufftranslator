@@ -30,7 +30,8 @@ Paragraph three text here.
 - Output ONLY the translated English text.
 - Do NOT include any explanations, notes, commentary, or metadata.
 - Do NOT wrap your output in quotes or markdown code blocks.
-- Just return the raw translated English prose with proper paragraph spacing (blank lines between paragraphs).`;
+- Just return the raw translated English prose with proper paragraph spacing (blank lines between paragraphs).
+- CRITICAL: Do NOT leave ANY Chinese characters untranslated. Every single Chinese word, phrase, and sentence MUST be translated to English. If you encounter a Chinese word like 别墅 (villa), 好的 (okay), 谢谢 (thank you), etc., you MUST translate it. Your output must contain ZERO Chinese characters. After translating, scan your output and replace any remaining Chinese characters with their English equivalents.`;
 
 // ─── Chunking helper (pure, server-safe) ─────────────────────────
 
