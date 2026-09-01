@@ -232,17 +232,19 @@ export const resumeJob = mutation({
   },
 });
 
-/** Update job settings mid-translation (concurrency, model). */
+/** Update job settings mid-translation (concurrency, model, apiKeys). */
 export const updateJobSettings = mutation({
   args: {
     jobId: v.id("translationJobs"),
     concurrency: v.optional(v.number()),
     model: v.optional(v.string()),
+    apiKeys: v.optional(v.array(v.string())),
   },
   handler: async (ctx, args) => {
     const patch: Record<string, unknown> = { updatedAt: Date.now() };
     if (args.concurrency !== undefined) patch.concurrency = args.concurrency;
     if (args.model !== undefined) patch.model = args.model;
+    if (args.apiKeys !== undefined) patch.apiKeys = args.apiKeys;
     await ctx.db.patch(args.jobId, patch);
   },
 });

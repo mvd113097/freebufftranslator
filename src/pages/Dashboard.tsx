@@ -194,19 +194,20 @@ export default function Dashboard() {
     };
   }, [jobStatus, isRunning, isComplete, isFailed, isPaused, processingCount, completedCount, totalChunks]);
 
-  // ─── Sync concurrency/model changes to Convex job mid-translation ─
+  // ─── Sync concurrency/model/apiKeys changes to Convex job mid-translation ─
   useEffect(() => {
     if (!activeJobId || !isRunning) return;
-    // Debounce: only update after user stops dragging
+    // Debounce: only update after user stops making changes
     const timer = setTimeout(() => {
       updateJobSettingsMutation({
         jobId: activeJobId,
         concurrency,
         model: selectedModel,
+        apiKeys: keys,
       }).catch((err) => console.error("Failed to update job settings:", err));
     }, 500);
     return () => clearTimeout(timer);
-  }, [concurrency, selectedModel, activeJobId, isRunning, updateJobSettingsMutation]);
+  }, [concurrency, selectedModel, keys, activeJobId, isRunning, updateJobSettingsMutation]);
 
   // ─── File upload handler ────────────────────────────────────────
   const handleFileContent = useCallback((content: string, name: string) => {
