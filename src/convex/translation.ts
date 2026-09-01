@@ -595,9 +595,11 @@ export const processJob = action({
 // on OpenRouter with decent context windows suitable for novel translation.
 const FALLBACK_MODELS = [
   "minimax/minimax-m3:free",
+  "nvidia/nemotron-3.5-lightning:free",
   "nvidia/nemotron-3-ultra-550b-a55b:free",
+  "thinkingmachines/inkling:free",
   "inclusionai/ling-3.0-flash-fin:free",
-  "google/gemini-2.5-flash",
+  "z-ai/glm-5.2:free",
 ];
 
 function getFallbackChain(primaryModel: string): string[] {
