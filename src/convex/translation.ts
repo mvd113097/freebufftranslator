@@ -656,11 +656,13 @@ export const processNextBatch = action({
       }
 
       if (isAllDone) {
+        const finalWordCount: number = await ctx.runQuery(internal.translation.internalCountWords, { jobId: args.jobId });
         await notifyJob(
           job,
           `✅ <b>Translation Complete!</b>\n` +
           `📄 ${job.fileName}\n` +
           `📊 ${counts.completed}/${counts.total} chunks translated\n` +
+          `📝 ${finalWordCount.toLocaleString()} English words\n` +
           `⏱️ Total time: ${elapsedStr}\n` +
           `🤖 Model: ${job.model}\n` +
           `${counts.failed > 0 ? `⚠️ ${counts.failed} chunks failed\n` : ""}` +
@@ -668,12 +670,15 @@ export const processNextBatch = action({
           "complete",
         );
       } else if (processedCount > 0) {
+        // Get word count for progress notification
+        const wordCount: number = await ctx.runQuery(internal.translation.internalCountWords, { jobId: args.jobId });
         await notifyJob(
           job,
           `📊 <b>Progress: ${percentNow}%</b>\n` +
           `📄 ${job.fileName}\n` +
           `✅ ${chunksDone}/${chunksTotal} chunks done\n` +
           `${counts.failed > 0 ? `❌ ${counts.failed} failed\n` : ""}` +
+          `📝 ${wordCount.toLocaleString()} English words\n` +
           `🤖 Model: ${job.model}\n` +
           `⏱️ Elapsed: ${elapsedStr}\n` +
           `📈 Rate: ~${rate} chunks/min` +
