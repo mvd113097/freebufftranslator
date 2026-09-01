@@ -916,15 +916,16 @@ export default function Dashboard() {
             </button>
           )}
 
-          {/* Download Progress — available while running, paused, or failed with chunks */}
-          {(isRunning || isPaused || isFailed) && hasTranslatedChunks && (
+          {/* Download Progress — available while running, paused, or failed */}
+          {(isRunning || isPaused || isFailed) && (
             <button
               onClick={handleDownloadProgress}
-              className="relative z-10 flex items-center gap-2 rounded-xl border border-green-500/30 bg-green-500/10 backdrop-blur-md px-4 py-2.5 text-sm font-medium text-green-300 hover:bg-green-500/20 active:bg-green-500/30 transition-all cursor-pointer"
+              disabled={!hasTranslatedChunks}
+              className="relative z-10 flex items-center gap-2 rounded-xl border border-green-500/30 bg-green-500/10 backdrop-blur-md px-4 py-2.5 text-sm font-medium text-green-300 hover:bg-green-500/20 active:bg-green-500/30 transition-all disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
               style={{ WebkitTapHighlightColor: "transparent", touchAction: "manipulation" }}
             >
               <Download className="h-4 w-4" />
-              Download Progress ({translatedChunks!.length} chunks)
+              {hasTranslatedChunks ? `Download Progress (${translatedChunks!.length} chunks)` : "Download Progress (waiting for chunks...)"}
             </button>
           )}
 
