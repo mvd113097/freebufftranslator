@@ -635,7 +635,7 @@ export const processNextBatch = action({
 
         for (let modelIdx = 0; modelIdx < modelChain.length; modelIdx++) {
           const tryModel = modelChain[modelIdx];
-          const attemptsForModel = modelIdx === 0 ? 2 : 1; // Primary: 2 tries, fallbacks: 1
+          const attemptsForModel = modelIdx === 0 ? 3 : 2; // Primary: 3 tries, fallbacks: 2
 
           for (let attempt = 0; attempt < attemptsForModel; attempt++) {
             // Re-check job status
