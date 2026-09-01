@@ -599,6 +599,7 @@ const FALLBACK_MODELS = [
   "nvidia/nemotron-3-ultra-550b-a55b:free",
   "thinkingmachines/inkling:free",
   "inclusionai/ling-3.0-flash-fin:free",
+  "nvidia/nemotron-3-super-120b-a12b:free",
   "z-ai/glm-5.2:free",
 ];
 

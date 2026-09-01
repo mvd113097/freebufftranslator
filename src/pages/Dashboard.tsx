@@ -37,6 +37,7 @@ const MODEL_OPTIONS = [
   { value: "nvidia/nemotron-3-ultra-550b-a55b:free", label: "Nemotron 3 Ultra (free, 1M ctx)" },
   { value: "thinkingmachines/inkling:free", label: "Thinking Machines Inkling (free, 1M ctx)" },
   { value: "inclusionai/ling-3.0-flash-fin:free", label: "Ling 3.0 Flash (free, 262K ctx)" },
+  { value: "nvidia/nemotron-3-super-120b-a12b:free", label: "Nemotron 3 Super (free, 262K ctx)" },
   { value: "z-ai/glm-5.2:free", label: "GLM 5.2 (free, 256K ctx)" },
 ];
 
