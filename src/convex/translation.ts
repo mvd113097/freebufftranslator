@@ -300,6 +300,7 @@ export const retranslateChineseChunks = mutation({
 
     const chineseRegex = /[\u4e00-\u9fff]+/;
     let resetCount = 0;
+    let remainingCompleted = 0;
 
     for (const chunk of chunks) {
       if (chunk.status === "completed" && chunk.translatedText.length > 0) {
@@ -311,14 +312,19 @@ export const retranslateChineseChunks = mutation({
             retries: 0,
           });
           resetCount++;
+        } else {
+          remainingCompleted++;
         }
+      } else if (chunk.status === "completed") {
+        remainingCompleted++;
       }
     }
 
     if (resetCount > 0) {
       await ctx.db.patch(args.jobId, {
         status: "processing",
-        completedCount: chunks.filter((c) => c.status === "completed" && !chineseRegex.test(c.translatedText)).length,
+        completedCount: remainingCompleted,
+        failedCount: 0,
         lastHeartbeat: Date.now(),
         updatedAt: Date.now(),
       });
