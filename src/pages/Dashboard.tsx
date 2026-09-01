@@ -30,6 +30,7 @@ import {
   loadSettings,
   saveSettings,
 } from "@/lib/translator/persistence";
+import { generateEpub, triggerDownload } from "@/lib/translator/epub";
 
 const MODEL_OPTIONS = [
   { value: "openrouter/free", label: "Auto Free (best available)" },
@@ -366,28 +367,19 @@ export default function Dashboard() {
     }
   }, [activeJobId, concurrency, resumeJobMutation, processJobAction]);
 
-  // ─── Download helper (works for both partial and final) ─────────
+  // ─── Download helper — generates EPUB from translated chunks ──
   const downloadTranslation = useCallback(
-    (chunks: { index: number; text: string }[], label: string) => {
+    async (chunks: { index: number; text: string }[], label: string) => {
       if (chunks.length === 0) {
         alert("No translated content to download yet.");
         return;
       }
-      const stitched = chunks
-        .sort((a, b) => a.index - b.index)
-        .map((c) => c.text)
-        .join("\n\n");
-      const blob = new Blob([stitched], { type: "text/plain;charset=utf-8" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = label;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      setTimeout(() => URL.revokeObjectURL(url), 5000);
+      const title = (fileName.replace(/\.txt$/i, "") || "Translated Novel").replace(/_/g, " ");
+      const epubBlob = await generateEpub(chunks, title, fileName);
+      const epubName = label.replace(/\.txt$/i, ".epub");
+      triggerDownload(epubBlob, epubName);
     },
-    []
+    [fileName]
   );
 
   // ─── Export (final) ─────────────────────────────────────────────
@@ -396,7 +388,7 @@ export default function Dashboard() {
       alert("No translated content to export yet.");
       return;
     }
-    const baseName = (fileName.replace(/\.txt$/i, "") || "translated_novel") + ".txt";
+    const baseName = (fileName.replace(/\.txt$/i, "") || "translated_novel") + ".epub";
     downloadTranslation(translatedChunks, baseName);
   }, [translatedChunks, fileName, downloadTranslation]);
 
@@ -406,7 +398,7 @@ export default function Dashboard() {
       alert("No translated chunks available yet.");
       return;
     }
-    downloadTranslation(translatedChunks, "incomplete_english.txt");
+    downloadTranslation(translatedChunks, "incomplete_english.epub");
   }, [translatedChunks, downloadTranslation]);
 
   // ─── Reset ──────────────────────────────────────────────────────
