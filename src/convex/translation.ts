@@ -442,6 +442,45 @@ export const getTranslatedChunks = query({
   },
 });
 
+/** Scan translated chunks for remaining Chinese characters. Returns chunks that contain untranslated text. */
+export const scanForChinese = query({
+  args: { jobId: v.id("translationJobs") },
+  handler: async (ctx, args) => {
+    const userId = await getAuthUserId(ctx);
+    const job = await ctx.db.get(args.jobId);
+    if (!job) return { totalScanned: 0, chunksWithChinese: [] };
+    if (userId && job.userId && job.userId !== userId as string) return { totalScanned: 0, chunksWithChinese: [] };
+
+    const chunks = await ctx.db
+      .query("translationChunks")
+      .withIndex("by_jobId", (q) => q.eq("jobId", args.jobId))
+      .collect();
+
+    const completedChunks = chunks
+      .filter((c) => c.status === "completed" && c.translatedText.length > 0)
+      .sort((a, b) => a.chunkIndex - b.chunkIndex);
+
+    const chineseRegex = /[\u4e00-\u9fff]+/g;
+    const chunksWithChinese: { index: number; matches: string[] }[] = [];
+
+    for (const chunk of completedChunks) {
+      const matches = chunk.translatedText.match(chineseRegex);
+      if (matches && matches.length > 0) {
+        // Deduplicate
+        chunksWithChinese.push({
+          index: chunk.chunkIndex,
+          matches: [...new Set(matches)],
+        });
+      }
+    }
+
+    return {
+      totalScanned: completedChunks.length,
+      chunksWithChinese,
+    };
+  },
+});
+
 // ─── Public Actions (Node runtime, server-side) ──────────────────
 
 /** Process the next batch of pending chunks. Called repeatedly by the frontend or self-chaining. */

@@ -81,6 +81,7 @@ export default function Dashboard() {
   const [telegramNotifyOnPause, setTelegramNotifyOnPause] = useState(() => loadSettings().telegramNotifyOnPause);
   const [telegramStatusInterval, setTelegramStatusInterval] = useState(() => loadSettings().telegramStatusInterval);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [showScanResults, setShowScanResults] = useState(false);
 
   // Active job tracking — persisted to localStorage
   const [activeJobId, setActiveJobId] = useState<Id<"translationJobs"> | null>(() => {
@@ -115,6 +116,12 @@ export default function Dashboard() {
   const translatedChunks = useQuery(
     api.translation.getTranslatedChunks,
     activeJobId ? { jobId: activeJobId } : "skip"
+  );
+
+  // Scan results for Chinese characters in translated text
+  const scanResults = useQuery(
+    api.translation.scanForChinese,
+    showScanResults && activeJobId ? { jobId: activeJobId } : "skip"
   );
 
   // ─── Persist settings to localStorage on change ─────────────────
@@ -933,14 +940,23 @@ export default function Dashboard() {
 
           {/* Export Complete — only when fully done */}
           {isComplete && hasTranslatedChunks && (
-            <button
-              onClick={handleExport}
-              className="relative z-10 flex items-center gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 backdrop-blur-md px-5 py-2.5 text-sm font-medium text-amber-300 hover:bg-amber-500/20 active:bg-amber-500/30 transition-all cursor-pointer"
-              style={{ WebkitTapHighlightColor: "transparent", touchAction: "manipulation" }}
-            >
-              <Download className="h-4 w-4" />
-              Download Complete ({translatedChunks!.length} chunks)
-            </button>
+            <>
+              <button
+                onClick={handleExport}
+                className="relative z-10 flex items-center gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 backdrop-blur-md px-5 py-2.5 text-sm font-medium text-amber-300 hover:bg-amber-500/20 active:bg-amber-500/30 transition-all cursor-pointer"
+                style={{ WebkitTapHighlightColor: "transparent", touchAction: "manipulation" }}
+              >
+                <Download className="h-4 w-4" />
+                Download Complete ({translatedChunks!.length} chunks)
+              </button>
+              <button
+                onClick={() => setShowScanResults(!showScanResults)}
+                className="relative z-10 flex items-center gap-2 rounded-xl border border-purple-500/30 bg-purple-500/10 backdrop-blur-md px-4 py-2.5 text-sm font-medium text-purple-300 hover:bg-purple-500/20 active:bg-purple-500/30 transition-all cursor-pointer"
+                style={{ WebkitTapHighlightColor: "transparent", touchAction: "manipulation" }}
+              >
+                {showScanResults ? "Hide" : "Scan for Chinese"}
+              </button>
+            </>
           )}
 
           {(isRunning || isComplete || isFailed || isPaused || isStarting) && (
@@ -962,6 +978,66 @@ export default function Dashboard() {
             </span>
           )}
         </motion.div>
+
+        {/* Scan Results */}
+        <AnimatePresence>
+          {showScanResults && scanResults && (
+            <motion.div
+              initial={{ opacity: 0, y: 12, height: 0 }}
+              animate={{ opacity: 1, y: 0, height: "auto" }}
+              exit={{ opacity: 0, y: 12, height: 0 }}
+              className="overflow-hidden"
+            >
+              <div className="rounded-2xl border border-purple-500/30 bg-purple-500/10 backdrop-blur-xl p-4 shadow-sm">
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="text-sm font-semibold text-purple-300">
+                    Chinese Character Scan Results
+                  </h3>
+                  <button
+                    onClick={() => setShowScanResults(false)}
+                    className="text-xs text-purple-400 hover:text-purple-300 cursor-pointer"
+                  >
+                    Close
+                  </button>
+                </div>
+                {scanResults.totalScanned === 0 ? (
+                  <p className="text-xs text-stone-400">No completed chunks found.</p>
+                ) : scanResults.chunksWithChinese.length === 0 ? (
+                  <div className="flex items-center gap-2 text-green-400">
+                    <span className="text-lg">✅</span>
+                    <p className="text-sm font-medium">All {scanResults.totalScanned} chunks are clean — zero Chinese characters found!</p>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    <p className="text-xs text-purple-200/70">
+                      Found Chinese characters in {scanResults.chunksWithChinese.length} of {scanResults.totalScanned} chunks:
+                    </p>
+                    {scanResults.chunksWithChinese.map((item) => (
+                      <div
+                        key={item.index}
+                        className="rounded-xl border border-red-500/30 bg-red-500/10 p-3"
+                      >
+                        <p className="text-[11px] font-semibold text-red-300 mb-1">
+                          Chunk {item.index + 1}
+                        </p>
+                        <div className="flex flex-wrap gap-1.5">
+                          {item.matches.map((word, i) => (
+                            <span
+                              key={i}
+                              className="inline-block rounded bg-red-500/20 px-2 py-0.5 text-xs font-mono text-red-200 border border-red-500/30"
+                            >
+                              {word}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         {/* Past Translations list */}
         {allJobs && allJobs.length > 0 && (
