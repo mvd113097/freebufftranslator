@@ -143,6 +143,7 @@ export const internalPatchJob = internalMutation({
     completedCount: v.optional(v.number()),
     failedCount: v.optional(v.number()),
     lastHeartbeat: v.optional(v.number()),
+    lastStatusNotifyAt: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
     const patch: Record<string, unknown> = { updatedAt: Date.now() };
@@ -150,6 +151,7 @@ export const internalPatchJob = internalMutation({
     if (args.completedCount !== undefined) patch.completedCount = args.completedCount;
     if (args.failedCount !== undefined) patch.failedCount = args.failedCount;
     if (args.lastHeartbeat !== undefined) patch.lastHeartbeat = args.lastHeartbeat;
+    if (args.lastStatusNotifyAt !== undefined) patch.lastStatusNotifyAt = args.lastStatusNotifyAt;
     await ctx.db.patch(args.jobId, patch);
   },
 });
@@ -167,6 +169,12 @@ export const startTranslation = mutation({
     apiKeys: v.array(v.string()),
     telegramBotToken: v.optional(v.string()),
     telegramChatId: v.optional(v.string()),
+    telegramNotifyOnStart: v.optional(v.boolean()),
+    telegramNotifyOnProgress: v.optional(v.boolean()),
+    telegramNotifyOnError: v.optional(v.boolean()),
+    telegramNotifyOnComplete: v.optional(v.boolean()),
+    telegramNotifyOnPause: v.optional(v.boolean()),
+    telegramStatusInterval: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
     const now = Date.now();
@@ -191,6 +199,12 @@ export const startTranslation = mutation({
       updatedAt: now,
       telegramBotToken: args.telegramBotToken,
       telegramChatId: args.telegramChatId,
+      telegramNotifyOnStart: args.telegramNotifyOnStart ?? true,
+      telegramNotifyOnProgress: args.telegramNotifyOnProgress ?? true,
+      telegramNotifyOnError: args.telegramNotifyOnError ?? true,
+      telegramNotifyOnComplete: args.telegramNotifyOnComplete ?? true,
+      telegramNotifyOnPause: args.telegramNotifyOnPause ?? true,
+      telegramStatusInterval: args.telegramStatusInterval ?? 0,
     });
 
     for (let i = 0; i < args.chunks.length; i++) {
@@ -263,6 +277,12 @@ export const updateJobSettings = mutation({
     apiKeys: v.optional(v.array(v.string())),
     telegramBotToken: v.optional(v.string()),
     telegramChatId: v.optional(v.string()),
+    telegramNotifyOnStart: v.optional(v.boolean()),
+    telegramNotifyOnProgress: v.optional(v.boolean()),
+    telegramNotifyOnError: v.optional(v.boolean()),
+    telegramNotifyOnComplete: v.optional(v.boolean()),
+    telegramNotifyOnPause: v.optional(v.boolean()),
+    telegramStatusInterval: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
     const userId = await getAuthUserId(ctx);
@@ -274,6 +294,12 @@ export const updateJobSettings = mutation({
     if (args.apiKeys !== undefined) patch.apiKeys = args.apiKeys;
     if (args.telegramBotToken !== undefined) patch.telegramBotToken = args.telegramBotToken;
     if (args.telegramChatId !== undefined) patch.telegramChatId = args.telegramChatId;
+    if (args.telegramNotifyOnStart !== undefined) patch.telegramNotifyOnStart = args.telegramNotifyOnStart;
+    if (args.telegramNotifyOnProgress !== undefined) patch.telegramNotifyOnProgress = args.telegramNotifyOnProgress;
+    if (args.telegramNotifyOnError !== undefined) patch.telegramNotifyOnError = args.telegramNotifyOnError;
+    if (args.telegramNotifyOnComplete !== undefined) patch.telegramNotifyOnComplete = args.telegramNotifyOnComplete;
+    if (args.telegramNotifyOnPause !== undefined) patch.telegramNotifyOnPause = args.telegramNotifyOnPause;
+    if (args.telegramStatusInterval !== undefined) patch.telegramStatusInterval = args.telegramStatusInterval;
     await ctx.db.patch(args.jobId, patch);
   },
 });
@@ -464,6 +490,7 @@ export const processNextBatch = action({
         `📊 ${job.totalChunks} chunks to process\n` +
         `🤖 Model: ${job.model}\n` +
         `⚡ Concurrency: ${job.concurrency}`,
+        "start",
       );
     }
 
@@ -477,9 +504,9 @@ export const processNextBatch = action({
     const preCheck: { status: string } | null = await ctx.runQuery(internal.translation.internalGetJob, { jobId: args.jobId });
     if (!preCheck || preCheck.status !== "processing") {
       if (preCheck?.status === "paused") {
-        await notifyJob(job, `⏸️ <b>Translation Paused</b>\nOpen the browser to resume.`);
+        await notifyJob(job, `⏸️ <b>Translation Paused</b>\nOpen the browser to resume.`, "pause");
       } else if (preCheck?.status === "failed") {
-        await notifyJob(job, `🛑 <b>Translation Stopped</b>\nOpen the browser to resume or reset.`);
+        await notifyJob(job, `🛑 <b>Translation Stopped</b>\nOpen the browser to resume or reset.`, "pause");
       }
       return { done: false, processed: 0, reason: preCheck?.status ?? "missing" };
     }
@@ -560,6 +587,7 @@ export const processNextBatch = action({
           await notifyJob(
             job,
             `❌ <b>Chunk ${chunk.chunkIndex + 1} failed</b>\nError: ${lastError.slice(0, 200)}`,
+            "error",
           );
         }
 
@@ -597,6 +625,7 @@ export const processNextBatch = action({
         `📊 ${counts.completed}/${counts.total} chunks translated\n` +
         `${counts.failed > 0 ? `⚠️ ${counts.failed} chunks failed\n` : ""}` +
         `📥 Ready to download!`,
+        "complete",
       );
     } else if (crossedTenPercent && processedCount > 0) {
       await notifyJob(
@@ -605,7 +634,46 @@ export const processNextBatch = action({
         `✅ ${counts.completed}/${counts.total} chunks done\n` +
         `${counts.failed > 0 ? `❌ ${counts.failed} failed\n` : ""}` +
         `⏱️ Still translating...`,
+        "progress",
       );
+    }
+
+    // Periodic status update (every N minutes if configured)
+    const statusIntervalMin = job.telegramStatusInterval ?? 0;
+    if (statusIntervalMin > 0 && job.telegramBotToken && job.telegramChatId) {
+      const lastNotify = job.lastStatusNotifyAt ?? 0;
+      const minutesSince = (Date.now() - lastNotify) / 60_000;
+      if (minutesSince >= statusIntervalMin && !isAllDone) {
+        // Count English words from completed chunks
+        const allChunks = await ctx.runQuery(internal.translation.internalCountChunks, { jobId: args.jobId });
+        // Get actual word count by querying completed chunks
+        const chunksForWords = await ctx.runQuery(internal.translation.internalGetPendingChunks, { jobId: args.jobId, limit: 0 }); // just to get job ref
+        const elapsed = Date.now() - job.createdAt;
+        const elapsedMin = Math.floor(elapsed / 60_000);
+        const elapsedSec = Math.floor((elapsed % 60_000) / 1000);
+        const chunksDone = allChunks.completed;
+        const chunksTotal = allChunks.total;
+        const chunksPending = chunksTotal - chunksDone - allChunks.failed;
+        const percent = chunksTotal > 0 ? Math.round((chunksDone / chunksTotal) * 100) : 0;
+        const rate = elapsedMin > 0 ? (chunksDone / elapsedMin).toFixed(1) : "—";
+
+        await notifyJob(
+          job,
+          `📋 <b>Status Update</b>\n` +
+          `📄 ${job.fileName}\n` +
+          `📊 ${chunksDone}/${chunksTotal} chunks (${percent}%)\n` +
+          `🤖 Model: ${job.model}\n` +
+          `⏱️ Elapsed: ${elapsedMin}m ${elapsedSec}s\n` +
+          `📈 Rate: ~${rate} chunks/min\n` +
+          `${chunksPending > 0 ? `⏳ ${chunksPending} chunks remaining` : `✅ All done!`}`,
+          "status",
+        );
+        // Update last notify timestamp
+        await ctx.runMutation(internal.translation.internalPatchJob, {
+          jobId: args.jobId,
+          lastStatusNotifyAt: Date.now(),
+        });
+      }
     }
 
     return {
@@ -682,13 +750,44 @@ async function sendTelegram(botToken: string, chatId: string, message: string): 
   }
 }
 
+type NotificationType = "start" | "progress" | "error" | "complete" | "pause" | "status";
+
 async function notifyJob(
-  job: { telegramBotToken?: string; telegramChatId?: string; fileName: string; totalChunks: number },
+  job: {
+    telegramBotToken?: string;
+    telegramChatId?: string;
+    telegramNotifyOnStart?: boolean;
+    telegramNotifyOnProgress?: boolean;
+    telegramNotifyOnError?: boolean;
+    telegramNotifyOnComplete?: boolean;
+    telegramNotifyOnPause?: boolean;
+    telegramStatusInterval?: number;
+    lastStatusNotifyAt?: number;
+    fileName: string;
+    totalChunks: number;
+    completedCount: number;
+    failedCount: number;
+    model: string;
+    totalEnglishWords?: number;
+  },
   message: string,
+  type: NotificationType,
 ): Promise<void> {
-  if (job.telegramBotToken && job.telegramChatId) {
-    await sendTelegram(job.telegramBotToken, job.telegramChatId, message);
-  }
+  if (!job.telegramBotToken || !job.telegramChatId) return;
+
+  // Check if this notification type is enabled
+  const prefMap: Record<NotificationType, boolean | undefined> = {
+    start: job.telegramNotifyOnStart,
+    progress: job.telegramNotifyOnProgress,
+    error: job.telegramNotifyOnError,
+    complete: job.telegramNotifyOnComplete,
+    pause: job.telegramNotifyOnPause,
+    status: true, // periodic status always passes the interval check separately
+  };
+
+  if (type !== "status" && prefMap[type] === false) return;
+
+  await sendTelegram(job.telegramBotToken, job.telegramChatId, message);
 }
 
 // ─── Model fallback chain ───────────────────────────────────────

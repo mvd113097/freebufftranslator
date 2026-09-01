@@ -74,6 +74,12 @@ export default function Dashboard() {
   const [selectedModel, setSelectedModel] = useState(() => loadSettings().model);
   const [telegramBotToken, setTelegramBotToken] = useState(() => loadSettings().telegramBotToken);
   const [telegramChatId, setTelegramChatId] = useState(() => loadSettings().telegramChatId);
+  const [telegramNotifyOnStart, setTelegramNotifyOnStart] = useState(() => loadSettings().telegramNotifyOnStart);
+  const [telegramNotifyOnProgress, setTelegramNotifyOnProgress] = useState(() => loadSettings().telegramNotifyOnProgress);
+  const [telegramNotifyOnError, setTelegramNotifyOnError] = useState(() => loadSettings().telegramNotifyOnError);
+  const [telegramNotifyOnComplete, setTelegramNotifyOnComplete] = useState(() => loadSettings().telegramNotifyOnComplete);
+  const [telegramNotifyOnPause, setTelegramNotifyOnPause] = useState(() => loadSettings().telegramNotifyOnPause);
+  const [telegramStatusInterval, setTelegramStatusInterval] = useState(() => loadSettings().telegramStatusInterval);
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   // Active job tracking — persisted to localStorage
@@ -113,8 +119,8 @@ export default function Dashboard() {
 
   // ─── Persist settings to localStorage on change ─────────────────
   useEffect(() => {
-    saveSettings({ keys, model: selectedModel, chunkSize, concurrency, telegramBotToken, telegramChatId });
-  }, [keys, selectedModel, chunkSize, concurrency, telegramBotToken, telegramChatId]);
+    saveSettings({ keys, model: selectedModel, chunkSize, concurrency, telegramBotToken, telegramChatId, telegramNotifyOnStart, telegramNotifyOnProgress, telegramNotifyOnError, telegramNotifyOnComplete, telegramNotifyOnPause, telegramStatusInterval });
+  }, [keys, selectedModel, chunkSize, concurrency, telegramBotToken, telegramChatId, telegramNotifyOnStart, telegramNotifyOnProgress, telegramNotifyOnError, telegramNotifyOnComplete, telegramNotifyOnPause, telegramStatusInterval]);
 
 
 
@@ -273,6 +279,12 @@ export default function Dashboard() {
         apiKeys: keys,
         telegramBotToken: telegramBotToken || undefined,
         telegramChatId: telegramChatId || undefined,
+        telegramNotifyOnStart,
+        telegramNotifyOnProgress,
+        telegramNotifyOnError,
+        telegramNotifyOnComplete,
+        telegramNotifyOnPause,
+        telegramStatusInterval,
       });
 
       setActiveJobId(jobId);
@@ -717,7 +729,7 @@ export default function Dashboard() {
               </button>
               <div id="telegram-settings" style={{ display: "none" }} className="px-4 pb-4 pt-0 space-y-3">
                 <p className="text-[11px] text-stone-500">
-                  Get notified about translation progress, errors, and completion. Optional — leave blank to disable.
+                  Get notified about translation events. Optional — leave blank to disable.
                 </p>
                 <div className="space-y-2">
                   <label className="text-xs font-medium text-stone-400">Bot Token</label>
@@ -740,6 +752,49 @@ export default function Dashboard() {
                   />
                   <p className="text-[10px] text-stone-600">
                     Message @userinfobot on Telegram to find your Chat ID. Separate multiple IDs with commas.
+                  </p>
+                </div>
+
+                {/* Notification preferences */}
+                <div className="space-y-2">
+                  <label className="text-xs font-medium text-stone-400">Notify me when...</label>
+                  <div className="space-y-1.5">
+                    {[
+                      { label: "Translation starts", checked: telegramNotifyOnStart, set: setTelegramNotifyOnStart },
+                      { label: "Progress milestones (every 10%)", checked: telegramNotifyOnProgress, set: setTelegramNotifyOnProgress },
+                      { label: "A chunk fails (error)", checked: telegramNotifyOnError, set: setTelegramNotifyOnError },
+                      { label: "Translation completes", checked: telegramNotifyOnComplete, set: setTelegramNotifyOnComplete },
+                      { label: "Pipeline pauses/stops", checked: telegramNotifyOnPause, set: setTelegramNotifyOnPause },
+                    ].map(({ label, checked, set }) => (
+                      <label key={label} className="flex items-center gap-2 cursor-pointer group">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={(e) => set(e.target.checked)}
+                          className="h-3.5 w-3.5 rounded border-stone-600 bg-stone-700 text-blue-400 focus:ring-blue-400/30 cursor-pointer"
+                        />
+                        <span className="text-[11px] text-stone-300 group-hover:text-stone-200 transition-colors">{label}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Periodic status updates */}
+                <div className="space-y-2">
+                  <label className="text-xs font-medium text-stone-400">Periodic Status Updates</label>
+                  <select
+                    value={telegramStatusInterval}
+                    onChange={(e) => setTelegramStatusInterval(Number(e.target.value))}
+                    className="w-full rounded-xl border border-stone-700 bg-stone-800 px-3 py-2 text-xs text-stone-200 focus:outline-none focus:ring-2 focus:ring-blue-400/30 cursor-pointer"
+                  >
+                    <option value={0}>Off</option>
+                    <option value={5}>Every 5 minutes</option>
+                    <option value={10}>Every 10 minutes</option>
+                    <option value={15}>Every 15 minutes</option>
+                    <option value={30}>Every 30 minutes</option>
+                  </select>
+                  <p className="text-[10px] text-stone-600">
+                    Sends a detailed status summary with words translated, model used, and ETA.
                   </p>
                 </div>
               </div>

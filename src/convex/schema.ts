@@ -56,6 +56,13 @@ const schema = defineSchema(
       updatedAt: v.number(),
       telegramBotToken: v.optional(v.string()),
       telegramChatId: v.optional(v.string()),
+      telegramNotifyOnStart: v.optional(v.boolean()),
+      telegramNotifyOnProgress: v.optional(v.boolean()),
+      telegramNotifyOnError: v.optional(v.boolean()),
+      telegramNotifyOnComplete: v.optional(v.boolean()),
+      telegramNotifyOnPause: v.optional(v.boolean()),
+      telegramStatusInterval: v.optional(v.number()), // minutes, 0 = disabled
+      lastStatusNotifyAt: v.optional(v.number()),
     }).index("by_userId", ["userId"]),
 
     translationChunks: defineTable({

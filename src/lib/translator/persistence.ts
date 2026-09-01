@@ -18,6 +18,12 @@ export interface AppSettings {
   concurrency: number;
   telegramBotToken: string;
   telegramChatId: string;
+  telegramNotifyOnStart: boolean;
+  telegramNotifyOnProgress: boolean;
+  telegramNotifyOnError: boolean;
+  telegramNotifyOnComplete: boolean;
+  telegramNotifyOnPause: boolean;
+  telegramStatusInterval: number;
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -27,6 +33,12 @@ const DEFAULT_SETTINGS: AppSettings = {
   concurrency: 5,
   telegramBotToken: "",
   telegramChatId: "",
+  telegramNotifyOnStart: true,
+  telegramNotifyOnProgress: true,
+  telegramNotifyOnError: true,
+  telegramNotifyOnComplete: true,
+  telegramNotifyOnPause: true,
+  telegramStatusInterval: 0,
 };
 
 export function loadSettings(): AppSettings {
