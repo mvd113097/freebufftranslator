@@ -739,7 +739,7 @@ export default function Dashboard() {
                     className="w-full rounded-xl border border-stone-700 bg-stone-800 px-3 py-2 text-xs font-mono text-stone-200 placeholder:text-stone-500 focus:outline-none focus:ring-2 focus:ring-blue-400/30"
                   />
                   <p className="text-[10px] text-stone-600">
-                    Message @userinfobot on Telegram to find your Chat ID.
+                    Message @userinfobot on Telegram to find your Chat ID. Separate multiple IDs with commas.
                   </p>
                 </div>
               </div>
