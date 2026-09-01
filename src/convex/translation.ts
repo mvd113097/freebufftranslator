@@ -231,7 +231,7 @@ export const resumeJob = mutation({
       }
     }
 
-    await ctx.db.patch(args.jobId, { status: "processing", failedCount: 0, updatedAt: Date.now() });
+    await ctx.db.patch(args.jobId, { status: "processing", failedCount: 0, lastHeartbeat: Date.now(), updatedAt: Date.now() });
   },
 });
 

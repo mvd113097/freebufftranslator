@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo, useEffect } from "react";
+import { useState, useCallback, useMemo, useEffect, useRef } from "react";
 import { useMutation, useAction, useQuery } from "convex/react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
@@ -80,6 +80,9 @@ export default function Dashboard() {
   });
   const [isStarting, setIsStarting] = useState(false);
   const [hasRecovered, setHasRecovered] = useState(false);
+  const [isResuming, setIsResuming] = useState(false);
+  const [elapsedMs, setElapsedMs] = useState(0);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // ─── Convex mutations/queries ────────────────────────────────────
   const startTranslationMutation = useMutation(api.translation.startTranslation);
@@ -152,17 +155,41 @@ export default function Dashboard() {
   const isComplete = jobStatus?.status === "completed";
   const isFailed = jobStatus?.status === "failed";
 
-  // Detect stale jobs: status is "processing" but no heartbeat in 60 seconds
-  // This means the server-side pipeline chain likely broke
-  const isStale = isRunning && jobStatus?.lastHeartbeat
-    ? (Date.now() - jobStatus.lastHeartbeat) > 60_000
-    : false;
-
   const completedCount = jobStatus?.completedCount ?? 0;
   const failedCount = jobStatus?.failedCount ?? 0;
   const totalChunks = jobStatus?.totalChunks ?? 0;
   const totalEnglishWords = jobStatus?.totalEnglishWords ?? 0;
   const processingCount = jobStatus?.processingCount ?? 0;
+
+  // Detect stale jobs: status is "processing" but no heartbeat in 60 seconds
+  // Only show stale if there are NO chunks currently being processed
+  // (chunks in "processing" status means the pipeline is actively working)
+  const isStale = isRunning && jobStatus?.lastHeartbeat
+    ? (Date.now() - jobStatus.lastHeartbeat) > 60_000 && processingCount === 0
+    : false;
+
+  // Live elapsed timer — counts up from job creation
+  useEffect(() => {
+    if (isRunning && jobStatus?.createdAt) {
+      // Set initial elapsed
+      setElapsedMs(Date.now() - jobStatus.createdAt);
+      // Tick every second
+      timerRef.current = setInterval(() => {
+        setElapsedMs(Date.now() - (jobStatus.createdAt ?? Date.now()));
+      }, 1000);
+      return () => {
+        if (timerRef.current) clearInterval(timerRef.current);
+      };
+    } else {
+      // Not running — freeze elapsed at current value
+      if (timerRef.current) clearInterval(timerRef.current);
+      if (isComplete || isFailed || isPaused) {
+        // Keep showing the elapsed time from when it stopped
+      } else {
+        setElapsedMs(0);
+      }
+    }
+  }, [isRunning, isComplete, isFailed, isPaused, jobStatus?.createdAt]);
 
   // Convert job chunks to ChunkProgress format for ProgressPanel
   const chunkProgress = useMemo(() => {
@@ -180,6 +207,7 @@ export default function Dashboard() {
 
   const progress = useMemo(() => {
     if (!jobStatus) return null;
+    const pendingRemaining = totalChunks - completedCount - failedCount - processingCount;
     return {
       totalChunks: jobStatus.totalChunks,
       completedChunks: jobStatus.completedCount,
@@ -187,18 +215,21 @@ export default function Dashboard() {
       activeChunks: processingCount,
       overallPercent: jobStatus.percent,
       currentChunk: isRunning
-        ? `Processing chunk ${completedCount + 1} of ${totalChunks}...`
+        ? processingCount > 0
+          ? `Processing ${processingCount} chunk${processingCount > 1 ? "s" : ""} (${completedCount}/${totalChunks} done)...`
+          : `Starting next batch... (${completedCount}/${totalChunks} done)`
         : isPaused
           ? `Paused — ${completedCount} of ${totalChunks} done`
           : isComplete
             ? "All done!"
             : isFailed
               ? "Stopped"
-              : "Ready",
-      elapsedMs: 0,
+              : `Ready — ${totalChunks} chunks`,
+      elapsedMs,
       estimatedRemainingMs: 0,
+      pendingRemaining,
     };
-  }, [jobStatus, isRunning, isComplete, isFailed, isPaused, processingCount, completedCount, totalChunks]);
+  }, [jobStatus, isRunning, isComplete, isFailed, isPaused, processingCount, completedCount, failedCount, totalChunks, elapsedMs]);
 
   // ─── Sync concurrency/model/apiKeys changes to Convex job mid-translation ─
   useEffect(() => {
@@ -282,6 +313,7 @@ export default function Dashboard() {
   // ─── Resume translation (after pause/stop/failure) ──────────────
   const resumeTranslation = useCallback(async () => {
     if (!activeJobId) return;
+    setIsResuming(true);
     try {
       await resumeJobMutation({ jobId: activeJobId });
       // Fire-and-forget
@@ -291,8 +323,11 @@ export default function Dashboard() {
       }).catch((err) => {
         console.error("Pipeline resume failed:", err);
       });
+      // Clear loading state after a brief delay (heartbeat will clear stale)
+      setTimeout(() => setIsResuming(false), 2000);
     } catch (err) {
       console.error("Failed to resume:", err);
+      setIsResuming(false);
     }
   }, [activeJobId, concurrency, resumeJobMutation, processJobAction]);
 
@@ -441,10 +476,14 @@ export default function Dashboard() {
                     <div className="flex items-center gap-3 mt-3">
                       <button
                         onClick={resumeTranslation}
-                        className="flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 px-4 py-2 text-xs font-semibold text-stone-950 shadow-md hover:shadow-lg transition-all cursor-pointer"
+                        disabled={isResuming}
+                        className="flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 px-4 py-2 text-xs font-semibold text-stone-950 shadow-md hover:shadow-lg transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                       >
-                        <Play className="h-3.5 w-3.5" />
-                        Resume Translation
+                        {isResuming ? (
+                          <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Resuming...</>
+                        ) : (
+                          <><Play className="h-3.5 w-3.5" /> Resume Translation</>
+                        )}
                       </button>
                       <button
                         onClick={handleReset}
@@ -484,10 +523,14 @@ export default function Dashboard() {
                     <div className="flex items-center gap-3 mt-3">
                       <button
                         onClick={resumeTranslation}
-                        className="flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 px-4 py-2 text-xs font-semibold text-stone-950 shadow-md hover:shadow-lg transition-all cursor-pointer"
+                        disabled={isResuming}
+                        className="flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 px-4 py-2 text-xs font-semibold text-stone-950 shadow-md hover:shadow-lg transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                       >
-                        <Play className="h-3.5 w-3.5" />
-                        Resume Translation
+                        {isResuming ? (
+                          <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Resuming...</>
+                        ) : (
+                          <><Play className="h-3.5 w-3.5" /> Resume Translation</>
+                        )}
                       </button>
                       <button
                         onClick={handleReset}
@@ -528,10 +571,14 @@ export default function Dashboard() {
                     <div className="flex items-center gap-3 mt-3">
                       <button
                         onClick={resumeTranslation}
-                        className="flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 px-4 py-2 text-xs font-semibold text-stone-950 shadow-md hover:shadow-lg transition-all cursor-pointer"
+                        disabled={isResuming}
+                        className="flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 px-4 py-2 text-xs font-semibold text-stone-950 shadow-md hover:shadow-lg transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                       >
-                        <Zap className="h-3.5 w-3.5" />
-                        Resume Translation
+                        {isResuming ? (
+                          <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Resuming...</>
+                        ) : (
+                          <><Zap className="h-3.5 w-3.5" /> Resume Translation</>
+                        )}
                       </button>
                       <button
                         onClick={handleReset}
@@ -740,10 +787,14 @@ export default function Dashboard() {
           {isPaused && !isRunning && (
             <button
               onClick={resumeTranslation}
-              className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 px-6 py-2.5 text-sm font-semibold text-stone-950 shadow-lg shadow-amber-500/25 hover:shadow-amber-500/40 hover:scale-[1.02] active:scale-[0.98] transition-all cursor-pointer"
+              disabled={isResuming}
+              className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 px-6 py-2.5 text-sm font-semibold text-stone-950 shadow-lg shadow-amber-500/25 hover:shadow-amber-500/40 hover:scale-[1.02] active:scale-[0.98] transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100"
             >
-              <Play className="h-4 w-4" />
-              Resume Translation
+              {isResuming ? (
+                <><Loader2 className="h-4 w-4 animate-spin" /> Resuming...</>
+              ) : (
+                <><Play className="h-4 w-4" /> Resume Translation</>
+              )}
             </button>
           )}
 
