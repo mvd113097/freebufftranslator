@@ -695,18 +695,22 @@ export const processJob = action({
 // ─── Telegram notifications ─────────────────────────────────────
 
 async function sendTelegram(botToken: string, chatId: string, message: string): Promise<void> {
-  try {
-    await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text: message,
-        parse_mode: "HTML",
-      }),
-    });
-  } catch (err) {
-    console.error("[Telegram] Failed to send notification:", err);
+  // Support multiple chat IDs separated by commas
+  const chatIds = chatId.split(",").map((id) => id.trim()).filter((id) => id.length > 0);
+  for (const id of chatIds) {
+    try {
+      await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chat_id: id,
+          text: message,
+          parse_mode: "HTML",
+        }),
+      });
+    } catch (err) {
+      console.error(`[Telegram] Failed to send to ${id}:`, err);
+    }
   }
 }
 
