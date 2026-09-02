@@ -809,11 +809,15 @@ export const processNextBatch = action({
     }
 
     // Periodic status update (every N minutes if configured)
-    const statusIntervalMin = job.telegramStatusInterval ?? 0;
-    if (statusIntervalMin > 0 && job.telegramBotToken && job.telegramChatId) {
-      const lastNotify = job.lastStatusNotifyAt ?? 0;
+    // Re-read job to get the latest interval (user may have changed it mid-batch)
+    const freshJob: typeof job | null = await ctx.runQuery(internal.translation.internalGetJob, { jobId: args.jobId });
+    const latestInterval = freshJob?.telegramStatusInterval ?? job.telegramStatusInterval ?? 0;
+    const latestBotToken = freshJob?.telegramBotToken ?? job.telegramBotToken;
+    const latestChatId = freshJob?.telegramChatId ?? job.telegramChatId;
+    if (latestInterval > 0 && latestBotToken && latestChatId) {
+      const lastNotify = freshJob?.lastStatusNotifyAt ?? job.lastStatusNotifyAt ?? 0;
       const minutesSince = (Date.now() - lastNotify) / 60_000;
-      if (minutesSince >= statusIntervalMin && !isAllDone) {
+      if (minutesSince >= latestInterval && !isAllDone) {
         const elapsed = Date.now() - job.createdAt;
         const elapsedMin = Math.floor(elapsed / 60_000);
         const elapsedSec = Math.floor((elapsed % 60_000) / 1000);
@@ -836,7 +840,7 @@ export const processNextBatch = action({
         const totalWords: number = await ctx.runQuery(internal.translation.internalCountWords, { jobId: args.jobId });
 
         await notifyJob(
-          job,
+          { ...job, telegramBotToken: latestBotToken, telegramChatId: latestChatId },
           `📋 <b>Status Update</b>\n` +
           `📄 ${job.fileName}\n` +
           `📊 ${chunksDone}/${chunksTotal} chunks (${percent}%)\n` +
