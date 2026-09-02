@@ -977,10 +977,10 @@ async function notifyJob(
 // on OpenRouter with decent context windows suitable for novel translation.
 const FALLBACK_MODELS = [
   "minimax/minimax-m3:free",
+  "z-ai/glm-5.2:free",
   "nvidia/nemotron-3-ultra-550b-a55b:free",
   "nvidia/nemotron-3.5-lightning:free",
   "inclusionai/ling-3.0-flash-fin:free",
-  "z-ai/glm-5.2:free",
   "nvidia/nemotron-3-super-120b-a12b:free",
   "thinkingmachines/inkling:free",
 ];
