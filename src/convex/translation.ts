@@ -479,6 +479,39 @@ export const listJobs = query({
 });
 
 /** Get all completed translated chunks for export. */
+/** Lightweight progress query — returns only chunk status, NO text. Used by UI for live progress. */
+export const getChunkProgress = query({
+  args: { jobId: v.id("translationJobs") },
+  handler: async (ctx, args) => {
+    const userId = await getAuthUserId(ctx);
+    const job = await ctx.db.get(args.jobId);
+    if (!job) return { total: 0, completed: 0, failed: 0, chunks: [] };
+    if (userId && job.userId && job.userId !== (userId as string)) return { total: 0, completed: 0, failed: 0, chunks: [] };
+
+    const chunks = await ctx.db
+      .query("translationChunks")
+      .withIndex("by_jobId", (q) => q.eq("jobId", args.jobId))
+      .collect();
+
+    const sorted = chunks.sort((a, b) => a.chunkIndex - b.chunkIndex);
+    const completed = sorted.filter((c) => c.status === "completed").length;
+    const failed = sorted.filter((c) => c.status === "failed").length;
+
+    return {
+      total: sorted.length,
+      completed,
+      failed,
+      chunks: sorted.map((c) => ({
+        index: c.chunkIndex,
+        status: c.status,
+        error: c.error,
+        retries: c.retries,
+      })),
+    };
+  },
+});
+
+/** Fetch all translated chunks WITH text — used for download/export only. */
 export const getTranslatedChunks = query({
   args: { jobId: v.id("translationJobs") },
   handler: async (ctx, args) => {
@@ -487,6 +520,27 @@ export const getTranslatedChunks = query({
     const job = await ctx.db.get(args.jobId);
     if (!job) return [];
     if (userId && job.userId && job.userId !== userId as string) return [];
+
+    const chunks = await ctx.db
+      .query("translationChunks")
+      .withIndex("by_jobId", (q) => q.eq("jobId", args.jobId))
+      .collect();
+
+    return chunks
+      .filter((c) => c.status === "completed" && c.translatedText.length > 0)
+      .sort((a, b) => a.chunkIndex - b.chunkIndex)
+      .map((c) => ({ index: c.chunkIndex, text: c.translatedText }));
+  },
+});
+
+/** On-demand fetch for download/export — NOT a subscription. Returns translated text. */
+export const fetchTranslatedChunks = mutation({
+  args: { jobId: v.id("translationJobs") },
+  handler: async (ctx, args) => {
+    const userId = await getAuthUserId(ctx);
+    const job = await ctx.db.get(args.jobId);
+    if (!job) return [];
+    if (userId && job.userId && job.userId !== (userId as string)) return [];
 
     const chunks = await ctx.db
       .query("translationChunks")

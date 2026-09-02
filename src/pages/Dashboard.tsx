@@ -117,11 +117,13 @@ export default function Dashboard() {
     activeJobId ? { jobId: activeJobId } : "skip"
   );
 
-  // Always query translated chunks (for partial download AND final export)
-  const translatedChunks = useQuery(
-    api.translation.getTranslatedChunks,
+  // Lightweight progress subscription — NO translated text, just status counts
+  const chunkProgress = useQuery(
+    api.translation.getChunkProgress,
     activeJobId ? { jobId: activeJobId } : "skip"
   );
+  // On-demand fetch for download/export (NOT a subscription — fetches once)
+  const fetchTranslatedChunksMutation = useMutation(api.translation.fetchTranslatedChunks);
 
   // Scan results for Chinese characters in translated text
   const scanResults = useQuery(
@@ -230,7 +232,7 @@ export default function Dashboard() {
   }, [isRunning, isComplete, isFailed, isPaused, jobStatus?.createdAt]);
 
   // Convert job chunks to ChunkProgress format for ProgressPanel
-  const chunkProgress = useMemo(() => {
+  const progressChunks = useMemo(() => {
     if (!jobStatus?.chunks) return [];
     return jobStatus.chunks.map((c) => ({
       id: c.id,
@@ -401,23 +403,35 @@ export default function Dashboard() {
   );
 
   // ─── Export (final) ─────────────────────────────────────────────
-  const handleExport = useCallback(() => {
-    if (!translatedChunks || translatedChunks.length === 0) {
-      alert("No translated content to export yet.");
-      return;
+  const handleExport = useCallback(async () => {
+    if (!activeJobId) return;
+    try {
+      const chunks = await fetchTranslatedChunksMutation({ jobId: activeJobId });
+      if (!chunks || chunks.length === 0) {
+        alert("No translated content to export yet.");
+        return;
+      }
+      const baseName = (fileName.replace(/\.txt$/i, "") || "translated_novel") + ".epub";
+      downloadTranslation(chunks, baseName);
+    } catch (err) {
+      console.error("Failed to fetch chunks for export:", err);
     }
-    const baseName = (fileName.replace(/\.txt$/i, "") || "translated_novel") + ".epub";
-    downloadTranslation(translatedChunks, baseName);
-  }, [translatedChunks, fileName, downloadTranslation]);
+  }, [activeJobId, fileName, downloadTranslation, fetchTranslatedChunksMutation]);
 
   // ─── Download Progress (partial, while running) ─────────────────
-  const handleDownloadProgress = useCallback(() => {
-    if (!translatedChunks || translatedChunks.length === 0) {
-      alert("No translated chunks available yet.");
-      return;
+  const handleDownloadProgress = useCallback(async () => {
+    if (!activeJobId) return;
+    try {
+      const chunks = await fetchTranslatedChunksMutation({ jobId: activeJobId });
+      if (!chunks || chunks.length === 0) {
+        alert("No translated chunks available yet.");
+        return;
+      }
+      downloadTranslation(chunks, "incomplete_english.epub");
+    } catch (err) {
+      console.error("Failed to fetch chunks for download:", err);
     }
-    downloadTranslation(translatedChunks, "incomplete_english.epub");
-  }, [translatedChunks, downloadTranslation]);
+  }, [activeJobId, downloadTranslation, fetchTranslatedChunksMutation]);
 
   // ─── Reset ──────────────────────────────────────────────────────
   const handleReset = useCallback(async () => {
@@ -436,7 +450,7 @@ export default function Dashboard() {
     setFileName("");
   }, [activeJobId, deleteJobMutation]);
 
-  const hasTranslatedChunks = translatedChunks && translatedChunks.length > 0;
+  const hasTranslatedChunks = chunkProgress && chunkProgress.completed > 0;
 
   // ─── Render ─────────────────────────────────────────────────────
   return (
@@ -839,7 +853,7 @@ export default function Dashboard() {
           >
             <ProgressPanel
               progress={progress}
-              chunks={chunkProgress}
+              chunks={progressChunks}
               isRunning={!!isRunning}
               isComplete={!!isComplete}
               totalEnglishWords={totalEnglishWords}
@@ -948,7 +962,7 @@ export default function Dashboard() {
               style={{ WebkitTapHighlightColor: "transparent", touchAction: "manipulation" }}
             >
               <Download className="h-4 w-4" />
-              {hasTranslatedChunks ? `Download Progress (${translatedChunks!.length} chunks)` : "Download Progress (waiting for chunks...)"}
+              {hasTranslatedChunks ? `Download Progress (${chunkProgress!.completed} chunks)` : "Download Progress (waiting for chunks...)"}
             </button>
           )}
 
@@ -961,7 +975,7 @@ export default function Dashboard() {
                 style={{ WebkitTapHighlightColor: "transparent", touchAction: "manipulation" }}
               >
                 <Download className="h-4 w-4" />
-                Download Complete ({translatedChunks!.length} chunks)
+                Download Complete ({chunkProgress?.completed ?? 0} chunks)
               </button>
               <button
                 onClick={() => setShowScanResults(!showScanResults)}
