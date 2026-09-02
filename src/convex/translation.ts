@@ -367,7 +367,13 @@ export const updateJobSettings = mutation({
     if (args.telegramNotifyOnError !== undefined) patch.telegramNotifyOnError = args.telegramNotifyOnError;
     if (args.telegramNotifyOnComplete !== undefined) patch.telegramNotifyOnComplete = args.telegramNotifyOnComplete;
     if (args.telegramNotifyOnPause !== undefined) patch.telegramNotifyOnPause = args.telegramNotifyOnPause;
-    if (args.telegramStatusInterval !== undefined) patch.telegramStatusInterval = args.telegramStatusInterval;
+    if (args.telegramStatusInterval !== undefined) {
+      patch.telegramStatusInterval = args.telegramStatusInterval;
+      // Reset the timer so the first notification fires after the new interval
+      if (args.telegramStatusInterval > 0) {
+        patch.lastStatusNotifyAt = 0;
+      }
+    }
     await ctx.db.patch(args.jobId, patch);
   },
 });
