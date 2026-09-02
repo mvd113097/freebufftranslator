@@ -657,7 +657,7 @@ export const processNextBatch = action({
             try {
               // Retry backoff (only on retries, not first attempt)
               if (attempt > 0) {
-                await new Promise((r) => setTimeout(r, 2000));
+                await new Promise((r) => setTimeout(r, 1000));
               }
 
               const translated = await callOpenRouter(chunk.originalText, apiKey, tryModel);
@@ -666,8 +666,7 @@ export const processNextBatch = action({
               const chineseRegex = /[\u4e00-\u9fff]+/;
               if (chineseRegex.test(translated) && attempt < attemptsForModel - 1) {
                 console.warn(`[Quality] Chunk ${chunk.chunkIndex} contains Chinese characters, retrying...`);
-                await new Promise((r) => setTimeout(r, 2000));
-                continue; // retry same model
+                continue; // retry same model immediately
               }
 
               await ctx.runMutation(internal.translation.internalPatchChunk, {
@@ -697,7 +696,7 @@ export const processNextBatch = action({
                 await new Promise((r) => setTimeout(r, 3000)); // 3s for overloaded
                 break;
               } else if (attempt < attemptsForModel - 1) {
-                await new Promise((r) => setTimeout(r, 2000));
+                await new Promise((r) => setTimeout(r, 1000));
               }
             }
           }
@@ -899,8 +898,8 @@ export const processJob = action({
         return result;
       }
 
-      // Schedule next batch after 2 seconds (enough for rate limiting)
-      await ctx.scheduler.runAfter(2000, api.translation.processJob, {
+      // Schedule next batch after 500ms (rate limiting is per-key, no need to wait long)
+      await ctx.scheduler.runAfter(500, api.translation.processJob, {
         jobId: args.jobId,
         batchSize: currentBatchSize,
       });
@@ -1003,9 +1002,9 @@ async function callOpenRouter(text: string, apiKey: string, model: string): Prom
       { role: "system", content: SYSTEM_PROMPT },
       { role: "user", content: text },
     ],
-    temperature: 0.7,
-    top_p: 0.95,
-    max_tokens: 65536,
+    temperature: 0.5,
+    top_p: 0.9,
+    max_tokens: 16384,
     stream: false,
   };
 

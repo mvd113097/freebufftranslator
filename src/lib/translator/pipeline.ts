@@ -134,8 +134,8 @@ export class TranslationPipeline {
 
           // Brief delay to avoid burst
           const timeSinceLastRequest = Date.now() - this.lastRequestTime;
-          if (timeSinceLastRequest < 1000) {
-            const waitMs = 1000 - timeSinceLastRequest;
+          if (timeSinceLastRequest < 500) {
+            const waitMs = 500 - timeSinceLastRequest;
             await new Promise((r) => setTimeout(r, waitMs));
           }
           this.lastRequestTime = Date.now();
@@ -178,8 +178,8 @@ export class TranslationPipeline {
             // Rate limit: wait 30s. Other errors: exponential backoff.
             const isRateLimit = message.includes("RATE_LIMITED") || message.includes("429");
             const backoffMs = isRateLimit
-              ? 30000
-              : Math.min(3000 * Math.pow(2, attempt - 1), 20000);
+              ? 10000
+              : Math.min(3000 * Math.pow(2, attempt - 1), 15000);
             console.log(`[Pipeline] Retrying in ${backoffMs / 1000}s...`);
             this.reportProgress();
             await new Promise((r) => setTimeout(r, backoffMs));
@@ -214,7 +214,7 @@ export class TranslationPipeline {
 
       const workerCount = Math.min(this.options.concurrency, chunksToProcess.length);
       for (let i = 0; i < workerCount; i++) {
-        const delay = i * 2000; // 2s stagger between workers
+        const delay = i * 500; // 500ms stagger between workers (faster startup)
         activePromises.push(
           new Promise<void>((resolve) => {
             setTimeout(async () => {
