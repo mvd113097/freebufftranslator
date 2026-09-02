@@ -105,14 +105,15 @@ export const internalGetPendingChunks = internalQuery({
 export const internalCountWords = internalQuery({
   args: { jobId: v.id("translationJobs") },
   handler: async (ctx, args) => {
-    const chunks = await ctx.db
+    // Use .map() to avoid loading full text — approximate words from length
+    const rows = await ctx.db
       .query("translationChunks")
       .withIndex("by_jobId", (q) => q.eq("jobId", args.jobId))
       .collect();
     let words = 0;
-    for (const c of chunks) {
+    for (const c of rows) {
       if (c.status === "completed" && c.translatedText.length > 0) {
-        words += c.translatedText.split(/\s+/).filter((w) => w.length > 0).length;
+        words += Math.round(c.translatedText.length / 5.5); // ~5.5 chars per English word
       }
     }
     return words;
@@ -408,25 +409,32 @@ export const getJobStatus = query({
     // Only return this job if it belongs to the current user
     if (userId && job.userId && job.userId !== userId as string) return null;
 
-    const chunks = await ctx.db
+    // Collect then project — only return lightweight fields to client
+    const allChunks = await ctx.db
       .query("translationChunks")
       .withIndex("by_jobId", (q) => q.eq("jobId", args.jobId))
       .collect();
+    const chunkRows = allChunks.map((c) => ({
+      chunkIndex: c.chunkIndex,
+      status: c.status,
+      error: c.error,
+      translatedLen: c.translatedText.length,
+    }));
 
-    const completed = chunks.filter((c) => c.status === "completed").length;
-    const failed = chunks.filter((c) => c.status === "failed").length;
-    const total = chunks.length;
-
-    // Count English words in completed translations
     let totalEnglishWords = 0;
-    for (const c of chunks) {
-      if (c.status === "completed" && c.translatedText.length > 0) {
-        totalEnglishWords += c.translatedText.split(/\s+/).filter((w) => w.length > 0).length;
+    let completed = 0;
+    let failed = 0;
+    let processing = 0;
+    for (const c of chunkRows) {
+      if (c.status === "completed") completed++;
+      else if (c.status === "failed") failed++;
+      else if (c.status === "processing") processing++;
+      // Approximate word count from text length (avoids loading full text)
+      if (c.status === "completed" && c.translatedLen > 0) {
+        totalEnglishWords += Math.round(c.translatedLen / 5.5); // ~5.5 chars per English word
       }
     }
-
-    // Count processing chunks (active in-flight)
-    const processing = chunks.filter((c) => c.status === "processing").length;
+    const total = chunkRows.length;
 
     return {
       fileName: job.fileName,
@@ -440,13 +448,13 @@ export const getJobStatus = query({
       lastHeartbeat: job.lastHeartbeat,
       createdAt: job.createdAt,
       percent: total > 0 ? Math.round(((completed + failed) / total) * 100) : 0,
-      chunks: chunks
+      chunks: chunkRows
         .sort((a, b) => a.chunkIndex - b.chunkIndex)
         .map((c) => ({
           id: c.chunkIndex,
           status: c.status,
           error: c.error,
-          translatedLength: c.translatedText.length,
+          translatedLength: c.translatedLen,
         })),
     };
   },
@@ -488,12 +496,19 @@ export const getChunkProgress = query({
     if (!job) return { total: 0, completed: 0, failed: 0, chunks: [] };
     if (userId && job.userId && job.userId !== (userId as string)) return { total: 0, completed: 0, failed: 0, chunks: [] };
 
-    const chunks = await ctx.db
+    // Collect then project — only return lightweight fields to client
+    const allChunks = await ctx.db
       .query("translationChunks")
       .withIndex("by_jobId", (q) => q.eq("jobId", args.jobId))
       .collect();
+    const chunkRows = allChunks.map((c) => ({
+      index: c.chunkIndex,
+      status: c.status,
+      error: c.error,
+      retries: c.retries,
+    }));
 
-    const sorted = chunks.sort((a, b) => a.chunkIndex - b.chunkIndex);
+    const sorted = chunkRows.sort((a, b) => a.index - b.index);
     const completed = sorted.filter((c) => c.status === "completed").length;
     const failed = sorted.filter((c) => c.status === "failed").length;
 
@@ -501,12 +516,7 @@ export const getChunkProgress = query({
       total: sorted.length,
       completed,
       failed,
-      chunks: sorted.map((c) => ({
-        index: c.chunkIndex,
-        status: c.status,
-        error: c.error,
-        retries: c.retries,
-      })),
+      chunks: sorted,
     };
   },
 });
