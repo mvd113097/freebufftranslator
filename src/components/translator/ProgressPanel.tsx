@@ -1,4 +1,4 @@
-import { CheckCircle2, AlertTriangle, Loader2, Clock, BookOpen } from "lucide-react";
+import { CheckCircle2, AlertTriangle, Loader2, Clock, BookOpen, Cpu } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { PipelineProgress, ChunkProgress } from "@/lib/translator/pipeline";
 
@@ -8,6 +8,7 @@ interface ProgressPanelProps {
   isRunning: boolean;
   isComplete: boolean;
   totalEnglishWords?: number;
+  activeModel?: string;
 }
 
 function formatTime(ms: number): string {
@@ -25,7 +26,9 @@ export function ProgressPanel({
   isRunning,
   isComplete,
   totalEnglishWords = 0,
+  activeModel,
 }: ProgressPanelProps) {
+  const displayModel = activeModel ?? progress?.activeModel;
   const completedCount = chunks.filter((c) => c.status === "completed").length;
   const failedCount = chunks.filter((c) => c.status === "failed").length;
   const percent = progress?.overallPercent ?? 0;
@@ -89,6 +92,13 @@ export function ProgressPanel({
           label="English Words"
           value={totalEnglishWords.toLocaleString()}
         />
+        {displayModel && (
+          <StatCard
+            icon={<Cpu className="h-4 w-4 text-blue-400" />}
+            label="Active Model"
+            value={displayModel.split('/').pop() ?? displayModel}
+          />
+        )}
       </div>
 
       {/* Active status indicator */}

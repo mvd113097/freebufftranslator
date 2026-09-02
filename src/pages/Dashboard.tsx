@@ -841,6 +841,7 @@ export default function Dashboard() {
               isRunning={!!isRunning}
               isComplete={!!isComplete}
               totalEnglishWords={totalEnglishWords}
+              activeModel={jobStatus?.activeModel}
             />
           </motion.div>
         </div>

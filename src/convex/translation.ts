@@ -161,12 +161,14 @@ export const internalPatchJob = internalMutation({
     failedCount: v.optional(v.number()),
     lastHeartbeat: v.optional(v.number()),
     lastStatusNotifyAt: v.optional(v.number()),
+    activeModel: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const patch: Record<string, unknown> = { updatedAt: Date.now() };
     if (args.status !== undefined) patch.status = args.status;
     if (args.completedCount !== undefined) patch.completedCount = args.completedCount;
     if (args.failedCount !== undefined) patch.failedCount = args.failedCount;
+    if (args.activeModel !== undefined) patch.activeModel = args.activeModel;
     if (args.lastHeartbeat !== undefined) patch.lastHeartbeat = args.lastHeartbeat;
     if (args.lastStatusNotifyAt !== undefined) patch.lastStatusNotifyAt = args.lastStatusNotifyAt;
     await ctx.db.patch(args.jobId, patch);
@@ -427,6 +429,7 @@ export const getJobStatus = query({
       completedCount: completed,
       failedCount: failed,
       processingCount: processing,
+      activeModel: job.activeModel,
       totalEnglishWords,
       lastHeartbeat: job.lastHeartbeat,
       createdAt: job.createdAt,
@@ -632,6 +635,7 @@ export const processNextBatch = action({
       chunkAssignments.map(async ({ chunk, apiKey }) => {
         let success = false;
         let lastError = "";
+        let usedModel: string | undefined;
 
         for (let modelIdx = 0; modelIdx < modelChain.length; modelIdx++) {
           const tryModel = modelChain[modelIdx];
@@ -669,6 +673,7 @@ export const processNextBatch = action({
               });
 
               success = true;
+              usedModel = tryModel;
               break;
             } catch (err: unknown) {
               lastError = err instanceof Error ? err.message : String(err);
@@ -708,7 +713,7 @@ export const processNextBatch = action({
           );
         }
 
-        return { success, chunkIndex: chunk.chunkIndex, error: lastError };
+        return { success, chunkIndex: chunk.chunkIndex, error: lastError, model: usedModel };
       })
     );
 
@@ -721,12 +726,21 @@ export const processNextBatch = action({
     const counts: { total: number; completed: number; failed: number } = await ctx.runQuery(internal.translation.internalCountChunks, { jobId: args.jobId });
     const isAllDone: boolean = counts.completed + counts.failed >= counts.total;
 
+    // Determine the most recently successful model from the batch
+    let lastSuccessfulModel: string | undefined;
+    for (const r of results) {
+      if (r.success && r.model) {
+        lastSuccessfulModel = r.model;
+      }
+    }
+
     await ctx.runMutation(internal.translation.internalPatchJob, {
       jobId: args.jobId,
       status: isAllDone ? "completed" : "processing",
       completedCount: counts.completed,
       failedCount: counts.failed,
       lastHeartbeat: Date.now(),
+      ...(lastSuccessfulModel ? { activeModel: lastSuccessfulModel } : {}),
     });
 
     // Send progress notification every 10% or on completion
@@ -760,7 +774,7 @@ export const processNextBatch = action({
         text: `📄 ${jobRef.fileName}\n` +
           `📊 ${chunksDone}/${chunksTotal} chunks (${pct}%)\n` +
           `📝 ${wordCount.toLocaleString()} English words\n` +
-          `🤖 Model: ${jobRef.model}\n` +
+          `🤖 Model: ${jobRef.activeModel ?? jobRef.model}\n` +
           `⏱️ Elapsed: ${elapsedStr}\n` +
           `📈 Rate: ~${rate} chunks/min` +
           (countsRef.failed > 0 ? `\n❌ ${countsRef.failed} chunks failed` : "") +
@@ -822,7 +836,7 @@ export const processNextBatch = action({
           `📄 ${job.fileName}\n` +
           `📊 ${chunksDone}/${chunksTotal} chunks (${percent}%)\n` +
           `📝 ${totalWords.toLocaleString()} English words translated\n` +
-          `🤖 Model: ${job.model}\n` +
+          `🤖 Model: ${job.activeModel ?? job.model}\n` +
           `🔑 API Keys: ${job.apiKeys.length}\n` +
           `⚡ Concurrency: ${job.concurrency}\n` +
           `⏱️ Elapsed: ${elapsedMin}m ${elapsedSec}s\n` +

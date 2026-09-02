@@ -63,6 +63,7 @@ const schema = defineSchema(
       telegramNotifyOnPause: v.optional(v.boolean()),
       telegramStatusInterval: v.optional(v.number()), // minutes, 0 = disabled
       lastStatusNotifyAt: v.optional(v.number()),
+      activeModel: v.optional(v.string()), // which model is currently being used
     }).index("by_userId", ["userId"]),
 
     translationChunks: defineTable({

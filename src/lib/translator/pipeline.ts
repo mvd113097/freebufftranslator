@@ -23,6 +23,7 @@ export interface PipelineProgress {
   currentChunk: string;
   elapsedMs: number;
   estimatedRemainingMs: number;
+  activeModel?: string;
 }
 
 export type ProgressCallback = (progress: PipelineProgress) => void;
