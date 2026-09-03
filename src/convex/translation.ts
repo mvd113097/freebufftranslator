@@ -717,6 +717,10 @@ export const processNextBatch = action({
             `⚠️ <b>${resetResult.resetCount} stuck chunks recovered</b>\nChunks that were stuck in processing have been reset and will retry.\n📄 ${job.fileName}`,
             "error",
           );
+        } else {
+          // Chunks are still mid-request (possibly in another batch) — wait a bit before
+          // re-checking so we don't spin the scheduler every 500ms while they age out.
+          await new Promise((resolve) => setTimeout(resolve, 10_000));
         }
       }
 
@@ -817,6 +821,62 @@ export const processNextBatch = action({
       });
     }
 
+    // Periodic Telegram status — checked here at batch START too, because free models can
+    // take many minutes per chunk and the periodic check used to only run after a batch
+    // ended (so one long batch meant total Telegram silence, even with 5-min configured).
+    const maybeSendPeriodicStatus = async (skipIfNothingDoneYet: boolean): Promise<void> => {
+      const fresh = await ctx.runQuery(internal.translation.internalGetJob, { jobId: args.jobId });
+      const interval = fresh?.telegramStatusInterval ?? 0;
+      const botToken = fresh?.telegramBotToken;
+      const chatId = fresh?.telegramChatId;
+      if (!fresh || !(interval > 0 && botToken && chatId)) return;
+      // Skip the very first check — the "🚀 Translation Started" message already covers T0.
+      if (skipIfNothingDoneYet && fresh.completedCount === 0 && fresh.failedCount === 0) return;
+
+      const countsNow = await ctx.runQuery(internal.translation.internalCountChunks, { jobId: args.jobId });
+      if (countsNow.completed + countsNow.failed >= countsNow.total) return; // completion notif covers it
+
+      const lastNotify = fresh.lastStatusNotifyAt ?? 0;
+      if ((Date.now() - lastNotify) / 60_000 < interval) return;
+
+      const elapsedMsNow = Date.now() - fresh.createdAt;
+      const elapsedMin = Math.floor(elapsedMsNow / 60_000);
+      const elapsedSec = Math.floor((elapsedMsNow % 60_000) / 1000);
+      const chunksDone = countsNow.completed;
+      const chunksTotal = countsNow.total;
+      const chunksPending = chunksTotal - chunksDone - countsNow.failed;
+      const percent = chunksTotal > 0 ? Math.round((chunksDone / chunksTotal) * 100) : 0;
+      const rate = elapsedMin > 0 ? (chunksDone / elapsedMin).toFixed(1) : "—";
+
+      let etaTxt = "";
+      if (chunksDone > 0 && chunksPending > 0) {
+        const etaMs = (elapsedMsNow / chunksDone) * chunksPending;
+        const etaMin = Math.floor(etaMs / 60_000);
+        const etaSec = Math.floor((etaMs % 60_000) / 1000);
+        etaTxt = etaMin > 0 ? `~${etaMin}m ${etaSec}s` : `~${etaSec}s`;
+      }
+
+      const totalWordsNow: number = await ctx.runQuery(internal.translation.internalCountWords, { jobId: args.jobId });
+
+      await notifyJob(
+        { ...fresh },
+        `📋 <b>Status Update</b>\n` +
+        `📄 ${fresh.fileName}\n` +
+        `📊 ${chunksDone}/${chunksTotal} chunks (${percent}%)\n` +
+        `📝 ${totalWordsNow.toLocaleString()} English words translated\n` +
+        `🤖 Model: ${fresh.activeModel ?? fresh.model}\n` +
+        `🔑 API Keys: ${fresh.apiKeys.length}\n` +
+        `⚡ Concurrency: ${fresh.concurrency}\n` +
+        `⏱️ Elapsed: ${elapsedMin}m ${elapsedSec}s\n` +
+        `📈 Rate: ~${rate} chunks/min\n` +
+        `${etaTxt ? `⏳ ETA: ${etaTxt}\n` : ""}` +
+        `${chunksPending > 0 ? `⏳ ${chunksPending} chunks remaining` : `✅ All done!`}`,
+        "status",
+      );
+      await ctx.runMutation(internal.translation.internalPatchJob, { jobId: args.jobId, lastStatusNotifyAt: Date.now() });
+    };
+    await maybeSendPeriodicStatus(true);
+
     // Process ALL chunks in parallel (one per key)
     let processedCount = 0;
     const modelChain = getFallbackChain(job.model);
@@ -829,7 +889,7 @@ export const processNextBatch = action({
 
         for (let modelIdx = 0; modelIdx < modelChain.length; modelIdx++) {
           const tryModel = modelChain[modelIdx];
-          const attemptsForModel = modelIdx === 0 ? 3 : 2; // Primary: 3 tries, fallbacks: 2
+          const attemptsForModel = modelIdx === 0 ? 2 : 1; // Primary: 2 tries, fallbacks: 1 — free models are slow, fail fast and move on
 
           for (let attempt = 0; attempt < attemptsForModel; attempt++) {
             // Re-check job status
@@ -993,58 +1053,10 @@ export const processNextBatch = action({
       }
     }
 
-    // Periodic status update (every N minutes if configured)
-    // Re-read job to get the latest interval (user may have changed it mid-batch)
-    const freshJob: typeof job | null = await ctx.runQuery(internal.translation.internalGetJob, { jobId: args.jobId });
-    const latestInterval = freshJob?.telegramStatusInterval ?? job.telegramStatusInterval ?? 0;
-    const latestBotToken = freshJob?.telegramBotToken ?? job.telegramBotToken;
-    const latestChatId = freshJob?.telegramChatId ?? job.telegramChatId;
-    if (latestInterval > 0 && latestBotToken && latestChatId) {
-      const lastNotify = freshJob?.lastStatusNotifyAt ?? job.lastStatusNotifyAt ?? 0;
-      const minutesSince = (Date.now() - lastNotify) / 60_000;
-      if (minutesSince >= latestInterval && !isAllDone) {
-        const elapsed = Date.now() - job.createdAt;
-        const elapsedMin = Math.floor(elapsed / 60_000);
-        const elapsedSec = Math.floor((elapsed % 60_000) / 1000);
-        const chunksDone = counts.completed;
-        const chunksTotal = counts.total;
-        const chunksPending = chunksTotal - chunksDone - counts.failed;
-        const percent = chunksTotal > 0 ? Math.round((chunksDone / chunksTotal) * 100) : 0;
-        const rate = elapsedMin > 0 ? (chunksDone / elapsedMin).toFixed(1) : "—";
-
-        let etaStr2 = "";
-        if (chunksDone > 0 && chunksPending > 0) {
-          const avgPerChunk = elapsed / chunksDone;
-          const etaMs = avgPerChunk * chunksPending;
-          const etaMin = Math.floor(etaMs / 60_000);
-          const etaSec = Math.floor((etaMs % 60_000) / 1000);
-          etaStr2 = etaMin > 0 ? `~${etaMin}m ${etaSec}s` : `~${etaSec}s`;
-        }
-
-        // Count English words via internal query
-        const totalWords: number = await ctx.runQuery(internal.translation.internalCountWords, { jobId: args.jobId });
-
-        await notifyJob(
-          { ...job, telegramBotToken: latestBotToken, telegramChatId: latestChatId },
-          `📋 <b>Status Update</b>\n` +
-          `📄 ${job.fileName}\n` +
-          `📊 ${chunksDone}/${chunksTotal} chunks (${percent}%)\n` +
-          `📝 ${totalWords.toLocaleString()} English words translated\n` +
-          `🤖 Model: ${job.activeModel ?? job.model}\n` +
-          `🔑 API Keys: ${job.apiKeys.length}\n` +
-          `⚡ Concurrency: ${job.concurrency}\n` +
-          `⏱️ Elapsed: ${elapsedMin}m ${elapsedSec}s\n` +
-          `📈 Rate: ~${rate} chunks/min\n` +
-          `${etaStr2 ? `⏳ ETA: ${etaStr2}\n` : ""}` +
-          `${chunksPending > 0 ? `⏳ ${chunksPending} chunks remaining` : `✅ All done!`}`,
-          "status",
-        );
-        await ctx.runMutation(internal.translation.internalPatchJob, {
-          jobId: args.jobId,
-          lastStatusNotifyAt: Date.now(),
-        });
-      }
-    }
+    // Periodic status update (every N minutes if configured) — the interval is also enforced
+    // at batch start (see maybeSendPeriodicStatus above), so a long-running batch still sends
+    // updates at the configured cadence instead of staying silent until the batch finishes.
+    await maybeSendPeriodicStatus(false);
 
     return {
       done: isAllDone,
@@ -1076,10 +1088,44 @@ export const processJob = action({
     const currentBatchSize = currentJob?.concurrency ?? args.batchSize;
 
     // Process the current batch
-    const result = await ctx.runAction(api.translation.processNextBatch, {
-      jobId: args.jobId,
-      batchSize: currentBatchSize,
-    });
+    let result;
+    try {
+      result = await ctx.runAction(api.translation.processNextBatch, {
+        jobId: args.jobId,
+        batchSize: currentBatchSize,
+      });
+    } catch (err) {
+      // The batch action died (infra blip / function timeout) instead of returning normally.
+      // Reset the chunks it was holding, notify the user, and restart the chain so a job can
+      // never freeze silently in "processing" with no worker ever running again.
+      const errMsg = err instanceof Error ? err.message : String(err);
+      console.error(`[Translation] processNextBatch crashed for job ${args.jobId}:`, errMsg);
+      const crashedJob = await ctx.runQuery(internal.translation.internalGetJob, { jobId: args.jobId });
+      if (crashedJob && crashedJob.status === "processing") {
+        await ctx.runMutation(internal.translation.internalResetStuckChunks, {
+          jobId: args.jobId,
+          stuckTimeoutMs: 30_000, // anything this crashed batch touched is orphaned
+        });
+        const lastNotify = crashedJob.lastStatusNotifyAt ?? 0;
+        if (Date.now() - lastNotify > 60_000) {
+          await notifyJob(
+            { ...crashedJob },
+            `⚠️ <b>Pipeline hiccup — auto-recovering</b>\nA worker batch crashed (${errMsg.slice(0, 120)}).\nThe chunks it was holding were reset and will retry automatically — no action needed.\n📄 ${crashedJob.fileName}`,
+            "error",
+          );
+          await ctx.runMutation(internal.translation.internalPatchJob, {
+            jobId: args.jobId,
+            lastStatusNotifyAt: Date.now(),
+          });
+        }
+        // Restart the self-chaining loop so translation continues on its own
+        await ctx.scheduler.runAfter(3_000, api.translation.processJob, {
+          jobId: args.jobId,
+          batchSize: currentBatchSize,
+        });
+      }
+      return { done: false, processed: 0, error: errMsg };
+    }
 
     if (!result.done) {
       // If the batch was paused/stopped mid-processing, don't reschedule
@@ -1199,9 +1245,11 @@ async function callOpenRouter(text: string, apiKey: string, model: string): Prom
     stream: false,
   };
 
-  // 3-minute timeout prevents the action from hanging forever on a stalled API call
+  // 10-minute timeout: long enough for a big chunk on a slow free model to finish
+  // (generating ~10-16K tokens can legitimately take 5-10 minutes), but still prevents
+  // the action from hanging forever on a truly stalled API call.
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 3 * 60 * 1000);
+  const timeoutId = setTimeout(() => controller.abort(), 10 * 60 * 1000);
 
   try {
   const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
@@ -1246,7 +1294,7 @@ async function callOpenRouter(text: string, apiKey: string, model: string): Prom
   return normalizeParagraphs(content);
   } catch (err) {
     if (err instanceof Error && err.name === "AbortError") {
-      throw new Error("API_TIMEOUT: Request timed out after 3 minutes");
+      throw new Error("API_TIMEOUT: Request timed out after 10 minutes");
     }
     throw err;
   } finally {

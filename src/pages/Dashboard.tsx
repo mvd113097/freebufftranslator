@@ -251,7 +251,9 @@ export default function Dashboard() {
       overallPercent: jobStatus.percent,
       currentChunk: isRunning
         ? processingCount > 0
-          ? `Processing ${processingCount} chunk${processingCount > 1 ? "s" : ""} (${completedCount}/${totalChunks} done)...`
+          ? completedCount === 0 && elapsedMs > 90_000
+            ? `First chunks still generating (${completedCount}/${totalChunks}) — free models take several min per big chunk...`
+            : `Processing ${processingCount} chunk${processingCount > 1 ? "s" : ""} (${completedCount}/${totalChunks} done)...`
           : `Starting next batch... (${completedCount}/${totalChunks} done)`
         : isPaused
           ? `Paused — ${completedCount} of ${totalChunks} done`
