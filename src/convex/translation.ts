@@ -440,6 +440,51 @@ export const retranslateChineseChunks = mutation({
   },
 });
 
+/** Reset chunks that would be MISSING from an export (failed, or "completed" with empty
+ * text) back to pending so the pipeline re-translates them. Fixes e.g. a failed chunk 0
+ * (the title/author/synopsis page at the top of the .txt) that used to make the finished
+ * EPUB silently start mid-book, because exports only include successfully translated chunks. */
+export const retranslateMissingChunks = mutation({
+  args: { jobId: v.id("translationJobs") },
+  handler: async (ctx, args) => {
+    const userId = await getAuthUserId(ctx);
+    const job = await ctx.db.get(args.jobId);
+    if (!job || (userId && job.userId !== userId as string)) throw new Error("Unauthorized");
+
+    const chunks = await ctx.db
+      .query("translationChunks")
+      .withIndex("by_jobId", (q) => q.eq("jobId", args.jobId))
+      .collect();
+
+    let resetCount = 0;
+    for (const chunk of chunks) {
+      const missingFromExport =
+        chunk.status === "failed" ||
+        (chunk.status === "completed" && chunk.translatedText.length === 0);
+      if (missingFromExport) {
+        await ctx.db.patch(chunk._id, {
+          status: "pending",
+          translatedText: "",
+          error: undefined,
+          retries: 0,
+        });
+        resetCount++;
+      }
+    }
+
+    if (resetCount > 0) {
+      await ctx.db.patch(args.jobId, {
+        status: "processing",
+        failedCount: 0,
+        lastHeartbeat: Date.now(),
+        updatedAt: Date.now(),
+      });
+    }
+
+    return { resetCount };
+  },
+});
+
 /** Update job settings mid-translation (concurrency, model, apiKeys). */
 export const updateJobSettings = mutation({
   args: {
