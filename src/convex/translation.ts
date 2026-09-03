@@ -169,6 +169,7 @@ export const internalPatchJob = internalMutation({
     lastHeartbeat: v.optional(v.number()),
     lastStatusNotifyAt: v.optional(v.number()),
     activeModel: v.optional(v.string()),
+    apiKeys: v.optional(v.array(v.string())),
   },
   handler: async (ctx, args) => {
     const patch: Record<string, unknown> = { updatedAt: Date.now() };
@@ -178,6 +179,7 @@ export const internalPatchJob = internalMutation({
     if (args.activeModel !== undefined) patch.activeModel = args.activeModel;
     if (args.lastHeartbeat !== undefined) patch.lastHeartbeat = args.lastHeartbeat;
     if (args.lastStatusNotifyAt !== undefined) patch.lastStatusNotifyAt = args.lastStatusNotifyAt;
+    if (args.apiKeys !== undefined) patch.apiKeys = args.apiKeys;
     await ctx.db.patch(args.jobId, patch);
   },
 });
@@ -931,12 +933,14 @@ export const processNextBatch = action({
 
               if (lastError.includes("RATE_LIMITED") || lastError.includes("429")) {
                 await new Promise((r) => setTimeout(r, 10000 * (attempt + 1))); // 10s backoff
+              } else if (lastError.startsWith("KEY_REJECTED")) {
+                // The API key itself is invalid/expired — no model will accept it, so
+                // fail this chunk fast instead of wasting minutes on the fallback chain.
+                break;
               } else if (lastError.includes("403")) {
-                // Transient auth error on free models — retry with backoff
+                // Transient model/account auth error on free tier — short backoff then next model
                 console.warn(`[Retry] Chunk ${chunk.chunkIndex} got 403 on ${tryModel}, retrying in 5s...`);
                 await new Promise((r) => setTimeout(r, 5000 * (attempt + 1)));
-              } else if (lastError.includes("401")) {
-                break; // Real invalid key — skip to next model
               } else if (lastError.includes("502") || lastError.includes("503") || lastError.includes("overloaded")) {
                 await new Promise((r) => setTimeout(r, 3000)); // 3s for overloaded
                 break;
@@ -963,13 +967,38 @@ export const processNextBatch = action({
           );
         }
 
-        return { success, chunkIndex: chunk.chunkIndex, error: lastError, model: usedModel };
+        return { success, chunkIndex: chunk.chunkIndex, error: lastError, model: usedModel, apiKey };
       })
     );
 
     // Count results
     for (const r of results) {
       if (r.success) processedCount++;
+    }
+
+    // If any API key was rejected outright by OpenRouter, drop it from the job so
+    // future batches stop wasting chunk slots on it. (Full keys are only compared
+    // here — never logged; notifications only show the last 4 characters.)
+    const rejectedKeys = new Set<string>();
+    for (const r of results) {
+      if (!r.success && r.apiKey && r.error && r.error.startsWith("KEY_REJECTED")) {
+        rejectedKeys.add(r.apiKey);
+      }
+    }
+    if (rejectedKeys.size > 0) {
+      const remainingKeys = job.apiKeys.filter((k) => !rejectedKeys.has(k));
+      if (remainingKeys.length < job.apiKeys.length) {
+        await ctx.runMutation(internal.translation.internalPatchJob, {
+          jobId: args.jobId,
+          apiKeys: remainingKeys,
+        });
+        const tails = [...rejectedKeys].map((k) => `…${k.slice(-4)}`).join(", ");
+        await notifyJob(
+          job,
+          `⚠️ <b>${rejectedKeys.size} invalid API key${rejectedKeys.size > 1 ? "s" : ""} removed</b>\nOpenRouter rejected key${rejectedKeys.size > 1 ? "s" : ""} ${tails}.\n${rejectedKeys.size > 1 ? "They were" : "It was"} removed from this translation — chunks that had been assigned to ${rejectedKeys.size > 1 ? "them" : "it"} failed.\nRemove ${rejectedKeys.size > 1 ? "them" : "it"} from your key list too (probably pasted wrong or expired).\n📄 ${job.fileName}`,
+          "error",
+        );
+      }
     }
 
     // Update job progress
@@ -1232,6 +1261,20 @@ function getFallbackChain(primaryModel: string): string[] {
 
 // ─── OpenRouter API call (server-side) ───────────────────────────
 
+/** Extract the human-readable message out of an OpenRouter error body (JSON or text). */
+function extractApiErrorMessage(body: string): string {
+  try {
+    const parsed = JSON.parse(body);
+    const msg =
+      (parsed?.error?.message as string | undefined) ??
+      (parsed?.message as string | undefined);
+    if (typeof msg === "string" && msg.trim().length > 0) return msg.trim().slice(0, 200);
+  } catch {
+    // not JSON — fall through to raw text
+  }
+  return body.trim().slice(0, 200);
+}
+
 async function callOpenRouter(text: string, apiKey: string, model: string): Promise<string> {
   const payload = {
     model,
@@ -1267,7 +1310,21 @@ async function callOpenRouter(text: string, apiKey: string, model: string): Prom
   }
 
   if (response.status === 401 || response.status === 403) {
-    throw new Error(`AUTH_ERROR_${response.status}: Invalid or expired API key`);
+    // Read the provider's real error so we can tell a dead key from a model
+    // restriction, instead of reporting a generic "invalid key" for everything.
+    const bodyText = await response.text().catch(() => "");
+    const realMsg = extractApiErrorMessage(bodyText);
+    const low = bodyText.toLowerCase();
+    const looksLikeKeyProblem =
+      response.status === 401 ||
+      /api[ _-]?key|invalid|expired|unauthorized|credential|permission|forbidden|denied|authentication|access denied|no access/.test(low);
+    if (looksLikeKeyProblem) {
+      // The API key itself is bad — no model will accept it. Fail fast and let the
+      // batch logic remove this key from the job so it stops eating chunks.
+      throw new Error(`KEY_REJECTED (key …${apiKey.slice(-4)}): ${realMsg || "Invalid or expired API key"}`);
+    }
+    // Model/account-specific 403 — may be transient, retry across models normally.
+    throw new Error(`AUTH_ERROR_${response.status}: ${realMsg || "Request rejected"}`);
   }
 
   if (!response.ok) {
