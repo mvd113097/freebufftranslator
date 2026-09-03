@@ -84,9 +84,6 @@ export default function Dashboard() {
   const [telegramStatusInterval, setTelegramStatusInterval] = useState(() => loadSettings().telegramStatusInterval);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [showScanResults, setShowScanResults] = useState(false);
-  // True while the EPUB is being assembled/compressed — a big book takes several seconds.
-  const [isExporting, setIsExporting] = useState(false);
-  const [isFixingMissing, setIsFixingMissing] = useState(false);
   const [recentlyDeletedIds, setRecentlyDeletedIds] = useState<Set<string>>(new Set());
 
   // Active job tracking — persisted to localStorage
@@ -110,8 +107,6 @@ export default function Dashboard() {
   const pauseJobMutation = useMutation(api.translation.pauseJob);
   const updateJobSettingsMutation = useMutation(api.translation.updateJobSettings);
   const retranslateChineseMutation = useMutation(api.translation.retranslateChineseChunks);
-  const retranslateMissingMutation = useMutation(api.translation.retranslateMissingChunks);
-  const fixChineseFragmentsAction = useAction(api.translation_repair.fixChineseFragments);
 
   // List all jobs for auto-recovery detection
   const allJobs = useQuery(api.translation.listJobs);
@@ -394,18 +389,6 @@ export default function Dashboard() {
     }
   }, [activeJobId, concurrency, resumeJobMutation, processJobAction]);
 
-  // Chunks that would be MISSING from an EPUB export: failed, or completed with no text.
-  // Exports only include translated content, so these used to silently drop out of the book
-  // (a failed chunk 0 made the finished EPUB start mid-story with no warning at all).
-  const exportMissingChunks = useMemo(() => {
-    if (!jobStatus?.chunks) return [];
-    return jobStatus.chunks.filter(
-      (c) => c.status === "failed" || (c.status === "completed" && (c.translatedLength ?? 0) === 0)
-    );
-  }, [jobStatus?.chunks]);
-  // If chunk 0 is missing, the exported EPUB starts mid-book (title/synopsis page lost).
-  const exportStartsMidBook = exportMissingChunks.some((c) => c.id === 0);
-
   // ─── Download helper — generates EPUB from translated chunks ──
   const downloadTranslation = useCallback(
     async (chunks: { index: number; text: string }[], label: string) => {
@@ -413,19 +396,12 @@ export default function Dashboard() {
         alert("No translated content to download yet.");
         return;
       }
-      setIsExporting(true);
-      try {
-        // Loaded on demand — keeps the EPUB/JSZip library out of the initial page download
-        const { generateEpub, triggerDownload } = await import("@/lib/translator/epub");
-        const title = (fileName.replace(/\.txt$/i, "") || "Translated Novel").replace(/_/g, " ");
-        // Assembling + compressing a whole book runs in the browser and can take a few
-        // seconds — the buttons show a spinner instead of appearing frozen.
-        const epubBlob = await generateEpub(chunks, title, fileName);
-        const epubName = label.replace(/\.txt$/i, ".epub");
-        triggerDownload(epubBlob, epubName);
-      } finally {
-        setIsExporting(false);
-      }
+      // Loaded on demand — keeps the EPUB/JSZip library out of the initial page download
+      const { generateEpub, triggerDownload } = await import("@/lib/translator/epub");
+      const title = (fileName.replace(/\.txt$/i, "") || "Translated Novel").replace(/_/g, " ");
+      const epubBlob = await generateEpub(chunks, title, fileName);
+      const epubName = label.replace(/\.txt$/i, ".epub");
+      triggerDownload(epubBlob, epubName);
     },
     [fileName]
   );
@@ -433,25 +409,6 @@ export default function Dashboard() {
   // ─── Export (final) ─────────────────────────────────────────────
   const handleExport = useCallback(async () => {
     if (!activeJobId) return;
-    // Never silently produce an EPUB that starts mid-book. Chunk 0 is usually the
-    // title/author/synopsis page at the top of the .txt, so without it the book
-    // opens on random mid-story prose — exactly what the user reported.
-    if (exportStartsMidBook) {
-      alert(
-        "Chunk 1 (the book's opening page — title, author and synopsis) was never translated successfully, " +
-        "so this download would start the EPUB in the middle of the story.\n\n" +
-        "Tap “Re-translate missing chunk(s)” above the Download button and download again once it finishes."
-      );
-      return;
-    }
-    if (exportMissingChunks.length > 0) {
-      const nums =
-        exportMissingChunks.slice(0, 12).map((c) => c.id + 1).join(", ") +
-        (exportMissingChunks.length > 12 ? `… (+${exportMissingChunks.length - 12} more)` : "");
-      if (!confirm(`Chunk ${nums} never translated successfully and will be skipped in this EPUB.\n\nDownload anyway without ${exportMissingChunks.length > 1 ? "them" : "it"}?`)) {
-        return;
-      }
-    }
     try {
       const chunks = await fetchTranslatedChunksMutation({ jobId: activeJobId });
       if (!chunks || chunks.length === 0) {
@@ -463,7 +420,7 @@ export default function Dashboard() {
     } catch (err) {
       console.error("Failed to fetch chunks for export:", err);
     }
-  }, [activeJobId, fileName, downloadTranslation, fetchTranslatedChunksMutation, exportMissingChunks, exportStartsMidBook]);
+  }, [activeJobId, fileName, downloadTranslation, fetchTranslatedChunksMutation]);
 
   // ─── Download Progress (partial, while running) ─────────────────
   const handleDownloadProgress = useCallback(async () => {
@@ -1066,68 +1023,25 @@ export default function Dashboard() {
           {(isRunning || isPaused || isFailed) && (
             <button
               onClick={handleDownloadProgress}
-              disabled={!hasTranslatedChunks || isExporting}
+              disabled={!hasTranslatedChunks}
               className="relative z-10 flex items-center gap-2 rounded-xl border border-green-500/30 bg-green-500/10 backdrop-blur-md px-4 py-2.5 text-sm font-medium text-green-300 hover:bg-green-500/20 active:bg-green-500/30 transition-all disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
               style={{ WebkitTapHighlightColor: "transparent", touchAction: "manipulation" }}
             >
-              {isExporting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
-              {isExporting
-                ? "Building EPUB…"
-                : hasTranslatedChunks
-                  ? `Download Progress (${completedCount} chunks)`
-                  : "Download Progress (waiting for chunks...)"}
+              <Download className="h-4 w-4" />
+              {hasTranslatedChunks ? `Download Progress (${completedCount} chunks)` : "Download Progress (waiting for chunks...)"}
             </button>
           )}
 
           {/* Export Complete — only when fully done */}
           {isComplete && hasTranslatedChunks && (
             <>
-              {exportMissingChunks.length > 0 && (
-                <div className="w-full flex flex-col gap-3 rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-3 sm:flex-row sm:items-center">
-                  <AlertCircle className="h-4 w-4 text-red-400 shrink-0" />
-                  <div className="flex-1 min-w-0">
-                    <p className="text-xs font-semibold text-red-300">
-                      {exportMissingChunks.length} chunk{exportMissingChunks.length > 1 ? "s" : ""} never translated — the EPUB download would skip {exportMissingChunks.length > 1 ? "them" : "it"}
-                    </p>
-                    <p className="mt-0.5 text-[11px] text-red-200/70">
-                      {exportStartsMidBook
-                        ? "Chunk 1 is missing (usually the title / author / synopsis page at the top of the .txt), so the book would start mid-story. Re-translate it first, then download."
-                        : `Missing: chunk ${exportMissingChunks.slice(0, 12).map((c) => c.id + 1).join(", ")}${exportMissingChunks.length > 12 ? `… (+${exportMissingChunks.length - 12} more)` : ""}. Re-translate below, or download anyway and they will be skipped.`}
-                    </p>
-                  </div>
-                  <button
-                    onClick={async () => {
-                      if (!activeJobId) return;
-                      setIsFixingMissing(true);
-                      try {
-                        const result = await retranslateMissingMutation({ jobId: activeJobId });
-                        processJobAction({ jobId: activeJobId, batchSize: concurrency }).catch(console.error);
-                        alert(
-                          `Reset ${result.resetCount} chunk${result.resetCount === 1 ? "" : "s"} for re-translation. ` +
-                          "The pipeline restarted — download again when it completes."
-                        );
-                      } catch (err) {
-                        alert("Failed: " + (err instanceof Error ? err.message : String(err)));
-                      } finally {
-                        setIsFixingMissing(false);
-                      }
-                    }}
-                    disabled={isFixingMissing || isExporting}
-                    className="flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-red-500 to-orange-500 px-3 py-2 text-[11px] font-semibold text-white shadow-md hover:shadow-lg transition-all cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed shrink-0"
-                  >
-                    {isFixingMissing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RotateCcw className="h-3.5 w-3.5" />}
-                    Re-translate missing chunk{exportMissingChunks.length > 1 ? "s" : ""}
-                  </button>
-                </div>
-              )}
               <button
                 onClick={handleExport}
-                disabled={isExporting}
-                className="relative z-10 flex items-center gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 backdrop-blur-md px-5 py-2.5 text-sm font-medium text-amber-300 hover:bg-amber-500/20 active:bg-amber-500/30 transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                className="relative z-10 flex items-center gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 backdrop-blur-md px-5 py-2.5 text-sm font-medium text-amber-300 hover:bg-amber-500/20 active:bg-amber-500/30 transition-all cursor-pointer"
                 style={{ WebkitTapHighlightColor: "transparent", touchAction: "manipulation" }}
               >
-                {isExporting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
-                {isExporting ? "Building EPUB…" : `Download Complete (${completedCount} chunks)`}
+                <Download className="h-4 w-4" />
+                Download Complete ({completedCount} chunks)
               </button>
               <button
                 onClick={() => setShowScanResults(!showScanResults)}
@@ -1173,29 +1087,6 @@ export default function Dashboard() {
                     Chinese Character Scan Results
                   </h3>
                   <div className="flex items-center gap-3">
-                    {scanResults.chunksWithChinese.length > 0 && activeJobId && !isRunning && (
-                      <button
-                        onClick={async () => {
-                          try {
-                            const result = await fixChineseFragmentsAction({ jobId: activeJobId });
-                            // Re-open the scan so the reactive query shows the cleaned result
-                            setShowScanResults(false);
-                            setTimeout(() => setShowScanResults(true), 600);
-                            alert(
-                              `Fixed ${result.repairedChunks} chunk(s) — ${result.repairedFragments} leftover Chinese fragment(s) translated.` +
-                              (result.failedChunks.length > 0
-                                ? `\n\n${result.failedChunks.length} chunk(s) couldn't be auto-fixed (${result.failedChunks.join(", ")}). Use Re-translate for those.`
-                                : "")
-                            );
-                          } catch (err) {
-                            alert("Failed: " + (err instanceof Error ? err.message : String(err)));
-                          }
-                        }}
-                        className="rounded-lg bg-gradient-to-r from-green-500 to-emerald-500 px-3 py-1.5 text-[11px] font-semibold text-white shadow-md hover:shadow-lg transition-all cursor-pointer"
-                      >
-                        Fix leftovers (fast)
-                      </button>
-                    )}
                     {scanResults.chunksWithChinese.length > 0 && activeJobId && (
                       <button
                         onClick={async () => {

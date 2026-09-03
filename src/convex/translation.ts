@@ -40,13 +40,7 @@ Paragraph three text here.
 - Do NOT include any explanations, notes, commentary, or metadata.
 - Do NOT wrap your output in quotes or markdown code blocks.
 - Just return the raw translated English prose with proper paragraph spacing (blank lines between paragraphs).
-- CRITICAL: Do NOT leave ANY Chinese characters untranslated. Every single Chinese word, phrase, and sentence MUST be translated to English. If you encounter a Chinese word like 别墅 (villa), 好的 (okay), 谢谢 (thank you), etc., you MUST translate it. Your output must contain ZERO Chinese characters. After translating, scan your output and replace any remaining Chinese characters with their English equivalents.
-- You are translating published fiction. Translate ALL content faithfully — fight scenes, romance, violence, dark themes, and everything else — exactly as written. NEVER refuse, skip, summarize, censor, or leave any part untranslated, no matter how intense the passage is. Every paragraph of the input MUST appear in your output.
-- Character names, sect names, and place names must be rendered in English (transliterated, e.g. 林逸 → Lin Yi). NEVER keep them in Chinese characters.`;
-
-/** Matches Chinese characters, including rarer CJK Extension A ideographs. */
-const CHINESE_RE = /[\u3400-\u4dbf\u4e00-\u9fff]+/;
-const CHINESE_RE_GLOBAL = /[\u3400-\u4dbf\u4e00-\u9fff]+/g;
+- CRITICAL: Do NOT leave ANY Chinese characters untranslated. Every single Chinese word, phrase, and sentence MUST be translated to English. If you encounter a Chinese word like 别墅 (villa), 好的 (okay), 谢谢 (thank you), etc., you MUST translate it. Your output must contain ZERO Chinese characters. After translating, scan your output and replace any remaining Chinese characters with their English equivalents.`;
 
 // ─── Chunking helper (pure, server-safe) ─────────────────────────
 
@@ -113,23 +107,6 @@ export const internalGetPendingChunks = internalQuery({
       .filter((c) => c.status === "pending")
       .sort((a, b) => a.chunkIndex - b.chunkIndex)
       .slice(0, args.limit);
-  },
-});
-
-/** All chunks of a job (id, index, status, translated text) — for action-side cleanup passes. */
-export const internalGetChunksForJob = internalQuery({
-  args: { jobId: v.id("translationJobs") },
-  handler: async (ctx, args) => {
-    const chunks = await ctx.db
-      .query("translationChunks")
-      .withIndex("by_jobId", (q) => q.eq("jobId", args.jobId))
-      .collect();
-    return chunks.map((c) => ({
-      _id: c._id,
-      chunkIndex: c.chunkIndex,
-      status: c.status,
-      translatedText: c.translatedText,
-    }));
   },
 });
 
@@ -395,7 +372,7 @@ export const retranslateChineseChunks = mutation({
       .withIndex("by_jobId", (q) => q.eq("jobId", args.jobId))
       .collect();
 
-    const chineseRegex = CHINESE_RE;
+    const chineseRegex = /[\u4e00-\u9fff]+/;
     let resetCount = 0;
     let remainingCompleted = 0;
 
@@ -414,15 +391,6 @@ export const retranslateChineseChunks = mutation({
         }
       } else if (chunk.status === "completed") {
         remainingCompleted++;
-      } else if (chunk.status === "failed" && (chunk.error ?? "").includes("CHINESE_REMAINING")) {
-        // Chunks the pipeline could not clean (failed the quality gate) — reset them too.
-        await ctx.db.patch(chunk._id, {
-          status: "pending",
-          translatedText: "",
-          error: undefined,
-          retries: 0,
-        });
-        resetCount++;
       }
     }
 
@@ -430,51 +398,6 @@ export const retranslateChineseChunks = mutation({
       await ctx.db.patch(args.jobId, {
         status: "processing",
         completedCount: remainingCompleted,
-        failedCount: 0,
-        lastHeartbeat: Date.now(),
-        updatedAt: Date.now(),
-      });
-    }
-
-    return { resetCount };
-  },
-});
-
-/** Reset chunks that would be MISSING from an export (failed, or "completed" with empty
- * text) back to pending so the pipeline re-translates them. Fixes e.g. a failed chunk 0
- * (the title/author/synopsis page at the top of the .txt) that used to make the finished
- * EPUB silently start mid-book, because exports only include successfully translated chunks. */
-export const retranslateMissingChunks = mutation({
-  args: { jobId: v.id("translationJobs") },
-  handler: async (ctx, args) => {
-    const userId = await getAuthUserId(ctx);
-    const job = await ctx.db.get(args.jobId);
-    if (!job || (userId && job.userId !== userId as string)) throw new Error("Unauthorized");
-
-    const chunks = await ctx.db
-      .query("translationChunks")
-      .withIndex("by_jobId", (q) => q.eq("jobId", args.jobId))
-      .collect();
-
-    let resetCount = 0;
-    for (const chunk of chunks) {
-      const missingFromExport =
-        chunk.status === "failed" ||
-        (chunk.status === "completed" && chunk.translatedText.length === 0);
-      if (missingFromExport) {
-        await ctx.db.patch(chunk._id, {
-          status: "pending",
-          translatedText: "",
-          error: undefined,
-          retries: 0,
-        });
-        resetCount++;
-      }
-    }
-
-    if (resetCount > 0) {
-      await ctx.db.patch(args.jobId, {
-        status: "processing",
         failedCount: 0,
         lastHeartbeat: Date.now(),
         updatedAt: Date.now(),
@@ -728,21 +651,15 @@ export const scanForChinese = query({
       .withIndex("by_jobId", (q) => q.eq("jobId", args.jobId))
       .collect();
 
-    // Completed chunks may carry leftover Chinese (older runs, before the quality gate),
-    // and failed chunks can be marked failed precisely because Chinese was left behind.
-    const scannedChunks = chunks
-      .filter((c) => {
-        if (c.status === "completed") return c.translatedText.length > 0;
-        if (c.status === "failed") return (c.error ?? "").includes("CHINESE_REMAINING");
-        return false;
-      })
+    const completedChunks = chunks
+      .filter((c) => c.status === "completed" && c.translatedText.length > 0)
       .sort((a, b) => a.chunkIndex - b.chunkIndex);
 
-    const chineseRegex = CHINESE_RE_GLOBAL;
+    const chineseRegex = /[\u4e00-\u9fff]+/g;
     const chunksWithChinese: { index: number; matches: string[] }[] = [];
 
-    for (const chunk of scannedChunks) {
-      const matches = (chunk.translatedText || "").match(chineseRegex);
+    for (const chunk of completedChunks) {
+      const matches = chunk.translatedText.match(chineseRegex);
       if (matches && matches.length > 0) {
         // Deduplicate
         chunksWithChinese.push({
@@ -753,7 +670,7 @@ export const scanForChinese = query({
     }
 
     return {
-      totalScanned: scannedChunks.length,
+      totalScanned: completedChunks.length,
       chunksWithChinese,
     };
   },
@@ -991,7 +908,6 @@ export const processNextBatch = action({
         let success = false;
         let lastError = "";
         let usedModel: string | undefined;
-        let lastDirtyText = "";
 
         for (let modelIdx = 0; modelIdx < modelChain.length; modelIdx++) {
           const tryModel = modelChain[modelIdx];
@@ -1013,20 +929,11 @@ export const processNextBatch = action({
               const sourceText = decodedSource.get(chunk._id as string) ?? chunk.originalText;
               const translated = await callOpenRouter(sourceText, apiKey, tryModel);
 
-              // Quality gate: output still containing Chinese is a FAILURE, not a success.
-              // Free models often refuse "sensitive" passages by leaving the Chinese as-is,
-              // so a dirty result gets one retry on this model, then moves down the fallback
-              // chain — and if every model leaves Chinese, the fragment-repair pass below
-              // re-translates only the leftover Chinese runs.
-              if (CHINESE_RE.test(translated)) {
-                lastDirtyText = translated;
-                lastError = "CHINESE_REMAINING: model left Chinese characters untranslated";
-                console.warn(`[Quality] Chunk ${chunk.chunkIndex} model=${tryModel} left Chinese characters (attempt ${attempt + 1}/${attemptsForModel})`);
-                if (attempt < attemptsForModel - 1) {
-                  await new Promise((r) => setTimeout(r, 1500)); // brief pause before same-model retry
-                  continue;
-                }
-                break; // this model exhausted — try the next one in the chain
+              // Quality gate: reject if output still contains Chinese characters
+              const chineseRegex = /[\u4e00-\u9fff]+/;
+              if (chineseRegex.test(translated) && attempt < attemptsForModel - 1) {
+                console.warn(`[Quality] Chunk ${chunk.chunkIndex} contains Chinese characters, retrying...`);
+                continue; // retry same model immediately
               }
 
               await ctx.runMutation(internal.translation.internalPatchChunk, {
@@ -1064,33 +971,6 @@ export const processNextBatch = action({
           }
           if (success) break;
           // Model exhausted — try next immediately (no delay)
-        }
-
-        if (!success && lastDirtyText) {
-          // Fragment-repair pass: every model left Chinese behind (usually just a few
-          // refused fragments or character names). Re-translate ONLY the Chinese runs
-          // with a tiny targeted request — far more likely to succeed than re-sending
-          // the whole chunk — then stitch the clean fragments back into the text.
-          try {
-            const repair = await repairChineseFragments(lastDirtyText, apiKey, modelChain);
-            if (repair) {
-              await ctx.runMutation(internal.translation.internalPatchChunk, {
-                chunkId: chunk._id,
-                translatedText: repair.text,
-                status: "completed",
-                retries: 5,
-                usedModel: repair.model,
-              });
-              success = true;
-              usedModel = repair.model;
-              lastError = "";
-              console.log(`[Repair] Chunk ${chunk.chunkIndex} repaired via ${repair.model} (${repair.fragments} fragments)`);
-            }
-          } catch (repairErr) {
-            const msg = repairErr instanceof Error ? repairErr.message : String(repairErr);
-            console.error(`[Repair] Chunk ${chunk.chunkIndex} repair pass failed:`, msg);
-            lastError = `CHINESE_REMAINING (repair failed): ${msg.slice(0, 160)}`;
-          }
         }
 
         if (!success) {
@@ -1376,7 +1256,7 @@ async function sendTelegram(
 
 type NotificationType = "start" | "progress" | "error" | "complete" | "pause" | "status";
 
-export async function notifyJob(
+async function notifyJob(
   ctx: ActionCtx,
   job: Doc<"translationJobs">,
   message: string,
@@ -1461,7 +1341,7 @@ function modelDisplay(selectedModel: string, activeModel: string | undefined): s
   return activeModel ? shortModelName(activeModel) : shortModelName(selectedModel);
 }
 
-export function getFallbackChain(primaryModel: string): string[] {
+function getFallbackChain(primaryModel: string): string[] {
   // "Auto Free" is a UI-only selector — sending it to OpenRouter would make every
   // chunk fail before it even reached the free list. Skip straight to the ordered
   // free-model list (best available first) instead.
@@ -1492,7 +1372,7 @@ function extractApiErrorMessage(body: string): string {
   return body.trim().slice(0, 200);
 }
 
-export async function callOpenRouter(text: string, apiKey: string, model: string): Promise<string> {
+async function callOpenRouter(text: string, apiKey: string, model: string): Promise<string> {
   const payload = {
     model,
     messages: [
@@ -1574,61 +1454,6 @@ export async function callOpenRouter(text: string, apiKey: string, model: string
   } finally {
     clearTimeout(timeoutId);
   }
-}
-
-/**
- * Repair pass: re-translate ONLY the Chinese fragments left in a dirty translation.
- *
- * Free models often refuse a few "sensitive" sentences (or keep character names in
- * Chinese), leaving Chinese runs inside an otherwise-fine translation. Re-sending the
- * whole chunk usually fails the same way, so instead we extract just the Chinese
- * fragments, translate them with a tiny targeted prompt, and stitch the results back in.
- * Returns the clean full text, or null if no model could clean it.
- */
-async function repairChineseFragments(
-  translated: string,
-  apiKey: string,
-  models: string[],
-): Promise<{ text: string; model: string; fragments: number } | null> {
-  const fragmentRegex = /[\u4e00-\u9fff]+/g;
-  // Longest-first so a name like 林逸风 is replaced before the substring 林逸.
-  const fragments = [...new Set(translated.match(fragmentRegex) ?? [])]
-    .slice(0, 80)
-    .sort((a, b) => b.length - a.length);
-  if (fragments.length === 0) return null;
-
-  const repairPrompt =
-    `Translate each Chinese fragment below into fluent, natural English. ` +
-    `Character names should be transliterated into English (e.g. 林逸 → Lin Yi). ` +
-    `Output ONLY the translations — exactly one per line, in the same order as the input. ` +
-    `Do not add numbering, quotes, explanations, or anything else.\n\n` +
-    fragments.map((f, i) => `${i + 1}. ${f}`).join("\n");
-
-  for (const model of models) {
-    try {
-      const raw = await callOpenRouter(repairPrompt, apiKey, model);
-      // callOpenRouter normalizes paragraphs (blank line between paragraphs), so each
-      // translation ends up on its own line; strip any "1."-style numbering too.
-      const lines = raw
-        .split("\n")
-        .map((l) => l.trim())
-        .filter((l) => l.length > 0)
-        .map((l) => l.replace(/^\d+[.)]\s*/, ""));
-      if (lines.length !== fragments.length) continue; // merged/missing lines — try next model
-
-      let repaired = translated;
-      for (let i = 0; i < fragments.length; i++) {
-        repaired = repaired.split(fragments[i]).join(lines[i]);
-      }
-      // Only accept if the stitched result is genuinely clean.
-      if (!fragmentRegex.test(repaired)) {
-        return { text: normalizeParagraphs(repaired), model, fragments: fragments.length };
-      }
-    } catch {
-      // this model failed — try the next one
-    }
-  }
-  return null;
 }
 
 /**
