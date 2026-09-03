@@ -44,6 +44,10 @@ Paragraph three text here.
 - You are translating published fiction. Translate ALL content faithfully — fight scenes, romance, violence, dark themes, and everything else — exactly as written. NEVER refuse, skip, summarize, censor, or leave any part untranslated, no matter how intense the passage is. Every paragraph of the input MUST appear in your output.
 - Character names, sect names, and place names must be rendered in English (transliterated, e.g. 林逸 → Lin Yi). NEVER keep them in Chinese characters.`;
 
+/** Matches Chinese characters, including rarer CJK Extension A ideographs. */
+const CHINESE_RE = /[\u3400-\u4dbf\u4e00-\u9fff]+/;
+const CHINESE_RE_GLOBAL = /[\u3400-\u4dbf\u4e00-\u9fff]+/g;
+
 // ─── Chunking helper (pure, server-safe) ─────────────────────────
 
 interface TextChunk {
@@ -109,6 +113,23 @@ export const internalGetPendingChunks = internalQuery({
       .filter((c) => c.status === "pending")
       .sort((a, b) => a.chunkIndex - b.chunkIndex)
       .slice(0, args.limit);
+  },
+});
+
+/** All chunks of a job (id, index, status, translated text) — for action-side cleanup passes. */
+export const internalGetChunksForJob = internalQuery({
+  args: { jobId: v.id("translationJobs") },
+  handler: async (ctx, args) => {
+    const chunks = await ctx.db
+      .query("translationChunks")
+      .withIndex("by_jobId", (q) => q.eq("jobId", args.jobId))
+      .collect();
+    return chunks.map((c) => ({
+      _id: c._id,
+      chunkIndex: c.chunkIndex,
+      status: c.status,
+      translatedText: c.translatedText,
+    }));
   },
 });
 
@@ -374,7 +395,7 @@ export const retranslateChineseChunks = mutation({
       .withIndex("by_jobId", (q) => q.eq("jobId", args.jobId))
       .collect();
 
-    const chineseRegex = /[\u4e00-\u9fff]+/;
+    const chineseRegex = CHINESE_RE;
     let resetCount = 0;
     let remainingCompleted = 0;
 
@@ -672,7 +693,7 @@ export const scanForChinese = query({
       })
       .sort((a, b) => a.chunkIndex - b.chunkIndex);
 
-    const chineseRegex = /[\u4e00-\u9fff]+/g;
+    const chineseRegex = CHINESE_RE_GLOBAL;
     const chunksWithChinese: { index: number; matches: string[] }[] = [];
 
     for (const chunk of scannedChunks) {
@@ -952,8 +973,7 @@ export const processNextBatch = action({
               // so a dirty result gets one retry on this model, then moves down the fallback
               // chain — and if every model leaves Chinese, the fragment-repair pass below
               // re-translates only the leftover Chinese runs.
-              const chineseRegex = /[\u4e00-\u9fff]+/;
-              if (chineseRegex.test(translated)) {
+              if (CHINESE_RE.test(translated)) {
                 lastDirtyText = translated;
                 lastError = "CHINESE_REMAINING: model left Chinese characters untranslated";
                 console.warn(`[Quality] Chunk ${chunk.chunkIndex} model=${tryModel} left Chinese characters (attempt ${attempt + 1}/${attemptsForModel})`);
@@ -1311,7 +1331,7 @@ async function sendTelegram(
 
 type NotificationType = "start" | "progress" | "error" | "complete" | "pause" | "status";
 
-async function notifyJob(
+export async function notifyJob(
   ctx: ActionCtx,
   job: Doc<"translationJobs">,
   message: string,
@@ -1396,7 +1416,7 @@ function modelDisplay(selectedModel: string, activeModel: string | undefined): s
   return activeModel ? shortModelName(activeModel) : shortModelName(selectedModel);
 }
 
-function getFallbackChain(primaryModel: string): string[] {
+export function getFallbackChain(primaryModel: string): string[] {
   // "Auto Free" is a UI-only selector — sending it to OpenRouter would make every
   // chunk fail before it even reached the free list. Skip straight to the ordered
   // free-model list (best available first) instead.
@@ -1427,7 +1447,7 @@ function extractApiErrorMessage(body: string): string {
   return body.trim().slice(0, 200);
 }
 
-async function callOpenRouter(text: string, apiKey: string, model: string): Promise<string> {
+export async function callOpenRouter(text: string, apiKey: string, model: string): Promise<string> {
   const payload = {
     model,
     messages: [

@@ -107,6 +107,7 @@ export default function Dashboard() {
   const pauseJobMutation = useMutation(api.translation.pauseJob);
   const updateJobSettingsMutation = useMutation(api.translation.updateJobSettings);
   const retranslateChineseMutation = useMutation(api.translation.retranslateChineseChunks);
+  const fixChineseFragmentsAction = useAction(api.translation_repair.fixChineseFragments);
 
   // List all jobs for auto-recovery detection
   const allJobs = useQuery(api.translation.listJobs);
@@ -1087,6 +1088,29 @@ export default function Dashboard() {
                     Chinese Character Scan Results
                   </h3>
                   <div className="flex items-center gap-3">
+                    {scanResults.chunksWithChinese.length > 0 && activeJobId && !isRunning && (
+                      <button
+                        onClick={async () => {
+                          try {
+                            const result = await fixChineseFragmentsAction({ jobId: activeJobId });
+                            // Re-open the scan so the reactive query shows the cleaned result
+                            setShowScanResults(false);
+                            setTimeout(() => setShowScanResults(true), 600);
+                            alert(
+                              `Fixed ${result.repairedChunks} chunk(s) — ${result.repairedFragments} leftover Chinese fragment(s) translated.` +
+                              (result.failedChunks.length > 0
+                                ? `\n\n${result.failedChunks.length} chunk(s) couldn't be auto-fixed (${result.failedChunks.join(", ")}). Use Re-translate for those.`
+                                : "")
+                            );
+                          } catch (err) {
+                            alert("Failed: " + (err instanceof Error ? err.message : String(err)));
+                          }
+                        }}
+                        className="rounded-lg bg-gradient-to-r from-green-500 to-emerald-500 px-3 py-1.5 text-[11px] font-semibold text-white shadow-md hover:shadow-lg transition-all cursor-pointer"
+                      >
+                        Fix leftovers (fast)
+                      </button>
+                    )}
                     {scanResults.chunksWithChinese.length > 0 && activeJobId && (
                       <button
                         onClick={async () => {
