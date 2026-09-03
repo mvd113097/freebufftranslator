@@ -284,6 +284,15 @@ export const startTranslation = mutation({
       });
     }
 
+    // Start the server-side pipeline from the SERVER (scheduler), not from the
+    // browser. That way the translation begins on its own even if the user
+    // closes the browser the moment the upload finishes — the scheduled action
+    // lives on Convex and self-chains until the job is done.
+    await ctx.scheduler.runAfter(500, api.translation.processJob, {
+      jobId,
+      batchSize: args.concurrency,
+    });
+
     return { jobId, totalChunks: args.chunks.length };
   },
 });

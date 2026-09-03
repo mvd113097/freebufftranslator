@@ -334,20 +334,15 @@ export default function Dashboard() {
       setIsStarting(false);
       setUploadPhase(null);
 
-      // Fire-and-forget: start the server-side pipeline.
-      processJobAction({
-        jobId,
-        batchSize: concurrency,
-      }).catch((err) => {
-        console.error("Pipeline action failed:", err);
-      });
+      // The server already scheduled the pipeline to start itself (inside
+      // startTranslation), so translation begins even if the browser closes.
     } catch (err) {
       console.error("Failed to start translation:", err);
       alert("Failed to start: " + (err instanceof Error ? err.message : String(err)));
       setIsStarting(false);
       setUploadPhase(null);
     }
-  }, [canStart, rawText, keys, chunkSize, concurrency, selectedModel, fileName, startTranslationMutation, processJobAction]);
+  }, [canStart, rawText, keys, chunkSize, concurrency, selectedModel, fileName, startTranslationMutation]);
 
   // ─── Pause translation (stops self-chaining, keeps state) ───────
   const pauseTranslation = useCallback(async () => {
