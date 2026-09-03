@@ -64,6 +64,10 @@ const schema = defineSchema(
       telegramStatusInterval: v.optional(v.number()), // minutes, 0 = disabled
       lastStatusNotifyAt: v.optional(v.number()),
       activeModel: v.optional(v.string()), // which model is currently being used
+      // Human-readable reason when a Telegram notification could not be sent
+      // (bad bot token / wrong chat id / bot blocked). "" = last send succeeded.
+      telegramLastError: v.optional(v.string()),
+      telegramLastErrorAt: v.optional(v.number()),
     }).index("by_userId", ["userId"]),
 
     translationChunks: defineTable({

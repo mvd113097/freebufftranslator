@@ -713,6 +713,35 @@ export default function Dashboard() {
                   </option>
                 ))}
               </select>
+
+              {/* Live model info — shows exactly which model is doing the work right now */}
+              <div className="mt-2 space-y-1.5">
+                {jobStatus?.activeModel ? (
+                  <>
+                    <p className="text-[10px] text-stone-400 flex items-center gap-1">
+                      <Zap className="h-3.5 w-3.5 text-amber-400 shrink-0" />
+                      Now translating with{" "}
+                      <span className="font-mono font-semibold text-amber-400">
+                        {jobStatus.activeModel.split("/").pop()?.replace(/:free$/, "")}
+                      </span>
+                      {selectedModel === "openrouter/free" ? " (Auto Free picked it)" : ""}
+                    </p>
+                    {selectedModel !== "openrouter/free" &&
+                      jobStatus.activeModel !== selectedModel && (
+                        <p className="text-[10px] text-stone-500 leading-snug">
+                          Your pick is rate-limited or overloaded right now, so it fell back to the
+                          next working free model. It switches back automatically when available.
+                        </p>
+                      )}
+                  </>
+                ) : (isRunning || isPaused) && selectedModel === "openrouter/free" ? (
+                  <p className="text-[10px] text-stone-500 leading-snug">
+                    Auto Free tries the best available model per chunk (MiniMax → Qwen → GLM →
+                    more) and skips any that are rate-limited. The line above shows which model
+                    is actually translating.
+                  </p>
+                ) : null}
+              </div>
             </div>
 
             {/* Collapsible Pipeline Settings */}
@@ -772,6 +801,11 @@ export default function Dashboard() {
                       Active
                     </span>
                   )}
+                  {jobStatus?.telegramLastError && (
+                    <span className="inline-flex items-center rounded-full bg-red-500/15 px-2 py-0.5 text-[10px] font-medium text-red-400">
+                      ⚠ Sending failed
+                    </span>
+                  )}
                 </div>
                 <ChevronDown className="h-4 w-4 text-stone-400" />
               </button>
@@ -779,6 +813,22 @@ export default function Dashboard() {
                 <p className="text-[11px] text-stone-500">
                   Get notified about translation events. Optional — leave blank to disable.
                 </p>
+                {jobStatus?.telegramLastError && (
+                  <div className="flex items-start gap-2 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2.5">
+                    <AlertCircle className="h-4 w-4 text-red-400 shrink-0 mt-0.5" />
+                    <div className="text-[11px] text-red-300 space-y-1">
+                      <p className="font-semibold">
+                        The last Telegram message failed to send
+                      </p>
+                      <p className="break-words">{jobStatus.telegramLastError}</p>
+                      <p className="text-red-300/70">
+                        Fix the bot token / chat ID above, then the next notification retries
+                        automatically. Tip: you must open the chat with your bot in Telegram
+                        (press Start) before it can message you.
+                      </p>
+                    </div>
+                  </div>
+                )}
                 <div className="space-y-2">
                   <label className="text-xs font-medium text-stone-400">Bot Token</label>
                   <input

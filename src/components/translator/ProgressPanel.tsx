@@ -96,7 +96,7 @@ export function ProgressPanel({
           <StatCard
             icon={<Cpu className="h-4 w-4 text-blue-400" />}
             label="Active Model"
-            value={displayModel.split('/').pop() ?? displayModel}
+            value={displayModel.split('/').pop()?.replace(/:free$/, '') ?? displayModel}
           />
         )}
       </div>

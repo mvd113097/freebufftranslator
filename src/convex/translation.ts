@@ -1,7 +1,15 @@
 import { v } from "convex/values";
-import { mutation, query, action, internalQuery, internalMutation } from "./_generated/server";
+import {
+  mutation,
+  query,
+  action,
+  internalQuery,
+  internalMutation,
+  type ActionCtx,
+} from "./_generated/server";
 import { api, internal } from "./_generated/api";
 import { getAuthUserId } from "@convex-dev/auth/server";
+import type { Doc } from "./_generated/dataModel";
 
 const SYSTEM_PROMPT = `You are an expert human literary translator specializing in Chinese web novels (Xianxia, Wuxia, and Sci-Fi). Translate the following Chinese prose into highly fluent, immersive English fiction. Do not use stiff or literal machine-like phrasing. Translate cultivation tiers, localized idioms, and online slang into contextually accurate Western fantasy equivalents while maintaining rigid character name consistency.
 
@@ -170,6 +178,10 @@ export const internalPatchJob = internalMutation({
     lastStatusNotifyAt: v.optional(v.number()),
     activeModel: v.optional(v.string()),
     apiKeys: v.optional(v.array(v.string())),
+    // Human-readable reason when the last Telegram notification failed to send.
+    // Empty string clears a previous error (a later send succeeded).
+    telegramLastError: v.optional(v.string()),
+    telegramLastErrorAt: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
     const patch: Record<string, unknown> = { updatedAt: Date.now() };
@@ -180,6 +192,8 @@ export const internalPatchJob = internalMutation({
     if (args.lastHeartbeat !== undefined) patch.lastHeartbeat = args.lastHeartbeat;
     if (args.lastStatusNotifyAt !== undefined) patch.lastStatusNotifyAt = args.lastStatusNotifyAt;
     if (args.apiKeys !== undefined) patch.apiKeys = args.apiKeys;
+    if (args.telegramLastError !== undefined) patch.telegramLastError = args.telegramLastError;
+    if (args.telegramLastErrorAt !== undefined) patch.telegramLastErrorAt = args.telegramLastErrorAt;
     await ctx.db.patch(args.jobId, patch);
   },
 });
@@ -501,6 +515,8 @@ export const getJobStatus = query({
       failedCount: failed,
       processingCount: processing,
       activeModel: job.activeModel,
+      telegramLastError: job.telegramLastError,
+      telegramLastErrorAt: job.telegramLastErrorAt,
       totalEnglishWords,
       lastHeartbeat: job.lastHeartbeat,
       createdAt: job.createdAt,
@@ -715,6 +731,7 @@ export const processNextBatch = action({
 
         if (resetResult.resetCount > 0) {
           await notifyJob(
+            ctx,
             job,
             `⚠️ <b>${resetResult.resetCount} stuck chunks recovered</b>\nChunks that were stuck in processing have been reset and will retry.\n📄 ${job.fileName}`,
             "error",
@@ -739,11 +756,12 @@ export const processNextBatch = action({
     const wasJustStarted = job.completedCount === 0 && job.failedCount === 0;
     if (wasJustStarted) {
       await notifyJob(
+        ctx,
         job,
         `🚀 <b>Translation Started</b>\n` +
         `📄 ${job.fileName}\n` +
         `📊 ${job.totalChunks} chunks to process\n` +
-        `🤖 Model: ${job.model}\n` +
+        `🤖 Model: ${modelDisplay(job.model, undefined)}\n` +
         `⚡ Concurrency: ${job.concurrency}`,
         "start",
       );
@@ -759,9 +777,9 @@ export const processNextBatch = action({
     const preCheck: { status: string } | null = await ctx.runQuery(internal.translation.internalGetJob, { jobId: args.jobId });
     if (!preCheck || preCheck.status !== "processing") {
       if (preCheck?.status === "paused") {
-        await notifyJob(job, `⏸️ <b>Translation Paused</b>\nOpen the browser to resume.`, "pause");
+        await notifyJob(ctx, job, `⏸️ <b>Translation Paused</b>\nOpen the browser to resume.`, "pause");
       } else if (preCheck?.status === "failed") {
-        await notifyJob(job, `🛑 <b>Translation Stopped</b>\nOpen the browser to resume or reset.`, "pause");
+        await notifyJob(ctx, job, `🛑 <b>Translation Stopped</b>\nOpen the browser to resume or reset.`, "pause");
       }
       return { done: false, processed: 0, reason: preCheck?.status ?? "missing" };
     }
@@ -803,6 +821,7 @@ export const processNextBatch = action({
           }
         }
         await notifyJob(
+          ctx,
           job,
           `❌ <b>${failedDecode.size} chunk(s) failed to decompress</b>\nUploaded text could not be restored on the server, so those chunks were marked failed.\n📄 ${job.fileName}`,
           "error",
@@ -861,12 +880,13 @@ export const processNextBatch = action({
       const totalWordsNow: number = await ctx.runQuery(internal.translation.internalCountWords, { jobId: args.jobId });
 
       await notifyJob(
+        ctx,
         { ...fresh },
         `📋 <b>Status Update</b>\n` +
         `📄 ${fresh.fileName}\n` +
         `📊 ${chunksDone}/${chunksTotal} chunks (${percent}%)\n` +
         `📝 ${totalWordsNow.toLocaleString()} English words translated\n` +
-        `🤖 Model: ${fresh.activeModel ?? fresh.model}\n` +
+        `🤖 Model: ${modelDisplay(fresh.model, fresh.activeModel)}\n` +
         `🔑 API Keys: ${fresh.apiKeys.length}\n` +
         `⚡ Concurrency: ${fresh.concurrency}\n` +
         `⏱️ Elapsed: ${elapsedMin}m ${elapsedSec}s\n` +
@@ -989,6 +1009,7 @@ export const processNextBatch = action({
         });
         const tails = [...rejectedKeys].map((k) => `…${k.slice(-4)}`).join(", ");
         await notifyJob(
+          ctx,
           job,
           `⚠️ <b>${rejectedKeys.size} invalid API key${rejectedKeys.size > 1 ? "s" : ""} removed</b>\nOpenRouter rejected key${rejectedKeys.size > 1 ? "s" : ""} ${tails}.\n${rejectedKeys.size > 1 ? "They were" : "It was"} removed from this translation — chunks that had been assigned to ${rejectedKeys.size > 1 ? "them" : "it"} failed.\nRemove ${rejectedKeys.size > 1 ? "them" : "it"} from your key list too (probably pasted wrong or expired).\n📄 ${job.fileName}`,
           "error",
@@ -1008,6 +1029,7 @@ export const processNextBatch = action({
       const chunkNums = failedResults.map((r) => r.chunkIndex + 1).join(", ");
       const sampleErr = failedResults[failedResults.length - 1]?.error?.slice(0, 160) ?? "unknown error";
       await notifyJob(
+        ctx,
         job,
         `❌ <b>${failedResults.length} chunk${failedResults.length > 1 ? "s" : ""} failed</b>\n` +
         `Chunks: ${chunkNums}\n` +
@@ -1067,7 +1089,7 @@ export const processNextBatch = action({
         text: `📄 ${jobRef.fileName}\n` +
           `📊 ${chunksDone}/${chunksTotal} chunks (${pct}%)\n` +
           `📝 ${wordCount.toLocaleString()} English words\n` +
-          `🤖 Model: ${jobRef.activeModel ?? jobRef.model}\n` +
+          `🤖 Model: ${modelDisplay(jobRef.model, jobRef.activeModel)}\n` +
           `⏱️ Elapsed: ${elapsedStr}\n` +
           `📈 Rate: ~${rate} chunks/min` +
           (countsRef.failed > 0 ? `\n❌ ${countsRef.failed} chunks failed` : "") +
@@ -1082,6 +1104,7 @@ export const processNextBatch = action({
 
       if (isAllDone) {
         await notifyJob(
+          ctx,
           job,
           `✅ <b>Translation Complete!</b>\n${detail.text}\n📥 Ready to download!`,
           "complete",
@@ -1089,6 +1112,7 @@ export const processNextBatch = action({
       } else if (crossedTenPercent) {
         // 10% milestone — uses "progress" type (respects checkbox)
         await notifyJob(
+          ctx,
           job,
           `📊 <b>Progress: ${pct}%</b>\n${detail.text}`,
           "progress",
@@ -1151,11 +1175,12 @@ export const processJob = action({
         });
         const lastNotify = crashedJob.lastStatusNotifyAt ?? 0;
         if (Date.now() - lastNotify > 60_000) {
-          await notifyJob(
-            { ...crashedJob },
-            `⚠️ <b>Pipeline hiccup — auto-recovering</b>\nA worker batch crashed (${errMsg.slice(0, 120)}).\nThe chunks it was holding were reset and will retry automatically — no action needed.\n📄 ${crashedJob.fileName}`,
-            "error",
-          );
+        await notifyJob(
+          ctx,
+          { ...crashedJob },
+          `⚠️ <b>Pipeline hiccup — auto-recovering</b>\nA worker batch crashed (${errMsg.slice(0, 120)}).\nThe chunks it was holding were reset and will retry automatically — no action needed.\n📄 ${crashedJob.fileName}`,
+          "error",
+        );
           await ctx.runMutation(internal.translation.internalPatchJob, {
             jobId: args.jobId,
             lastStatusNotifyAt: Date.now(),
@@ -1189,12 +1214,17 @@ export const processJob = action({
 
 // ─── Telegram notifications ─────────────────────────────────────
 
-async function sendTelegram(botToken: string, chatId: string, message: string): Promise<void> {
+async function sendTelegram(
+  botToken: string,
+  chatId: string,
+  message: string,
+): Promise<string | null> {
   // Support multiple chat IDs separated by commas
   const chatIds = chatId.split(",").map((id) => id.trim()).filter((id) => id.length > 0);
+  let firstError: string | null = null;
   for (const id of chatIds) {
     try {
-      await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+      const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1203,32 +1233,32 @@ async function sendTelegram(botToken: string, chatId: string, message: string): 
           parse_mode: "HTML",
         }),
       });
+      if (!response.ok) {
+        const bodyText = await response.text().catch(() => "");
+        let reason = bodyText.trim().slice(0, 160) || `HTTP ${response.status}`;
+        if (response.status === 401) reason = "bot token is invalid (HTTP 401)";
+        else if (response.status === 403) {
+          reason = "bot is blocked by the user or can't message this chat (HTTP 403)";
+        } else if (response.status === 400) {
+          reason = `chat "${id}" not found — did you start the bot and use the right chat id? (HTTP 400)`;
+        }
+        console.error(`[Telegram] Failed to send to chat ${id}: ${reason}`);
+        firstError = firstError ?? `Telegram send to chat ${id} failed — ${reason}`;
+      }
     } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
       console.error(`[Telegram] Failed to send to ${id}:`, err);
+      firstError = firstError ?? `Telegram send to chat ${id} failed — ${msg}`;
     }
   }
+  return firstError;
 }
 
 type NotificationType = "start" | "progress" | "error" | "complete" | "pause" | "status";
 
 async function notifyJob(
-  job: {
-    telegramBotToken?: string;
-    telegramChatId?: string;
-    telegramNotifyOnStart?: boolean;
-    telegramNotifyOnProgress?: boolean;
-    telegramNotifyOnError?: boolean;
-    telegramNotifyOnComplete?: boolean;
-    telegramNotifyOnPause?: boolean;
-    telegramStatusInterval?: number;
-    lastStatusNotifyAt?: number;
-    fileName: string;
-    totalChunks: number;
-    completedCount: number;
-    failedCount: number;
-    model: string;
-    totalEnglishWords?: number;
-  },
+  ctx: ActionCtx,
+  job: Doc<"translationJobs">,
   message: string,
   type: NotificationType,
 ): Promise<void> {
@@ -1246,7 +1276,27 @@ async function notifyJob(
 
   if (type !== "status" && prefMap[type] === false) return;
 
-  await sendTelegram(job.telegramBotToken, job.telegramChatId, message);
+  const sendError = await sendTelegram(job.telegramBotToken, job.telegramChatId, message);
+
+  // Record failures on the job so the dashboard can explain why no messages are
+  // arriving (Telegram send errors used to be completely silent). Cleared once a
+  // later send succeeds.
+  try {
+    if (sendError) {
+      await ctx.runMutation(internal.translation.internalPatchJob, {
+        jobId: job._id,
+        telegramLastError: sendError.slice(0, 300),
+        telegramLastErrorAt: Date.now(),
+      });
+    } else if (job.telegramLastError) {
+      await ctx.runMutation(internal.translation.internalPatchJob, {
+        jobId: job._id,
+        telegramLastError: "",
+      });
+    }
+  } catch (err) {
+    console.error("[Telegram] Failed to record send status on job:", err);
+  }
 }
 
 // ─── Model fallback chain ───────────────────────────────────────
@@ -1264,7 +1314,40 @@ const FALLBACK_MODELS = [
   "thinkingmachines/inkling:free",
 ];
 
+// "Auto Free (best available)" is the UI selector stored on jobs — it is NOT a real
+// OpenRouter model id, so it must never be sent to the API.
+const AUTO_FREE_SELECTOR = "openrouter/free";
+
+function isAutoFreeSelector(model: string): boolean {
+  return model === AUTO_FREE_SELECTOR || model === "openrouter/auto" || model === "auto";
+}
+
+/** Short human-friendly label for a real model id, e.g. "minimax/m3" → "minimax-m3". */
+function shortModelName(model: string): string {
+  const short = model.split("/").pop() ?? model;
+  return short.replace(/:free$/, "");
+}
+
+/**
+ * Model label for messages/status: shows the real model currently doing work, and
+ * makes it obvious when Auto Free picked it or when a fallback took over.
+ */
+function modelDisplay(selectedModel: string, activeModel: string | undefined): string {
+  if (isAutoFreeSelector(selectedModel)) {
+    return activeModel
+      ? `${shortModelName(activeModel)} (Auto Free)`
+      : "Auto Free (choosing best available)";
+  }
+  return activeModel ? shortModelName(activeModel) : shortModelName(selectedModel);
+}
+
 function getFallbackChain(primaryModel: string): string[] {
+  // "Auto Free" is a UI-only selector — sending it to OpenRouter would make every
+  // chunk fail before it even reached the free list. Skip straight to the ordered
+  // free-model list (best available first) instead.
+  if (isAutoFreeSelector(primaryModel)) {
+    return [...FALLBACK_MODELS];
+  }
   // Build a chain: primary first, then fallbacks (excluding the primary)
   const chain = [primaryModel];
   for (const m of FALLBACK_MODELS) {
