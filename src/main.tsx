@@ -1,7 +1,6 @@
 import '@vly-ai/integrations';
 import { Toaster } from "@/components/ui/sonner";
 import { RequireAuth } from "@/components/RequireAuth";
-import { VlyToolbar } from "../vly-toolbar-readonly.tsx";
 import { ConvexAuthProvider } from "@convex-dev/auth/react";
 import { ConvexReactClient } from "convex/react";
 import React, { StrictMode, useEffect, lazy, Suspense } from "react";
@@ -14,6 +13,12 @@ const Landing = lazy(() => import("./pages/Landing.tsx"));
 const AuthPage = lazy(() => import("./pages/Auth.tsx"));
 const Dashboard = lazy(() => import("./pages/Dashboard.tsx"));
 const NotFound = lazy(() => import("./pages/NotFound.tsx"));
+
+// Dev-only VlyToolbar (element picker + screenshot capture). Lazy-loaded so the
+// heavy @zumer/snapdom code is never downloaded by published visitors.
+const VlyToolbar = lazy(() =>
+  import("../vly-toolbar-readonly.tsx").then((m) => ({ default: m.VlyToolbar }))
+);
 
 // Simple loading fallback for route transitions
 function RouteLoading() {
@@ -108,11 +113,38 @@ function RouteSyncer() {
 }
 
 
+/**
+ * Register the data-saving service worker ONLY on the published site
+ * (top-level page, https, not a dev/preview host). Preview iframes and
+ * development deployments never register it, so the Freebuff editor is
+ * unaffected — only real visitors on the published URL get cached assets.
+ */
+function registerServiceWorker() {
+  if (typeof window === "undefined") return;
+  if (!("serviceWorker" in navigator)) return;
+  if (window.self !== window.top) return; // inside the Freebuff preview iframe
+  const { hostname, protocol } = window.location;
+  if (hostname === "localhost" || hostname === "127.0.0.1") return;
+  if (protocol !== "https:" && protocol !== "http:") return;
+  if (hostname.endsWith(".vly.sh")) return; // dev deployment, not published
+  window.addEventListener("load", () => {
+    navigator.serviceWorker
+      .register(`${import.meta.env.BASE_URL}sw.js`)
+      .catch(() => {
+        // Non-fatal — the site works normally without a service worker.
+      });
+  });
+}
+
+registerServiceWorker();
+
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <RootErrorBoundary>
       <ToolbarErrorBoundary>
-        <VlyToolbar />
+        <Suspense fallback={null}>
+          <VlyToolbar />
+        </Suspense>
       </ToolbarErrorBoundary>
       <ConvexAuthProvider client={convex}>
         <BrowserRouter>

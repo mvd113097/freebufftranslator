@@ -24,13 +24,11 @@ import { ProgressPanel } from "@/components/translator/ProgressPanel";
 import { SettingsPanel } from "@/components/translator/SettingsPanel";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
-import { translateChunkSimple } from "@/lib/translator/gemini-api";
 import { chunkTexts } from "@/lib/translator/chunker";
 import {
   loadSettings,
   saveSettings,
 } from "@/lib/translator/persistence";
-import { generateEpub, triggerDownload } from "@/lib/translator/epub";
 
 const MODEL_OPTIONS = [
   { value: "openrouter/free", label: "Auto Free (best available)" },
@@ -117,11 +115,6 @@ export default function Dashboard() {
     activeJobId ? { jobId: activeJobId } : "skip"
   );
 
-  // Lightweight progress subscription — NO translated text, just status counts
-  const chunkProgress = useQuery(
-    api.translation.getChunkProgress,
-    activeJobId ? { jobId: activeJobId } : "skip"
-  );
   // On-demand fetch for download/export (NOT a subscription — fetches once)
   const fetchTranslatedChunksMutation = useMutation(api.translation.fetchTranslatedChunks);
 
@@ -394,6 +387,8 @@ export default function Dashboard() {
         alert("No translated content to download yet.");
         return;
       }
+      // Loaded on demand — keeps the EPUB/JSZip library out of the initial page download
+      const { generateEpub, triggerDownload } = await import("@/lib/translator/epub");
       const title = (fileName.replace(/\.txt$/i, "") || "Translated Novel").replace(/_/g, " ");
       const epubBlob = await generateEpub(chunks, title, fileName);
       const epubName = label.replace(/\.txt$/i, ".epub");
@@ -450,7 +445,7 @@ export default function Dashboard() {
     setFileName("");
   }, [activeJobId, deleteJobMutation]);
 
-  const hasTranslatedChunks = chunkProgress && chunkProgress.completed > 0;
+  const hasTranslatedChunks = completedCount > 0;
 
   // ─── Render ─────────────────────────────────────────────────────
   return (
@@ -885,14 +880,15 @@ export default function Dashboard() {
                 Start Server Translation
               </button>
               {keys.length > 0 && (
-                <button
-                  onClick={async () => {
-                    try {
-                      const result = await translateChunkSimple(
-                        "你好世界 Hello World",
-                        keys[0],
-                        selectedModel
-                      );
+                <button                      onClick={async () => {
+                        try {
+                          // Loaded on demand — only downloaded when the button is tapped
+                          const { translateChunkSimple } = await import("@/lib/translator/gemini-api");
+                          const result = await translateChunkSimple(
+                            "你好世界 Hello World",
+                            keys[0],
+                            selectedModel
+                          );
                       alert(`✅ Key works! Response: ${result.slice(0, 100)}`);
                     } catch (err) {
                       const msg = err instanceof Error ? err.message : String(err);
@@ -962,7 +958,7 @@ export default function Dashboard() {
               style={{ WebkitTapHighlightColor: "transparent", touchAction: "manipulation" }}
             >
               <Download className="h-4 w-4" />
-              {hasTranslatedChunks ? `Download Progress (${chunkProgress!.completed} chunks)` : "Download Progress (waiting for chunks...)"}
+              {hasTranslatedChunks ? `Download Progress (${completedCount} chunks)` : "Download Progress (waiting for chunks...)"}
             </button>
           )}
 
@@ -975,7 +971,7 @@ export default function Dashboard() {
                 style={{ WebkitTapHighlightColor: "transparent", touchAction: "manipulation" }}
               >
                 <Download className="h-4 w-4" />
-                Download Complete ({chunkProgress?.completed ?? 0} chunks)
+                Download Complete ({completedCount} chunks)
               </button>
               <button
                 onClick={() => setShowScanResults(!showScanResults)}
