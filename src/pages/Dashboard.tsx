@@ -25,6 +25,7 @@ import { SettingsPanel } from "@/components/translator/SettingsPanel";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { chunkTexts } from "@/lib/translator/chunker";
+import { prepareChunkForUpload } from "@/lib/translator/compress";
 import {
   loadSettings,
   saveSettings,
@@ -91,6 +92,7 @@ export default function Dashboard() {
     return saved ? (saved as Id<"translationJobs">) : null;
   });
   const [isStarting, setIsStarting] = useState(false);
+  const [uploadPhase, setUploadPhase] = useState<"compressing" | "uploading" | null>(null);
   const [hasRecovered, setHasRecovered] = useState(false);
   const [isResuming, setIsResuming] = useState(false);
   const [elapsedMs, setElapsedMs] = useState(0);
@@ -298,13 +300,21 @@ export default function Dashboard() {
     if (!canStart) return;
 
     setIsStarting(true);
+    setUploadPhase("compressing");
     try {
       // Chunk text client-side to avoid Convex document size limits
       const textChunks = chunkTexts(rawText, chunkSize);
 
+      // Compress every chunk (gzip) on the phone before upload so ~40-50% less
+      // mobile data is sent. Falls back to plain text on older browsers.
+      const compressedChunks = await Promise.all(
+        textChunks.map(async (t) => prepareChunkForUpload(t))
+      );
+
+      setUploadPhase("uploading");
       const { jobId } = await startTranslationMutation({
         fileName: fileName || "unknown.txt",
-        chunks: textChunks.map((t) => ({ text: t })),
+        chunks: compressedChunks,
         model: selectedModel,
         chunkSize,
         concurrency,
@@ -322,6 +332,7 @@ export default function Dashboard() {
       setActiveJobId(jobId);
       saveActiveJobId(jobId);
       setIsStarting(false);
+      setUploadPhase(null);
 
       // Fire-and-forget: start the server-side pipeline.
       processJobAction({
@@ -334,6 +345,7 @@ export default function Dashboard() {
       console.error("Failed to start translation:", err);
       alert("Failed to start: " + (err instanceof Error ? err.message : String(err)));
       setIsStarting(false);
+      setUploadPhase(null);
     }
   }, [canStart, rawText, keys, chunkSize, concurrency, selectedModel, fileName, startTranslationMutation, processJobAction]);
 
@@ -910,7 +922,11 @@ export default function Dashboard() {
               className="flex items-center gap-2 rounded-xl bg-amber-500/50 px-6 py-2.5 text-sm font-semibold text-stone-950 cursor-not-allowed"
             >
               <Loader2 className="h-4 w-4 animate-spin" />
-              Starting...
+              {uploadPhase === "compressing"
+                ? "Compressing file… (saves data)"
+                : uploadPhase === "uploading"
+                  ? "Uploading…"
+                  : "Starting..."}
             </button>
           )}
 

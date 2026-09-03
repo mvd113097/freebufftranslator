@@ -221,7 +221,13 @@ export const internalResetStuckChunks = internalMutation({
 export const startTranslation = mutation({
   args: {
     fileName: v.string(),
-    chunks: v.array(v.object({ text: v.string() })),
+    // Chunks may be gzip-compressed (base64) to save mobile data on upload.
+    // `len`/`gzip` are optional so plain-text uploads (older clients/fallback) still work.
+    chunks: v.array(v.object({
+      text: v.string(),
+      len: v.optional(v.number()),
+      gzip: v.optional(v.boolean()),
+    })),
     model: v.string(),
     chunkSize: v.number(),
     concurrency: v.number(),
@@ -244,7 +250,7 @@ export const startTranslation = mutation({
     const jobId = await ctx.db.insert("translationJobs", {
       userId: userId as string,
       fileName: args.fileName,
-      rawTextLength: args.chunks.reduce((sum, c) => sum + c.text.length, 0),
+      rawTextLength: args.chunks.reduce((sum, c) => sum + (c.len ?? c.text.length), 0),
       totalChunks: args.chunks.length,
       status: "processing",
       model: args.model,
@@ -271,6 +277,7 @@ export const startTranslation = mutation({
         jobId,
         chunkIndex: i,
         originalText: args.chunks[i].text,
+        originalGzip: args.chunks[i].gzip ?? false,
         translatedText: "",
         status: "pending",
         retries: 0,
@@ -744,9 +751,56 @@ export const processNextBatch = action({
       return { done: false, processed: 0, reason: preCheck?.status ?? "missing" };
     }
 
+    // Decompress chunks that were gzip-compressed on the phone before upload
+    // (saves ~40-50% of upload data). Plain/legacy chunks are used as-is.
+    const decodedSource = new Map<string, string>(); // chunk id -> plain text
+    const compressedAssigns = chunkAssignments.filter((a) => a.chunk.originalGzip === true);
+    if (compressedAssigns.length > 0) {
+      let decoded: string[] = [];
+      try {
+        decoded = await ctx.runAction(internal.decompress.gunzipTexts, {
+          items: compressedAssigns.map((a) => ({ data: a.chunk.originalText })),
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`[Translation] Failed to decompress ${compressedAssigns.length} chunk(s):`, msg);
+      }
+      const failedDecode = new Set<string>();
+      for (let i = 0; i < compressedAssigns.length; i++) {
+        const a = compressedAssigns[i];
+        const text = decoded[i];
+        if (typeof text === "string" && text.length > 0) {
+          decodedSource.set(a.chunk._id as string, text);
+        } else {
+          failedDecode.add(a.chunk._id as string);
+        }
+      }
+      if (failedDecode.size > 0) {
+        // Never send decompressed garbage to the model — fail these chunks cleanly.
+        for (const a of compressedAssigns) {
+          if (failedDecode.has(a.chunk._id as string)) {
+            await ctx.runMutation(internal.translation.internalPatchChunk, {
+              chunkId: a.chunk._id,
+              status: "failed",
+              error: "DECODE_ERROR: uploaded text could not be decompressed on the server",
+              retries: 3,
+            });
+          }
+        }
+        await notifyJob(
+          job,
+          `❌ <b>${failedDecode.size} chunk(s) failed to decompress</b>\nUploaded text could not be restored on the server, so those chunks were marked failed.\n📄 ${job.fileName}`,
+          "error",
+        );
+      }
+    }
+    const workableAssignments = chunkAssignments.filter(
+      (a) => a.chunk.originalGzip !== true || decodedSource.has(a.chunk._id as string)
+    );
+
     // Mark all chunks as processing upfront with a timestamp for stuck detection
     const now = Date.now();
-    for (const { chunk } of chunkAssignments) {
+    for (const { chunk } of workableAssignments) {
       await ctx.runMutation(internal.translation.internalPatchChunk, {
         chunkId: chunk._id,
         status: "processing",
@@ -759,7 +813,7 @@ export const processNextBatch = action({
     const modelChain = getFallbackChain(job.model);
 
     const results = await Promise.all(
-      chunkAssignments.map(async ({ chunk, apiKey }) => {
+      workableAssignments.map(async ({ chunk, apiKey }) => {
         let success = false;
         let lastError = "";
         let usedModel: string | undefined;
@@ -781,7 +835,8 @@ export const processNextBatch = action({
                 await new Promise((r) => setTimeout(r, 1000));
               }
 
-              const translated = await callOpenRouter(chunk.originalText, apiKey, tryModel);
+              const sourceText = decodedSource.get(chunk._id as string) ?? chunk.originalText;
+              const translated = await callOpenRouter(sourceText, apiKey, tryModel);
 
               // Quality gate: reject if output still contains Chinese characters
               const chineseRegex = /[\u4e00-\u9fff]+/;

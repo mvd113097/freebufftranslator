@@ -70,6 +70,8 @@ const schema = defineSchema(
       jobId: v.id("translationJobs"),
       chunkIndex: v.number(),
       originalText: v.string(),
+      // True when originalText is gzip+base64 (compressed on the phone before upload)
+      originalGzip: v.optional(v.boolean()),
       translatedText: v.string(),
       status: v.union(
         v.literal("pending"),
