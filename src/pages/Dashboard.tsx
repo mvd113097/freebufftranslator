@@ -893,12 +893,19 @@ export default function Dashboard() {
                         try {
                           // Loaded on demand — only downloaded when the button is tapped
                           const { translateChunkSimple } = await import("@/lib/translator/gemini-api");
-                          const result = await translateChunkSimple(
-                            "你好世界 Hello World",
-                            keys[0],
-                            selectedModel
-                          );
-                      alert(`✅ Key works! Response: ${result.slice(0, 100)}`);
+                          const lines: string[] = [];
+                          for (let i = 0; i < keys.length; i++) {
+                            const key = keys[i];
+                            try {
+                              await translateChunkSimple("你好世界 Hello World", key, selectedModel);
+                              lines.push(`Key ${i + 1} (…${key.slice(-4)}): ✅ works`);
+                            } catch (err2) {
+                              const msg = err2 instanceof Error ? err2.message : String(err2);
+                              lines.push(`Key ${i + 1} (…${key.slice(-4)}): ❌ ${msg.slice(0, 140)}`);
+                            }
+                          }
+                          const okCount = lines.filter((l) => l.includes("✅")).length;
+                          alert(`Key check — ${okCount}/${keys.length} valid:\n\n${lines.join("\n\n")}\n\nRemove the ❌ keys from the list (they will fail every chunk).`);
                     } catch (err) {
                       const msg = err instanceof Error ? err.message : String(err);
                       alert(`❌ Key test failed: ${msg.slice(0, 200)}`);
@@ -907,7 +914,7 @@ export default function Dashboard() {
                   className="flex items-center gap-2 rounded-xl border border-stone-700 bg-stone-800 px-4 py-2.5 text-xs font-medium text-stone-300 hover:bg-stone-700 transition-all cursor-pointer"
                 >
                   <Zap className="h-3.5 w-3.5" />
-                  Test Key
+                  Test All Keys
                 </button>
               )}
             </>

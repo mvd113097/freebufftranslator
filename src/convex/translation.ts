@@ -960,11 +960,6 @@ export const processNextBatch = action({
             error: lastError.slice(0, 500),
             retries: 5,
           });
-          await notifyJob(
-            job,
-            `❌ <b>Chunk ${chunk.chunkIndex + 1} failed</b>\nError: ${lastError.slice(0, 200)}`,
-            "error",
-          );
         }
 
         return { success, chunkIndex: chunk.chunkIndex, error: lastError, model: usedModel, apiKey };
@@ -1004,6 +999,25 @@ export const processNextBatch = action({
     // Update job progress
     const counts: { total: number; completed: number; failed: number } = await ctx.runQuery(internal.translation.internalCountChunks, { jobId: args.jobId });
     const isAllDone: boolean = counts.completed + counts.failed >= counts.total;
+
+    // One consolidated Telegram alert per batch that produced NEW failures — instead of a
+    // message per chunk, so a wave of failures can't spam Telegram or get lost.
+    const failedResults = results.filter((r) => !r.success && r.error && r.error !== "job_stopped");
+    const newFailuresThisBatch = counts.failed - job.failedCount;
+    if (failedResults.length > 0 && newFailuresThisBatch > 0) {
+      const chunkNums = failedResults.map((r) => r.chunkIndex + 1).join(", ");
+      const sampleErr = failedResults[failedResults.length - 1]?.error?.slice(0, 160) ?? "unknown error";
+      await notifyJob(
+        job,
+        `❌ <b>${failedResults.length} chunk${failedResults.length > 1 ? "s" : ""} failed</b>\n` +
+        `Chunks: ${chunkNums}\n` +
+        `📊 ${counts.failed}/${counts.total} failed total\n` +
+        `🔍 Error: ${sampleErr}\n` +
+        `📄 ${job.fileName}\n` +
+        `💡 Pause then Resume retries failed chunks.`,
+        "error",
+      );
+    }
 
     // Determine the most recently successful model from the batch
     let lastSuccessfulModel: string | undefined;
