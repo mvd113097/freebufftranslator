@@ -80,6 +80,7 @@ const schema = defineSchema(
       error: v.optional(v.string()),
       retries: v.number(),
       usedModel: v.optional(v.string()),
+      processingSince: v.optional(v.number()), // timestamp when chunk entered 'processing' state
     }).index("by_jobId", ["jobId"]),
   },
   {

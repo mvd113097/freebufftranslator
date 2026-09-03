@@ -143,6 +143,7 @@ export const internalPatchChunk = internalMutation({
     error: v.optional(v.string()),
     retries: v.optional(v.number()),
     usedModel: v.optional(v.string()),
+    processingSince: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
     const patch: Record<string, unknown> = { status: args.status };
@@ -150,6 +151,11 @@ export const internalPatchChunk = internalMutation({
     if (args.error !== undefined) patch.error = args.error;
     if (args.retries !== undefined) patch.retries = args.retries;
     if (args.usedModel !== undefined) patch.usedModel = args.usedModel;
+    if (args.processingSince !== undefined) patch.processingSince = args.processingSince;
+    // Clear processingSince when leaving processing state
+    if (args.status === "completed" || args.status === "failed" || args.status === "pending") {
+      patch.processingSince = undefined;
+    }
     await ctx.db.patch(args.chunkId, patch);
   },
 });
@@ -173,6 +179,39 @@ export const internalPatchJob = internalMutation({
     if (args.lastHeartbeat !== undefined) patch.lastHeartbeat = args.lastHeartbeat;
     if (args.lastStatusNotifyAt !== undefined) patch.lastStatusNotifyAt = args.lastStatusNotifyAt;
     await ctx.db.patch(args.jobId, patch);
+  },
+});
+
+/** Reset chunks stuck in 'processing' state back to 'pending'. */
+export const internalResetStuckChunks = internalMutation({
+  args: {
+    jobId: v.id("translationJobs"),
+    stuckTimeoutMs: v.number(),
+  },
+  handler: async (ctx, args) => {
+    const now = Date.now();
+    const chunks = await ctx.db
+      .query("translationChunks")
+      .withIndex("by_jobId", (q) => q.eq("jobId", args.jobId))
+      .collect();
+
+    let resetCount = 0;
+    for (const chunk of chunks) {
+      if (chunk.status === "processing") {
+        const processingSince = (chunk as Record<string, unknown>).processingSince as number | undefined;
+        if (processingSince && now - processingSince > args.stuckTimeoutMs) {
+          await ctx.db.patch(chunk._id, {
+            status: "pending",
+            error: undefined,
+            retries: 0,
+            processingSince: undefined,
+          });
+          resetCount++;
+        }
+      }
+    }
+
+    return { resetCount };
   },
 });
 
@@ -277,10 +316,10 @@ export const resumeJob = mutation({
       .withIndex("by_jobId", (q) => q.eq("jobId", args.jobId))
       .collect();
 
-    // Reset only failed chunks; keep completed ones
+    // Reset failed AND stuck processing chunks back to pending
     for (const chunk of chunks) {
-      if (chunk.status === "failed") {
-        await ctx.db.patch(chunk._id, { status: "pending", error: undefined, retries: 0 });
+      if (chunk.status === "failed" || chunk.status === "processing") {
+        await ctx.db.patch(chunk._id, { status: "pending", error: undefined, retries: 0, processingSince: undefined });
       }
     }
 
@@ -647,6 +686,22 @@ export const processNextBatch = action({
           completedCount: counts.completed,
           failedCount: counts.failed,
         });
+      } else {
+        // STUCK CHUNK DETECTION: no pending chunks but not all done means some are stuck in "processing".
+        // Reset chunks that have been processing for more than 5 minutes back to pending.
+        const STUCK_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+        const resetResult = await ctx.runMutation(internal.translation.internalResetStuckChunks, {
+          jobId: args.jobId,
+          stuckTimeoutMs: STUCK_TIMEOUT_MS,
+        });
+
+        if (resetResult.resetCount > 0) {
+          await notifyJob(
+            job,
+            `⚠️ <b>${resetResult.resetCount} stuck chunks recovered</b>\nChunks that were stuck in processing have been reset and will retry.\n📄 ${job.fileName}`,
+            "error",
+          );
+        }
       }
 
       return {
@@ -689,11 +744,13 @@ export const processNextBatch = action({
       return { done: false, processed: 0, reason: preCheck?.status ?? "missing" };
     }
 
-    // Mark all chunks as processing upfront
+    // Mark all chunks as processing upfront with a timestamp for stuck detection
+    const now = Date.now();
     for (const { chunk } of chunkAssignments) {
       await ctx.runMutation(internal.translation.internalPatchChunk, {
         chunkId: chunk._id,
         status: "processing",
+        processingSince: now,
       });
     }
 
@@ -1078,6 +1135,11 @@ async function callOpenRouter(text: string, apiKey: string, model: string): Prom
     stream: false,
   };
 
+  // 3-minute timeout prevents the action from hanging forever on a stalled API call
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 3 * 60 * 1000);
+
+  try {
   const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -1085,6 +1147,7 @@ async function callOpenRouter(text: string, apiKey: string, model: string): Prom
       Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify(payload),
+    signal: controller.signal,
   });
 
   if (response.status === 429) {
@@ -1117,6 +1180,14 @@ async function callOpenRouter(text: string, apiKey: string, model: string): Prom
     throw new Error("No translation content in response");
   }
   return normalizeParagraphs(content);
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new Error("API_TIMEOUT: Request timed out after 3 minutes");
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 /**
