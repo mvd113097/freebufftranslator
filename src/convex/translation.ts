@@ -1320,21 +1320,40 @@ async function notifyJob(
 
 // ─── Model routing: Google Gemini (direct) + OpenRouter free tier ──
 // Free OpenRouter models tried in order when Gemini isn't available/exhausted.
+// NOTE: OpenRouter's free catalog churns weekly (MiniMax, Qwen, GLM, Inkling and
+// the Llama tier were all delisted in 2026) — these are the live free endpoints
+// as of Aug 2026. A dead id just fails its attempt and moves to the next route.
 const OPENROUTER_FALLBACK_MODELS = [
+  "nvidia/nemotron-3-ultra-550b-a55b:free",
+  "inclusionai/ling-3.0-flash-fin:free",
+  "inclusionai/ling-3.0-flash:free",
+  "google/gemma-4-31b-it:free",
+  "google/gemma-4-26b-a4b-it:free",
+  "nvidia/nemotron-3-super-120b-a12b:free",
+  "nvidia/nemotron-3-nano-30b-a3b:free",
+  "openai/gpt-oss-20b:free",
+];
+
+// Free Gemini-family models on Google's direct API (AI Studio keys are free).
+// Tried FIRST whenever the job has any Google key — strictly above OpenRouter.
+// Gemma 27B/12B are Google's open instruction models; both accept AI Studio keys
+// on the free tier and handle Chinese→English prose well.
+const GEMINI_FREE_MODELS = [
+  "gemini-2.5-flash",
+  "gemini-2.5-flash-lite",
+  "gemma-3-27b-it",
+  "gemma-3-12b-it",
+];
+
+/** OpenRouter model ids that were delisted and should never be sent as-is. */
+const DEAD_OPENROUTER_MODELS = new Set([
   "minimax/minimax-m3:free",
   "qwen/qwen3.6-plus:free",
   "z-ai/glm-5.2:free",
   "qwen/qwen3-235b-a22b-07-25:free",
-  "nvidia/nemotron-3-ultra-550b-a55b:free",
   "nvidia/nemotron-3.5-lightning:free",
-  "inclusionai/ling-3.0-flash-fin:free",
-  "nvidia/nemotron-3-super-120b-a12b:free",
   "thinkingmachines/inkling:free",
-];
-
-// Free Gemini models on Google's direct API (AI Studio keys are free).
-// Tried FIRST whenever the job has any Google key — strictly above MiniMax.
-const GEMINI_FREE_MODELS = ["gemini-2.5-flash", "gemini-2.5-flash-lite"];
+]);
 
 type ModelProvider = "gemini" | "openrouter";
 
@@ -1388,7 +1407,11 @@ function buildRouteChain(
   hasOpenRouterKeys: boolean,
 ): ModelRoute[] {
   const orChain: string[] = [];
-  if (!isAutoFreeSelector(primaryModel) && !primaryModel.startsWith("google/gemini-")) {
+  if (
+    !isAutoFreeSelector(primaryModel) &&
+    !primaryModel.startsWith("google/gemini-") &&
+    !DEAD_OPENROUTER_MODELS.has(primaryModel)
+  ) {
     orChain.push(primaryModel); // explicitly selected OpenRouter model first
   }
   for (const m of OPENROUTER_FALLBACK_MODELS) {
