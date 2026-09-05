@@ -1324,11 +1324,14 @@ async function notifyJob(
 // the Llama tier were all delisted in 2026) — these are the live free endpoints
 // as of Aug 2026. A dead id just fails its attempt and moves to the next route.
 const OPENROUTER_FALLBACK_MODELS = [
+  // Google's own open models lead the OpenRouter chain — with only OpenRouter
+  // keys the translation still gets a Gemini-family model before any other
+  // provider, matching the "Gemini strictly on top" rule.
+  "google/gemma-4-31b-it:free",
+  "google/gemma-4-26b-a4b-it:free",
   "nvidia/nemotron-3-ultra-550b-a55b:free",
   "inclusionai/ling-3.0-flash-fin:free",
   "inclusionai/ling-3.0-flash:free",
-  "google/gemma-4-31b-it:free",
-  "google/gemma-4-26b-a4b-it:free",
   "nvidia/nemotron-3-super-120b-a12b:free",
   "nvidia/nemotron-3-nano-30b-a3b:free",
   "openai/gpt-oss-20b:free",

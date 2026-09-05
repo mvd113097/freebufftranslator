@@ -31,20 +31,31 @@ import {
   saveSettings,
 } from "@/lib/translator/persistence";
 
+// Only models that are actually live and free right now. MiniMax, Qwen, GLM and
+// Inkling were delisted from OpenRouter's free tier in 2026 and no longer appear.
 const MODEL_OPTIONS = [
   { value: "auto_free", label: "Auto Free (Gemini first, then best free)" },
   { value: "google/gemini-2.5-flash", label: "Gemini 2.5 Flash (direct Google — free)" },
   { value: "google/gemini-2.5-flash-lite", label: "Gemini 2.5 Flash Lite (direct Google — free)" },
-  { value: "minimax/minimax-m3:free", label: "MiniMax M3 (free, 1M ctx)" },
-  { value: "qwen/qwen3.6-plus:free", label: "Qwen 3.6 Plus (free, 1M ctx)" },
-  { value: "z-ai/glm-5.2:free", label: "GLM 5.2 (free, 256K ctx)" },
-  { value: "qwen/qwen3-235b-a22b-07-25:free", label: "Qwen 3 235B (free, 1M ctx)" },
+  { value: "google/gemma-4-31b-it:free", label: "Gemma 4 31B — Google (free via OpenRouter)" },
+  { value: "google/gemma-4-26b-a4b-it:free", label: "Gemma 4 26B MoE — Google (free via OpenRouter)" },
   { value: "nvidia/nemotron-3-ultra-550b-a55b:free", label: "Nemotron 3 Ultra (free, 1M ctx)" },
-  { value: "nvidia/nemotron-3.5-lightning:free", label: "Nemotron 3.5 Lightning (free, 1M ctx)" },
   { value: "inclusionai/ling-3.0-flash-fin:free", label: "Ling 3.0 Flash (free, 262K ctx)" },
   { value: "nvidia/nemotron-3-super-120b-a12b:free", label: "Nemotron 3 Super (free, 262K ctx)" },
-  { value: "thinkingmachines/inkling:free", label: "Thinking Machines Inkling (free, 1M ctx)" },
 ];
+
+/** OpenRouter free models that were delisted — saved selections migrate to Auto Free. */
+const DEAD_MODEL_VALUES = new Set([
+  "minimax/minimax-m3:free",
+  "qwen/qwen3.6-plus:free",
+  "z-ai/glm-5.2:free",
+  "qwen/qwen3-235b-a22b-07-25:free",
+  "nvidia/nemotron-3.5-lightning:free",
+  "thinkingmachines/inkling:free",
+]);
+
+/** A live, free OpenRouter model used when a concrete pick isn't testable. */
+const OPENROUTER_TEST_MODEL = "google/gemma-4-31b-it:free";
 
 /** Google AI Studio keys (free Gemini) start with "AIza" or "AQ." */
 function isGeminiKeyClient(key: string): boolean {
@@ -55,9 +66,9 @@ function isAutoFree(model: string): boolean {
   return model === "auto_free" || model === "openrouter/free" || model === "openrouter/auto" || model === "auto";
 }
 
-/** Map legacy saved model values onto current selector ids. */
+/** Map legacy/dead saved model values onto current selector ids. */
 function normalizeModelValue(model: string): string {
-  return isAutoFree(model) ? "auto_free" : model;
+  return isAutoFree(model) || DEAD_MODEL_VALUES.has(model) ? "auto_free" : model;
 }
 
 // ─── localStorage helpers for active job persistence ──────────────
@@ -955,23 +966,25 @@ export default function Dashboard() {
                 Start Server Translation
               </button>
               {keys.length > 0 && (
-                <button                      onClick={async () => {
+                <button
+                  onClick={async () => {
+                    try {
+                      // Loaded on demand — only downloaded when the button is tapped.
+                      // Each key is tested against the provider its format belongs to.
+                      const { testApiKey } = await import("@/lib/translator/gemini-api");
+                      const lines: string[] = [];
+                      for (let i = 0; i < keys.length; i++) {
+                        const key = keys[i];
                         try {
-                          // Loaded on demand — only downloaded when the button is tapped
-                          const { translateChunkSimple } = await import("@/lib/translator/gemini-api");
-                          const lines: string[] = [];
-                          for (let i = 0; i < keys.length; i++) {
-                            const key = keys[i];
-                            try {
-                              await translateChunkSimple("你好世界 Hello World", key, selectedModel);
-                              lines.push(`Key ${i + 1} (…${key.slice(-4)}): ✅ works`);
-                            } catch (err2) {
-                              const msg = err2 instanceof Error ? err2.message : String(err2);
-                              lines.push(`Key ${i + 1} (…${key.slice(-4)}): ❌ ${msg.slice(0, 140)}`);
-                            }
-                          }
-                          const okCount = lines.filter((l) => l.includes("✅")).length;
-                          alert(`Key check — ${okCount}/${keys.length} valid:\n\n${lines.join("\n\n")}\n\nRemove the ❌ keys from the list (they will fail every chunk).`);
+                          const provider = await testApiKey(key);
+                          lines.push(`Key ${i + 1} (…${key.slice(-4)}): ✅ works — ${provider}`);
+                        } catch (err2) {
+                          const msg = err2 instanceof Error ? err2.message : String(err2);
+                          lines.push(`Key ${i + 1} (…${key.slice(-4)}): ❌ ${msg.slice(0, 140)}`);
+                        }
+                      }
+                      const okCount = lines.filter((l) => l.includes("✅")).length;
+                      alert(`Key check — ${okCount}/${keys.length} valid:\n\n${lines.join("\n\n")}\n\nRemove the ❌ keys from the list (they will fail every chunk).`);
                     } catch (err) {
                       const msg = err instanceof Error ? err.message : String(err);
                       alert(`❌ Key test failed: ${msg.slice(0, 200)}`);

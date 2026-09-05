@@ -208,3 +208,43 @@ export async function translateChunkSimple(
 ): Promise<string> {
   return translateNonStreaming(text, apiKey, model || DEFAULT_MODEL);
 }
+
+/**
+ * Test a single API key against the provider it actually belongs to.
+ * Google keys (AIza…/AQ.…) go to the free Gemini endpoint with header auth;
+ * everything else goes to OpenRouter with a live free model (never "auto_free",
+ * which is a UI-only selector, not a real model id).
+ */
+export async function testApiKey(key: string): Promise<string> {
+  const trimmed = key.trim();
+  if (trimmed.startsWith("AIza") || trimmed.startsWith("AQ.")) {
+    const response = await fetch(
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          // Google keys must NEVER go in the query string — header auth only.
+          "x-goog-api-key": trimmed,
+        },
+        body: JSON.stringify({
+          contents: [{ role: "user", parts: [{ text: "Reply with the single word: OK" }] }],
+          generationConfig: { maxOutputTokens: 512 },
+        }),
+      },
+    );
+    if (response.status === 429) throw new Error("RATE_LIMITED (key works, just out of quota right now)");
+    if (!response.ok) {
+      const body = await response.text().catch(() => "");
+      throw new Error(`HTTP ${response.status}: ${body.slice(0, 140)}`);
+    }
+    return "gemini (direct Google)";
+  }
+
+  // OpenRouter key — must use a real, currently-free model id.
+  await translateNonStreaming("你好世界 Hello World", trimmed, OPENROUTER_TEST_MODEL);
+  return `openrouter (${OPENROUTER_TEST_MODEL})`;
+}
+
+/** Live free OpenRouter model used for key tests. */
+const OPENROUTER_TEST_MODEL = "google/gemma-4-31b-it:free";
