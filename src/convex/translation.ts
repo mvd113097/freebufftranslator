@@ -901,7 +901,9 @@ export const processNextBatch = action({
 
     // Process ALL chunks in parallel (one per key)
     let processedCount = 0;
-    const modelChain = getFallbackChain(job.model);
+    const hasGeminiKeys = job.apiKeys.some((k) => isGeminiKey(k));
+    const hasOpenRouterKeys = job.apiKeys.some((k) => !isGeminiKey(k));
+    const routeChain = buildRouteChain(job.model, hasGeminiKeys, hasOpenRouterKeys);
 
     const results = await Promise.all(
       workableAssignments.map(async ({ chunk, apiKey }) => {
@@ -909,9 +911,23 @@ export const processNextBatch = action({
         let lastError = "";
         let usedModel: string | undefined;
 
-        for (let modelIdx = 0; modelIdx < modelChain.length; modelIdx++) {
-          const tryModel = modelChain[modelIdx];
-          const attemptsForModel = modelIdx === 0 ? 2 : 1; // Primary: 2 tries, fallbacks: 1 — free models are slow, fail fast and move on
+        // Round-robin key pools per provider so each key shares the load evenly.
+        const geminiKeys = job.apiKeys.filter((k) => isGeminiKey(k));
+        const openRouterKeys = job.apiKeys.filter((k) => !isGeminiKey(k));
+        const keyFor = (provider: ModelProvider): string | undefined => {
+          if (provider === "gemini") {
+            if (geminiKeys.length === 0) return undefined;
+            return geminiKeys[chunk.chunkIndex % geminiKeys.length];
+          }
+          if (openRouterKeys.length === 0) return undefined;
+          return openRouterKeys[chunk.chunkIndex % openRouterKeys.length];
+        };
+
+        for (let routeIdx = 0; routeIdx < routeChain.length; routeIdx++) {
+          const route = routeChain[routeIdx];
+          const tryModel = route.model;
+          const attemptKey = keyFor(route.provider) ?? apiKey;
+          const attemptsForModel = routeIdx === 0 ? 2 : 1; // Primary: 2 tries, fallbacks: 1 — free models are slow, fail fast and move on
 
           for (let attempt = 0; attempt < attemptsForModel; attempt++) {
             // Re-check job status
@@ -927,7 +943,10 @@ export const processNextBatch = action({
               }
 
               const sourceText = decodedSource.get(chunk._id as string) ?? chunk.originalText;
-              const translated = await callOpenRouter(sourceText, apiKey, tryModel);
+              const translated =
+                route.provider === "gemini"
+                  ? await callGemini(sourceText, attemptKey, tryModel)
+                  : await callOpenRouter(sourceText, attemptKey, tryModel);
 
               // Quality gate: reject if output still contains Chinese characters
               const chineseRegex = /[\u4e00-\u9fff]+/;
@@ -940,12 +959,12 @@ export const processNextBatch = action({
                 chunkId: chunk._id,
                 translatedText: translated,
                 status: "completed",
-                retries: attempt + (modelIdx * attemptsForModel),
-                usedModel: tryModel,
+                retries: attempt + (routeIdx * attemptsForModel),
+                usedModel: route.provider === "gemini" ? `google/${tryModel}` : tryModel,
               });
 
               success = true;
-              usedModel = tryModel;
+              usedModel = route.provider === "gemini" ? `google/${tryModel}` : tryModel;
               break;
             } catch (err: unknown) {
               lastError = err instanceof Error ? err.message : String(err);
@@ -1299,10 +1318,9 @@ async function notifyJob(
   }
 }
 
-// ─── Model fallback chain ───────────────────────────────────────
-// If the primary model fails, try these in order. These are all free models
-// on OpenRouter with decent context windows suitable for novel translation.
-const FALLBACK_MODELS = [
+// ─── Model routing: Google Gemini (direct) + OpenRouter free tier ──
+// Free OpenRouter models tried in order when Gemini isn't available/exhausted.
+const OPENROUTER_FALLBACK_MODELS = [
   "minimax/minimax-m3:free",
   "qwen/qwen3.6-plus:free",
   "z-ai/glm-5.2:free",
@@ -1314,12 +1332,29 @@ const FALLBACK_MODELS = [
   "thinkingmachines/inkling:free",
 ];
 
-// "Auto Free (best available)" is the UI selector stored on jobs — it is NOT a real
-// OpenRouter model id, so it must never be sent to the API.
-const AUTO_FREE_SELECTOR = "openrouter/free";
+// Free Gemini models on Google's direct API (AI Studio keys are free).
+// Tried FIRST whenever the job has any Google key — strictly above MiniMax.
+const GEMINI_FREE_MODELS = ["gemini-2.5-flash", "gemini-2.5-flash-lite"];
+
+type ModelProvider = "gemini" | "openrouter";
+
+interface ModelRoute {
+  provider: ModelProvider;
+  /** Model id as sent to the provider API (no "google/" prefix for Gemini). */
+  model: string;
+}
+
+// "Auto Free (best available)" is a UI-only selector stored on jobs — it is NOT a
+// real provider model id, so it must never be sent to an API as-is.
+const AUTO_FREE_SELECTORS = new Set(["auto_free", "openrouter/free", "openrouter/auto", "auto"]);
 
 function isAutoFreeSelector(model: string): boolean {
-  return model === AUTO_FREE_SELECTOR || model === "openrouter/auto" || model === "auto";
+  return AUTO_FREE_SELECTORS.has(model);
+}
+
+/** Google AI Studio keys start with "AIza" (classic) or "AQ." (new format). */
+function isGeminiKey(key: string): boolean {
+  return key.startsWith("AIza") || key.startsWith("AQ.");
 }
 
 /** Short human-friendly label for a real model id, e.g. "minimax/m3" → "minimax-m3". */
@@ -1336,25 +1371,143 @@ function modelDisplay(selectedModel: string, activeModel: string | undefined): s
   if (isAutoFreeSelector(selectedModel)) {
     return activeModel
       ? `${shortModelName(activeModel)} (Auto Free)`
-      : "Auto Free (choosing best available)";
+      : "Auto Free — Gemini first, then best free";
   }
   return activeModel ? shortModelName(activeModel) : shortModelName(selectedModel);
 }
 
-function getFallbackChain(primaryModel: string): string[] {
-  // "Auto Free" is a UI-only selector — sending it to OpenRouter would make every
-  // chunk fail before it even reached the free list. Skip straight to the ordered
-  // free-model list (best available first) instead.
-  if (isAutoFreeSelector(primaryModel)) {
-    return [...FALLBACK_MODELS];
+/**
+ * Build the ordered route list for a chunk: which provider/model to try, in order.
+ * Gemini (free direct Google API) always comes first when Google keys exist,
+ * followed by the OpenRouter free chain. Routes for providers with no keys are
+ * omitted, so the app keeps working with only OpenRouter keys as before.
+ */
+function buildRouteChain(
+  primaryModel: string,
+  hasGeminiKeys: boolean,
+  hasOpenRouterKeys: boolean,
+): ModelRoute[] {
+  const orChain: string[] = [];
+  if (!isAutoFreeSelector(primaryModel) && !primaryModel.startsWith("google/gemini-")) {
+    orChain.push(primaryModel); // explicitly selected OpenRouter model first
   }
-  // Build a chain: primary first, then fallbacks (excluding the primary)
-  const chain = [primaryModel];
-  for (const m of FALLBACK_MODELS) {
-    if (m !== primaryModel) chain.push(m);
+  for (const m of OPENROUTER_FALLBACK_MODELS) {
+    if (!orChain.includes(m)) orChain.push(m);
   }
-  return chain;
+
+  const routes: ModelRoute[] = [];
+
+  if (primaryModel.startsWith("google/gemini-")) {
+    // Explicitly picked a Gemini model: it leads, other free Gemini behind it.
+    if (hasGeminiKeys) {
+      routes.push({ provider: "gemini", model: primaryModel.replace(/^google\//, "") });
+      for (const g of GEMINI_FREE_MODELS) {
+        if (!routes.some((r) => r.model === g)) routes.push({ provider: "gemini", model: g });
+      }
+    }
+  } else if (isAutoFreeSelector(primaryModel) && hasGeminiKeys) {
+    // Auto Free: Gemini strictly first, then the OpenRouter free list.
+    for (const g of GEMINI_FREE_MODELS) routes.push({ provider: "gemini", model: g });
+  }
+
+  if (hasOpenRouterKeys) {
+    for (const m of orChain) routes.push({ provider: "openrouter", model: m });
+  }
+
+  // Picked a Gemini/OpenRouter model whose provider has no keys → fall back to
+  // whichever provider DOES have keys instead of failing every chunk.
+  if (routes.length === 0) {
+    if (hasGeminiKeys) {
+      for (const g of GEMINI_FREE_MODELS) routes.push({ provider: "gemini", model: g });
+    } else if (hasOpenRouterKeys) {
+      for (const m of OPENROUTER_FALLBACK_MODELS) routes.push({ provider: "openrouter", model: m });
+    }
+  }
+
+  return routes;
 }
+
+// ─── Google Gemini API call (direct, free tier) ──────────────────
+
+async function callGemini(text: string, apiKey: string, model: string): Promise<string> {
+  const payload = {
+    system_instruction: { parts: [{ text: SYSTEM_PROMPT }] },
+    contents: [{ role: "user", parts: [{ text }] }],
+    generationConfig: {
+      temperature: 0.5,
+      topP: 0.9,
+      maxOutputTokens: 16384,
+    },
+  };
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 10 * 60 * 1000);
+
+  try {
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          // Google keys must NEVER go in the query string — header auth only.
+          "x-goog-api-key": apiKey,
+        },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      },
+    );
+
+    if (response.status === 429) {
+      throw new Error("RATE_LIMITED");
+    }
+
+    if (response.status === 400 || response.status === 401 || response.status === 403) {
+      const bodyText = await response.text().catch(() => "");
+      const realMsg = extractApiErrorMessage(bodyText);
+      const low = bodyText.toLowerCase();
+      if (/api[ _-]?key|invalid|expired|unauthorized|credential|permission|denied/.test(low)) {
+        // The key itself is bad — fail fast so the batch logic removes it.
+        throw new Error(`KEY_REJECTED (key …${apiKey.slice(-4)}): ${realMsg || "Invalid or expired API key"}`);
+      }
+      if (/not found|not supported|unsupported/.test(low)) {
+        throw new Error(`MODEL_ERROR: ${realMsg || "Model unavailable"}`);
+      }
+      throw new Error(`AUTH_ERROR_${response.status}: ${realMsg || "Request rejected"}`);
+    }
+
+    if (!response.ok) {
+      const body = await response.text().catch(() => "");
+      if (body.includes("overloaded") || response.status === 503 || response.status === 502) {
+        throw new Error(`SERVER_ERROR_${response.status}: Model overloaded`);
+      }
+      throw new Error(`API error ${response.status}: ${body.slice(0, 200)}`);
+    }
+
+    const data = await response.json();
+    const candidate = data.candidates?.[0];
+    let content = "";
+    if (Array.isArray(candidate?.content?.parts)) {
+      for (const p of candidate.content.parts) {
+        if (typeof p?.text === "string") content += p.text;
+      }
+    }
+    if (!content.trim()) {
+      const reason = candidate?.finishReason ?? data?.promptFeedback?.blockReason ?? "EMPTY";
+      throw new Error(`MODEL_ERROR: Gemini returned no content (${String(reason).slice(0, 60)})`);
+    }
+    return normalizeParagraphs(content);
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new Error("API_TIMEOUT: Request timed out after 10 minutes");
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+// ─── OpenRouter API call (server-side) ───────────────────────────
 
 // ─── OpenRouter API call (server-side) ───────────────────────────
 

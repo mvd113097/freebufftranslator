@@ -65,6 +65,24 @@ export function KeyManager({ keys, onKeysChange }: KeyManagerProps) {
       <div className="flex items-center gap-2 mb-2">
         <KeyRound className="h-4 w-4 text-amber-400" />
         <h3 className="text-sm font-semibold text-stone-200">API Keys</h3>
+        {(() => {
+          const gemini = keys.filter((k) => k.startsWith("AIza") || k.startsWith("AQ.")).length;
+          const openrouter = keys.length - gemini;
+          return (
+            <>
+              {gemini > 0 && (
+                <span className="inline-flex items-center rounded-full bg-blue-500/15 px-2 py-0.5 text-xs font-medium text-blue-400">
+                  {gemini} Gemini
+                </span>
+              )}
+              {openrouter > 0 && (
+                <span className="inline-flex items-center rounded-full bg-amber-500/15 px-2 py-0.5 text-xs font-medium text-amber-400">
+                  {openrouter} OpenRouter
+                </span>
+              )}
+            </>
+          );
+        })()}
         {keys.length > 0 && (
           <span className="inline-flex items-center rounded-full bg-amber-500/15 px-2 py-0.5 text-xs font-medium text-amber-400">
             {keys.length} key{keys.length !== 1 ? "s" : ""} loaded
@@ -76,7 +94,7 @@ export function KeyManager({ keys, onKeysChange }: KeyManagerProps) {
         <div className="flex items-start gap-2 rounded-lg bg-amber-500/10 border border-amber-500/20 px-3 py-2.5 text-xs text-amber-300">
           <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
           <span>
-            Add your OpenRouter API key(s). Get one free at{" "}
+            Paste key(s) — one per line. OpenRouter keys (sk-or-v1-…) from{" "}
             <a
               href="https://openrouter.ai/keys"
               target="_blank"
@@ -84,7 +102,17 @@ export function KeyManager({ keys, onKeysChange }: KeyManagerProps) {
               className="underline font-medium"
             >
               openrouter.ai/keys
+            </a>{" "}
+            and/or free Google Gemini keys (AIza… or AQ.…) from{" "}
+            <a
+              href="https://aistudio.google.com/apikey"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="underline font-medium"
+            >
+              aistudio.google.com/apikey
             </a>
+            . With a Gemini key, Auto Free always tries Gemini first.
           </span>
         </div>
       )}
@@ -122,7 +150,7 @@ export function KeyManager({ keys, onKeysChange }: KeyManagerProps) {
         <textarea
           value={inputValue}
           onChange={(e) => setInputValue(e.target.value)}
-          placeholder={"Paste OpenRouter API key(s) here, one per line\nsk-or-v1-xxxxxxxxxxxxxxxx\nsk-or-v1-yyyyyyyyyyyyyyyy"}
+          placeholder={"Paste API key(s) here, one per line\nsk-or-v1-… (OpenRouter) or AIza…/AQ.… (free Google Gemini)"}
           className={cn(
             "w-full rounded-xl border border-stone-700 bg-stone-800 px-3 py-2.5",
             "text-xs font-mono text-stone-200 placeholder:text-stone-500",

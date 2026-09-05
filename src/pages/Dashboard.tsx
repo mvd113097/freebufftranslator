@@ -32,7 +32,9 @@ import {
 } from "@/lib/translator/persistence";
 
 const MODEL_OPTIONS = [
-  { value: "openrouter/free", label: "Auto Free (best available)" },
+  { value: "auto_free", label: "Auto Free (Gemini first, then best free)" },
+  { value: "google/gemini-2.5-flash", label: "Gemini 2.5 Flash (direct Google — free)" },
+  { value: "google/gemini-2.5-flash-lite", label: "Gemini 2.5 Flash Lite (direct Google — free)" },
   { value: "minimax/minimax-m3:free", label: "MiniMax M3 (free, 1M ctx)" },
   { value: "qwen/qwen3.6-plus:free", label: "Qwen 3.6 Plus (free, 1M ctx)" },
   { value: "z-ai/glm-5.2:free", label: "GLM 5.2 (free, 256K ctx)" },
@@ -43,6 +45,20 @@ const MODEL_OPTIONS = [
   { value: "nvidia/nemotron-3-super-120b-a12b:free", label: "Nemotron 3 Super (free, 262K ctx)" },
   { value: "thinkingmachines/inkling:free", label: "Thinking Machines Inkling (free, 1M ctx)" },
 ];
+
+/** Google AI Studio keys (free Gemini) start with "AIza" or "AQ." */
+function isGeminiKeyClient(key: string): boolean {
+  return key.startsWith("AIza") || key.startsWith("AQ.");
+}
+
+function isAutoFree(model: string): boolean {
+  return model === "auto_free" || model === "openrouter/free" || model === "openrouter/auto" || model === "auto";
+}
+
+/** Map legacy saved model values onto current selector ids. */
+function normalizeModelValue(model: string): string {
+  return isAutoFree(model) ? "auto_free" : model;
+}
 
 // ─── localStorage helpers for active job persistence ──────────────
 
@@ -73,7 +89,7 @@ export default function Dashboard() {
   const [fileName, setFileName] = useState("");
   const [chunkSize, setChunkSize] = useState(() => loadSettings().chunkSize);
   const [concurrency, setConcurrency] = useState(() => loadSettings().concurrency);
-  const [selectedModel, setSelectedModel] = useState(() => loadSettings().model);
+  const [selectedModel, setSelectedModel] = useState(() => normalizeModelValue(loadSettings().model));
   const [telegramBotToken, setTelegramBotToken] = useState(() => loadSettings().telegramBotToken);
   const [telegramChatId, setTelegramChatId] = useState(() => loadSettings().telegramChatId);
   const [telegramNotifyOnStart, setTelegramNotifyOnStart] = useState(() => loadSettings().telegramNotifyOnStart);
@@ -722,11 +738,11 @@ export default function Dashboard() {
                       <Zap className="h-3.5 w-3.5 text-amber-400 shrink-0" />
                       Now translating with{" "}
                       <span className="font-mono font-semibold text-amber-400">
-                        {jobStatus.activeModel.split("/").pop()?.replace(/:free$/, "")}
-                      </span>
-                      {selectedModel === "openrouter/free" ? " (Auto Free picked it)" : ""}
+                    {jobStatus.activeModel.split("/").pop()?.replace(/:free$/, "")}
+                  </span>
+                  {isAutoFree(selectedModel) ? " (Auto Free picked it)" : ""}
                     </p>
-                    {selectedModel !== "openrouter/free" &&
+                    {selectedModel !== "auto_free" &&
                       jobStatus.activeModel !== selectedModel && (
                         <p className="text-[10px] text-stone-500 leading-snug">
                           Your pick is rate-limited or overloaded right now, so it fell back to the
@@ -734,11 +750,11 @@ export default function Dashboard() {
                         </p>
                       )}
                   </>
-                ) : (isRunning || isPaused) && selectedModel === "openrouter/free" ? (
+                ) : (isRunning || isPaused) && isAutoFree(selectedModel) ? (
                   <p className="text-[10px] text-stone-500 leading-snug">
-                    Auto Free tries the best available model per chunk (MiniMax → Qwen → GLM →
-                    more) and skips any that are rate-limited. The line above shows which model
-                    is actually translating.
+                    Auto Free tries free Gemini first (needs a Google AI Studio key), then MiniMax
+                    → Qwen → GLM → more with your OpenRouter keys, skipping anything rate-limited.
+                    The line above shows which model is actually translating.
                   </p>
                 ) : null}
               </div>
