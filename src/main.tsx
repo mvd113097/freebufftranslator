@@ -3,21 +3,23 @@ import { Toaster } from "@/components/ui/sonner";
 import { RequireAuth } from "@/components/RequireAuth";
 import { ConvexAuthProvider } from "@convex-dev/auth/react";
 import { ConvexReactClient } from "convex/react";
-import React, { StrictMode, useEffect, lazy, Suspense } from "react";
+import React, { StrictMode, useEffect, Suspense } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter, Route, Routes, useLocation } from "react-router";
 import "./index.css";
 
-// Lazy load route components for better code splitting
-const Landing = lazy(() => import("./pages/Landing.tsx"));
-const AuthPage = lazy(() => import("./pages/Auth.tsx"));
-const Dashboard = lazy(() => import("./pages/Dashboard.tsx"));
-const NotFound = lazy(() => import("./pages/NotFound.tsx"));
+import Landing from "./pages/Landing.tsx";
+import AuthPage from "./pages/Auth.tsx";
+import Dashboard from "./pages/Dashboard.tsx";
+import NotFound from "./pages/NotFound.tsx";
 
 // Dev-only VlyToolbar (element picker + screenshot capture). Lazy-loaded so the
 // heavy @zumer/snapdom code is never downloaded by published visitors.
-const VlyToolbar = lazy(() =>
-  import("../vly-toolbar-readonly.tsx").then((m) => ({ default: m.VlyToolbar }))
+const VlyToolbar = React.lazy(
+  () =>
+    import("../vly-toolbar-readonly.tsx").then((m) => ({
+      default: m.VlyToolbar,
+    }))
 );
 
 // Simple loading fallback for route transitions
@@ -87,11 +89,11 @@ class RootErrorBoundary extends React.Component<
 
 const convexUrl = import.meta.env.VITE_CONVEX_URL;
 if (!convexUrl) {
-  console.error("[WebContainer] VITE_CONVEX_URL is not set — Convex will not work.");
+  console.error(
+    "[WebContainer] VITE_CONVEX_URL is not set — Convex will not work."
+  );
 }
 const convex = new ConvexReactClient(convexUrl ?? "");
-
-
 
 function RouteSyncer() {
   const location = useLocation();
@@ -115,7 +117,6 @@ function RouteSyncer() {
 
   return null;
 }
-
 
 /**
  * Register the data-saving service worker ONLY on the published site
@@ -149,6 +150,7 @@ if (!rootEl) {
   fallback.id = "root";
   document.body.appendChild(fallback);
 }
+
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <RootErrorBoundary>
@@ -167,7 +169,10 @@ createRoot(document.getElementById("root")!).render(
                 path="/auth"
                 element={<AuthPage redirectAfterAuth="/dashboard" />}
               />
-              <Route path="/dashboard" element={<RequireAuth><Dashboard /></RequireAuth>} />
+              <Route
+                path="/dashboard"
+                element={<RequireAuth><Dashboard /></RequireAuth>}
+              />
               <Route path="*" element={<NotFound />} />
             </Routes>
           </Suspense>
