@@ -85,7 +85,11 @@ class RootErrorBoundary extends React.Component<
   }
 }
 
-const convex = new ConvexReactClient(import.meta.env.VITE_CONVEX_URL as string);
+const convexUrl = import.meta.env.VITE_CONVEX_URL;
+if (!convexUrl) {
+  console.error("[WebContainer] VITE_CONVEX_URL is not set — Convex will not work.");
+}
+const convex = new ConvexReactClient(convexUrl ?? "");
 
 
 
@@ -138,6 +142,13 @@ function registerServiceWorker() {
 
 registerServiceWorker();
 
+const rootEl = document.getElementById("root");
+if (!rootEl) {
+  // Preview iframe may not have the root element — render into body as fallback.
+  const fallback = document.createElement("div");
+  fallback.id = "root";
+  document.body.appendChild(fallback);
+}
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <RootErrorBoundary>
