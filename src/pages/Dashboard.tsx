@@ -25,7 +25,6 @@ import { FileUploader } from "@/components/translator/FileUploader";
 import { KeyManager } from "@/components/translator/KeyManager";
 import { ProgressPanel } from "@/components/translator/ProgressPanel";
 import { SettingsPanel } from "@/components/translator/SettingsPanel";
-import { SplitView } from "@/components/translator/SplitView";
 import {
   chunkText,
   type TextChunk,
@@ -115,7 +114,6 @@ export default function Dashboard() {
   const [chunkProgress, setChunkProgress] = useState<ChunkProgress[]>([]);
   const [progress, setProgress] = useState<PipelineProgress | null>(null);
   const [activeModel, setActiveModel] = useState<string | undefined>(undefined);
-  const [activeChunkId, setActiveChunkId] = useState<number | null>(null);
   const [activeEnglishWords, setActiveEnglishWords] = useState(0);
   const [elapsedMs, setElapsedMs] = useState(0);
   const [isOnline, setIsOnline] = useState(
@@ -323,10 +321,6 @@ export default function Dashboard() {
             );
           }
         }
-      });
-
-      pipeline.setTokenCallback((chunkId, _token) => {
-        setActiveChunkId(chunkId);
       });
 
       try {
@@ -537,7 +531,6 @@ export default function Dashboard() {
     }
     setChunkProgress([]);
     setProgress(null);
-    setActiveChunkId(null);
     setActiveEnglishWords(0);
     setElapsedMs(0);
     setIsRunning(false);
@@ -972,17 +965,6 @@ export default function Dashboard() {
             />
           </motion.div>
         </div>
-
-        {/* Split View — original vs streaming translation */}
-        {hasSession && (
-          <motion.div
-            initial={{ opacity: 0, y: 12 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.25 }}
-          >
-            <SplitView chunks={chunkProgress} activeChunkId={activeChunkId} />
-          </motion.div>
-        )}
 
         {/* Action Buttons */}
         <motion.div
