@@ -1,5 +1,6 @@
 import { Toaster } from "@/components/ui/sonner";
 import React, { StrictMode, Suspense, lazy, useEffect } from "react";
+// App entry: routes are lazy-loaded for fast cold starts.
 import { createRoot } from "react-dom/client";
 import { BrowserRouter, Route, Routes, useLocation } from "react-router";
 import "./index.css";
