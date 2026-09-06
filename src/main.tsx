@@ -94,20 +94,38 @@ class RootErrorBoundary extends React.Component<
 }
 
 /**
- * Register the data-saving service worker ONLY on the published site
- * (top-level page, https, not a dev/preview host). Preview iframes and
- * development deployments never register it, so the Freebuff editor is
- * unaffected — only real visitors on the published URL get cached assets.
+ * Register the data-saving service worker ONLY on the published site.
+ * Dev URLs (*.freebuff.dev, *.vly.sh, localhost) are excluded — caching there
+ * serves stale modules after edits and breaks the app. Any worker already
+ * installed on a dev host is unregistered and its caches purged.
  */
 function registerServiceWorker() {
   if (typeof window === "undefined") return;
   if (!("serviceWorker" in navigator)) return;
   if (window.self !== window.top) return; // inside the Freebuff preview iframe
   const { hostname, protocol } = window.location;
-  if (hostname === "localhost" || hostname === "127.0.0.1") return;
   if (protocol !== "https:" && protocol !== "http:") return;
-  if (hostname.endsWith(".vly.sh")) return; // dev deployment, not published
+  const DEV_HOST_SUFFIXES = [".vly.sh", ".freebuff.dev"];
+  const isDevHost =
+    hostname === "localhost" ||
+    hostname === "127.0.0.1" ||
+    DEV_HOST_SUFFIXES.some((s) => hostname.endsWith(s));
+
   window.addEventListener("load", () => {
+    if (isDevHost) {
+      // Purge any worker + caches previously installed on this dev URL.
+      navigator.serviceWorker
+        .getRegistrations()
+        .then((regs) => regs.forEach((r) => r.unregister()))
+        .catch(() => {});
+      if ("caches" in window) {
+        caches
+          .keys()
+          .then((keys) => keys.forEach((k) => caches.delete(k)))
+          .catch(() => {});
+      }
+      return;
+    }
     navigator.serviceWorker
       .register(`${import.meta.env.BASE_URL}sw.js`)
       .catch(() => {

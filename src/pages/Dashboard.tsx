@@ -1,5 +1,7 @@
 import { useState, useCallback, useMemo, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
+import { useNavigate } from "react-router";
+import { getAuthState, setGuest, logout, type AuthState } from "@/lib/auth";
 import {
   Square,
   Download,
@@ -19,6 +21,8 @@ import {
   Wifi,
   WifiOff,
   Laptop,
+  UserRound,
+  LogOut,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { FileUploader } from "@/components/translator/FileUploader";
@@ -101,6 +105,11 @@ export default function Dashboard() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [telegramOpen, setTelegramOpen] = useState(false);
 
+  // Auth gate (fully client-side)
+  const [auth, setAuth] = useState<AuthState | null>(null);
+  const [authReady, setAuthReady] = useState(false);
+  const navigate = useNavigate();
+
   // Session restored from IndexedDB
   const [isRestored, setIsRestored] = useState(false);
   const [restoredTotal, setRestoredTotal] = useState(0);
@@ -145,6 +154,42 @@ export default function Dashboard() {
   const isDoneClean = isComplete && failedCount === 0;
   const canStart = rawText.length > 0 && keys.length > 0 && !hasSession && !isStarting;
   const hasTranslatedChunks = completedCount > 0;
+
+  // ─── Auth check: on mount and whenever the tab regains focus ────
+  // (focus re-check picks up users who finish email login in another tab)
+  useEffect(() => {
+    let cancelled = false;
+    const check = async () => {
+      try {
+        const state = await getAuthState();
+        if (!cancelled) setAuth(state);
+      } catch {
+        if (!cancelled) setAuth({ mode: "out", email: null });
+      } finally {
+        if (!cancelled) setAuthReady(true);
+      }
+    };
+    check();
+    const onVisible = () => {
+      if (document.visibilityState === "visible") check();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      cancelled = true;
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, []);
+
+  const handleGuestEntry = useCallback(() => {
+    setGuest(true);
+    setAuth({ mode: "guest", email: null });
+  }, []);
+
+  const handleSignOut = useCallback(async () => {
+    await logout();
+    setAuth({ mode: "out", email: null });
+    navigate("/auth?returnTo=%2Fdashboard", { replace: true });
+  }, [navigate]);
 
   // ─── Restore session from IndexedDB on mount ────────────────────
   useEffect(() => {
@@ -593,6 +638,46 @@ export default function Dashboard() {
     void runPipeline(reset);
   }, [scanResults, chunkProgress, runPipeline]);
 
+  // ─── Auth gate ──────────────────────────────────────────────────
+  if (!authReady || auth === null) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-stone-950">
+        <div className="animate-pulse text-sm text-stone-500">Checking session…</div>
+      </div>
+    );
+  }
+  if (auth.mode === "out") {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-stone-950 px-4">
+        <motion.div
+          initial={{ opacity: 0, y: 16 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.35 }}
+          className="w-full max-w-sm rounded-3xl border border-stone-700/50 bg-stone-900/80 backdrop-blur-xl p-7 text-center shadow-2xl shadow-black/40"
+        >
+          <p className="text-sm font-semibold text-stone-100">Sign in to continue</p>
+          <p className="mt-1.5 text-xs text-stone-400 leading-relaxed">
+            Your API keys and translation progress stay on this device.
+          </p>
+          <div className="mt-5 space-y-2.5">
+            <button
+              onClick={() => navigate("/auth?returnTo=%2Fdashboard")}
+              className="w-full rounded-xl bg-gradient-to-r from-amber-500 to-amber-600 px-5 py-2.5 text-sm font-semibold text-stone-950 shadow-lg shadow-amber-500/25 hover:shadow-amber-500/40 transition-all cursor-pointer"
+            >
+              Sign in with Email
+            </button>
+            <button
+              onClick={handleGuestEntry}
+              className="w-full rounded-xl border border-stone-700 bg-stone-800/60 px-5 py-2.5 text-sm font-medium text-stone-300 hover:bg-stone-800 hover:text-stone-100 transition-all cursor-pointer"
+            >
+              Continue as Guest
+            </button>
+          </div>
+        </motion.div>
+      </div>
+    );
+  }
+
   // ─── Render ─────────────────────────────────────────────────────
   return (
     <div className="min-h-screen bg-stone-950">
@@ -625,6 +710,26 @@ export default function Dashboard() {
               <Laptop className="h-3 w-3" />
               Runs in your browser
             </div>
+            {auth.mode === "user" && auth.email && (
+              <div className="hidden sm:flex items-center gap-1.5 rounded-lg bg-stone-800 border border-stone-700 px-3 py-1.5 text-[10px] text-stone-300">
+                <UserRound className="h-3 w-3 text-amber-400" />
+                {auth.email}
+              </div>
+            )}
+            {auth.mode === "guest" && (
+              <div className="hidden sm:flex items-center gap-1.5 rounded-lg bg-stone-800 border border-stone-700 px-3 py-1.5 text-[10px] text-stone-400">
+                <UserRound className="h-3 w-3" />
+                Guest
+              </div>
+            )}
+            <button
+              onClick={handleSignOut}
+              title="Sign out"
+              className="flex items-center gap-1.5 rounded-lg border border-stone-700 bg-stone-800 px-2.5 py-1.5 text-[10px] font-medium text-stone-400 hover:text-stone-100 hover:bg-stone-700 transition-all cursor-pointer"
+            >
+              <LogOut className="h-3 w-3" />
+              <span className="hidden sm:inline">Sign out</span>
+            </button>
             {isRunning && (
               <div className="flex items-center gap-1.5 rounded-lg bg-green-500/10 border border-green-500/20 px-3 py-1.5 text-[10px] text-green-400">
                 <Loader2 className="h-3 w-3 animate-spin" />

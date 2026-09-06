@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Clearing cached app…</title>
+    <style>
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: #1c1917;
+        color: #d6d3d1;
+        font-family: system-ui, -apple-system, sans-serif;
+        text-align: center;
+      }
+      .spinner {
+        width: 28px;
+        height: 28px;
+        margin: 0 auto 14px;
+        border: 3px solid #f59e0b33;
+        border-top-color: #f59e0b;
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+      }
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div>
+      <div class="spinner"></div>
+      <p style="margin: 0; font-size: 14px">Clearing cached app…</p>
+      <p style="margin: 6px 0 0; font-size: 12px; color: #78716c">
+        You'll be redirected automatically. Your keys and saved progress are not touched.
+      </p>
+    </div>
+    <script>
+      // No modules here on purpose: this page must work even when the app's
+      // JS is being served stale by an old service worker.
+      (function () {
+        function done() {
+          setTimeout(function () {
+            location.replace("/");
+          }, 1200);
+        }
+        try {
+          if (navigator.serviceWorker) {
+            navigator.serviceWorker
+              .getRegistrations()
+              .then(function (regs) {
+                return Promise.all(regs.map(function (r) { return r.unregister(); }));
+              })
+              .catch(function () {});
+          }
+          if (window.caches) {
+            caches
+              .keys()
+              .then(function (keys) {
+                return Promise.all(keys.map(function (k) { return caches.delete(k); }));
+              })
+              .catch(function () {});
+          }
+        } catch (e) {
+          /* ignore */
+        }
+        done();
+      })();
+    </script>
+  </body>
+</html>
