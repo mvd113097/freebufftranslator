@@ -36,6 +36,12 @@ export interface PipelineOptions {
   model: string;
   /** Chunk IDs to skip (already completed in a prior session). */
   skipChunkIds?: number[];
+  /** Called when a chunk finishes (success or hard failure) — used to persist progress. */
+  onChunkComplete?: (chunk: ChunkProgress) => void | Promise<void>;
+  /** Called when a chunk permanently fails after all retries. */
+  onChunkFailed?: (chunk: ChunkProgress) => void;
+  /** Called with the real model id whenever a request is dispatched. */
+  onModelUsed?: (model: string) => void;
 }
 
 const DEFAULT_OPTIONS: PipelineOptions = {
@@ -232,6 +238,175 @@ export class TranslationPipeline {
     if (skipSet.size > 0) {
       return chunksToProcess.map((c) => results[c.id]);
     }
+    return results;
+  }
+
+  /**
+   * Resume a previous session: takes existing chunk progress (e.g. restored
+   * from IndexedDB), keeps completed chunks as-is, and re-runs everything else.
+   */
+  async resume(
+    existing: ChunkProgress[],
+    keys: string[],
+    options?: Partial<PipelineOptions>,
+  ): Promise<string[]> {
+    if (options) {
+      this.options = { ...DEFAULT_OPTIONS, ...options };
+    }
+
+    this.keys = keys.filter((k) => k.trim().length > 0);
+    if (this.keys.length === 0) {
+      throw new Error("No valid API keys provided");
+    }
+
+    this.rateLimiter.reset();
+    this.abortController = new AbortController();
+    this.startTime = Date.now();
+    this.lastRequestTime = 0;
+
+    // Adopt existing chunk state
+    this.chunkProgress = existing.map((c) => ({ ...c }));
+
+    // Retryable = anything not completed
+    const retryable = new Set(
+      this.chunkProgress
+        .filter((c) => c.status !== "completed")
+        .map((c) => c.id),
+    );
+
+    // Reset transient state on chunks we're about to re-run
+    for (const c of this.chunkProgress) {
+      if (retryable.has(c.id)) {
+        c.status = "pending";
+        c.translatedText = "";
+        c.tokensReceived = 0;
+        c.error = undefined;
+        c.retries = 0;
+      }
+    }
+
+    this.reportProgress();
+
+    const results: string[] = this.chunkProgress.map((c) =>
+      c.status === "completed" ? c.translatedText : "",
+    );
+
+    const processChunk = async (chunk: ChunkProgress) => {
+      if (!retryable.has(chunk.id)) return;
+      chunk.status = "translating";
+      this.reportProgress();
+
+      let attempt = 0;
+
+      while (attempt <= this.options.maxRetries) {
+        try {
+          if (this.abortController?.signal.aborted) {
+            // Paused — keep as pending so Resume picks it up cleanly
+            chunk.status = "pending";
+            return;
+          }
+
+          const currentKey = await this.rateLimiter.waitForAvailableKey(this.keys);
+
+          const timeSinceLastRequest = Date.now() - this.lastRequestTime;
+          if (timeSinceLastRequest < 500) {
+            const waitMs = 500 - timeSinceLastRequest;
+            await new Promise((r) => setTimeout(r, waitMs));
+          }
+          this.lastRequestTime = Date.now();
+
+          this.options.onModelUsed?.(this.options.model);
+
+          console.log(`[Pipeline] Chunk ${chunk.id + 1} sending request (attempt ${attempt + 1})...`);
+
+          const translated = await translateChunk(
+            chunk.originalText,
+            currentKey,
+            (token) => {
+              chunk.tokensReceived++;
+              chunk.translatedText += token;
+              this.onToken?.(chunk.id, token);
+              this.reportProgress();
+            },
+            this.abortController?.signal,
+            this.options.model,
+            (realModel) => this.options.onModelUsed?.(realModel),
+          );
+
+          results[chunk.id] = translated;
+          chunk.translatedText = translated;
+          chunk.status = "completed";
+          console.log(`[Pipeline] Chunk ${chunk.id + 1} completed (${translated.length} chars)`);
+          this.reportProgress();
+          await this.options.onChunkComplete?.({ ...chunk });
+          return;
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : String(err);
+          console.error(`[Pipeline] Chunk ${chunk.id + 1} attempt ${attempt + 1} failed:`, message);
+
+          if (message === "Translation aborted") {
+            // User paused — leave pending for resume, keep any partial text
+            chunk.status = "pending";
+            return;
+          }
+
+          if (attempt < this.options.maxRetries) {
+            attempt++;
+            chunk.retries = attempt;
+            chunk.error = message;
+            const isRateLimit = message.includes("RATE_LIMITED") || message.includes("429");
+            const backoffMs = isRateLimit
+              ? 10000
+              : Math.min(3000 * Math.pow(2, attempt - 1), 15000);
+            console.log(`[Pipeline] Retrying in ${backoffMs / 1000}s...`);
+            this.reportProgress();
+            await new Promise((r) => setTimeout(r, backoffMs));
+          } else {
+            chunk.status = "failed";
+            chunk.error = message;
+            this.reportProgress();
+            await this.options.onChunkComplete?.({ ...chunk });
+            this.options.onChunkFailed?.({ ...chunk });
+            return;
+          }
+        }
+      }
+    };
+
+    const chunksToProcess = this.chunkProgress.filter((c) => retryable.has(c.id));
+    if (this.options.concurrency <= 1) {
+      for (const chunk of chunksToProcess) {
+        if (this.abortController?.signal.aborted) break;
+        await processChunk(chunk);
+      }
+    } else {
+      const pendingChunks = [...chunksToProcess];
+      const activePromises: Promise<void>[] = [];
+
+      const runNext = async (): Promise<void> => {
+        if (pendingChunks.length === 0) return;
+        if (this.abortController?.signal.aborted) return;
+        const chunk = pendingChunks.shift()!;
+        await processChunk(chunk);
+        return runNext();
+      };
+
+      const workerCount = Math.min(this.options.concurrency, chunksToProcess.length);
+      for (let i = 0; i < workerCount; i++) {
+        const delay = i * 500;
+        activePromises.push(
+          new Promise<void>((resolve) => {
+            setTimeout(async () => {
+              await runNext();
+              resolve();
+            }, delay);
+          }),
+        );
+      }
+
+      await Promise.allSettled(activePromises);
+    }
+
     return results;
   }
 
