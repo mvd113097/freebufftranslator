@@ -1,22 +1,33 @@
 import { Toaster } from "@/components/ui/sonner";
-import React, { StrictMode, Suspense } from "react";
+import React, { StrictMode, Suspense, lazy, useEffect } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter, Route, Routes, useLocation } from "react-router";
 import "./index.css";
 
-import Landing from "./pages/Landing.tsx";
-import AuthPage from "./pages/Auth.tsx";
-import Dashboard from "./pages/Dashboard.tsx";
-import NotFound from "./pages/NotFound.tsx";
+// Route code-splitting: every route lazy-loads so the initial bundle stays
+// small (this is what makes cold loads on mobile networks fast).
+const Landing = lazy(() => import("./pages/Landing.tsx"));
+const AuthPage = lazy(() => import("./pages/Auth.tsx"));
+const Dashboard = lazy(() => import("./pages/Dashboard.tsx"));
+const NotFound = lazy(() => import("./pages/NotFound.tsx"));
 
 // Dev-only VlyToolbar (element picker + screenshot capture). Lazy-loaded so the
 // heavy @zumer/snapdom code is never downloaded by published visitors.
-const VlyToolbar = React.lazy(
+const VlyToolbar = lazy(
   () =>
     import("../vly-toolbar-readonly.tsx").then((m) => ({
       default: m.VlyToolbar,
     }))
 );
+
+// Shared loading fallback shown while any lazy route chunk downloads.
+function RouteLoading() {
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-stone-950">
+      <div className="animate-pulse text-sm text-stone-500">Loading…</div>
+    </div>
+  );
+}
 
 // Dev-only auth page keeps its own state — no backend session needed since the
 // pipeline is fully client-side. The /auth route just passes through.
@@ -81,8 +92,6 @@ class RootErrorBoundary extends React.Component<
   }
 }
 
-import { useEffect } from "react";
-
 /**
  * Register the data-saving service worker ONLY on the published site
  * (top-level page, https, not a dev/preview host). Preview iframes and
@@ -119,18 +128,20 @@ if (!rootEl) {
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <RootErrorBoundary>
-      <Suspense fallback={null}>
+      <Suspense fallback={<RouteLoading />}>
         <VlyToolbar />
       </Suspense>
-      <BrowserRouter>
-        <RouteSyncer />
-        <Routes>
-          <Route path="/" element={<Landing />} />
-          <Route path="/auth" element={<AuthPage />} />
-          <Route path="/dashboard" element={<Dashboard />} />
-          <Route path="*" element={<NotFound />} />
-        </Routes>
-      </BrowserRouter>
+      <Suspense fallback={<RouteLoading />}>
+        <BrowserRouter>
+          <RouteSyncer />
+          <Routes>
+            <Route path="/" element={<Landing />} />
+            <Route path="/auth" element={<AuthPage />} />
+            <Route path="/dashboard" element={<Dashboard />} />
+            <Route path="*" element={<NotFound />} />
+          </Routes>
+        </BrowserRouter>
+      </Suspense>
       <Toaster />
     </RootErrorBoundary>
   </StrictMode>,
