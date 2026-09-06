@@ -110,13 +110,11 @@ function Auth({ redirectAfterAuth }: AuthProps = {}) {
   };
 
   return (
-    <div className="min-h-screen flex flex-col">
-
-      
+    <div className="min-h-screen flex flex-col bg-stone-950">
       {/* Auth Content */}
       <div className="flex-1 flex items-center justify-center">
         <div className="flex items-center justify-center h-full flex-col">
-        <Card className="min-w-[350px] pb-0 border shadow-md">
+        <Card className="min-w-[350px] pb-0 border-stone-700 bg-stone-900 shadow-md">
           {step === "signIn" ? (
             <>
               <CardHeader className="text-center">
@@ -296,9 +294,5 @@ function Auth({ redirectAfterAuth }: AuthProps = {}) {
 }
 
 export default function AuthPage(props: AuthProps) {
-  return (
-    <Suspense>
-      <Auth {...props} />
-    </Suspense>
-  );
+  return <Auth {...props} />;
 }
