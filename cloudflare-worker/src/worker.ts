@@ -417,6 +417,133 @@ async function translateOneChunk(
   }
 }
 
+// ─── Cron tick (shared by the cron trigger and the /api/cron-debug endpoint) ──
+
+export async function runCronTick(env: Env): Promise<void> {
+  const maxChunks = Math.max(1, Math.min(40, Number(env.MAX_CHUNKS_PER_RUN ?? "15")));
+
+  // ── Stuck-chunk recovery ─────────────────────────────────────────────
+  // A previous cron invocation can be killed mid-translation (worker EV
+  // eviction, runtime limit). Chunks left in 'translating' would otherwise
+  // stay there forever — only 'pending' chunks ever get claimed again.
+  // Requeue anything stuck for longer than 10 minutes.
+  await env.DB
+    .prepare(
+      `UPDATE chunks SET status = 'pending', updated_at = ?
+       WHERE status = 'translating' AND updated_at < ?`,
+    )
+    .bind(Date.now(), Date.now() - 10 * 60 * 1000)
+    .run();
+
+  // ── Claim a batch of pending chunks ─────────────────────────────────
+  // Mark them 'translating' immediately so overlapping crons don't double-work.
+  const claimResult = await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE chunks SET status = 'translating', updated_at = ?
+       WHERE id IN (
+         SELECT c.id FROM chunks c
+         JOIN jobs j ON j.id = c.job_id
+         WHERE c.status = 'pending' AND j.status = 'active'
+         ORDER BY j.created_at, c.seq
+         LIMIT ?
+       )`,
+    ).bind(Date.now(), maxChunks),
+  ]);
+  const claimed = claimResult[0]?.meta?.changes ?? 0;
+  if (claimed === 0) return;
+
+  const { results: claimedRows } = await env.DB
+    .prepare(
+      `SELECT c.*, j.model, j.keys_json, j.telegram_bot_token, j.telegram_chat_id,
+              j.telegram_on_error, j.telegram_on_progress, j.last_milestone
+       FROM chunks c JOIN jobs j ON j.id = c.job_id
+       WHERE c.status = 'translating' AND j.status = 'active'
+       ORDER BY j.created_at, c.seq
+       LIMIT ?`,
+    )
+    .bind(maxChunks)
+    .all<ChunkRow & { model: string; keys_json: string; telegram_bot_token: string | null; telegram_chat_id: string | null; telegram_on_error: number; telegram_on_progress: number }>();
+
+  if (!claimedRows || claimedRows.length === 0) return;
+
+  // Group by job to reuse key rotators
+  const rotators = new Map<string, KeyRotator>();
+  for (const row of claimedRows) {
+    if (!rotators.has(row.job_id)) {
+      let keys: string[] = [];
+      try {
+        keys = JSON.parse(row.keys_json) as string[];
+      } catch {
+        keys = [];
+      }
+      rotators.set(row.job_id, new KeyRotator(keys));
+    }
+  }
+
+  // ── Translate claimed chunks IN PARALLEL ─────────────────────────
+  // A real chunk can take minutes; sequential loops exceed a single cron
+  // invocation's budget and deadlock the job. All claims finish together or
+  // get requeued together, so the batch stays small and predictable.
+  await Promise.all(
+    claimedRows.map((chunk) =>
+      translateOneChunk(env, chunk, rotators.get(chunk.job_id)!),
+    ),
+  );
+
+  // Milestone + completion Telegram notices per affected job
+  const jobIds = [...new Set(claimedRows.map((r) => r.job_id))];
+  for (const jobId of jobIds) {
+    const job = await getJob(env.DB, jobId);
+    if (!job || job.status !== "active") continue;
+    const stats = await jobStats(env.DB, jobId);
+    if (stats.total === 0) continue;
+
+    const pct = Math.floor(((stats.completed + stats.failed) / stats.total) * 100);
+    const milestone = Math.floor(pct / 25) * 25;
+
+    if (
+      job.telegram_bot_token &&
+      job.telegram_chat_id &&
+      job.telegram_on_progress &&
+      milestone >= job.last_milestone + 25 &&
+      milestone > 0 &&
+      milestone < 100
+    ) {
+      await env.DB
+        .prepare(`UPDATE jobs SET last_milestone = ? WHERE id = ?`)
+        .bind(milestone, jobId)
+        .run();
+      void sendTelegram(
+        job.telegram_bot_token,
+        job.telegram_chat_id,
+        `📖 <b>Translation ${milestone}%</b>\n${stats.completed}/${stats.total} chunks done`,
+      );
+    }
+
+    // Completion check
+    if (stats.completed + stats.failed >= stats.total) {
+      await env.DB
+        .prepare(`UPDATE jobs SET status = 'done', updated_at = ? WHERE id = ?`)
+        .bind(Date.now(), jobId)
+        .run();
+      if (job.telegram_bot_token && job.telegram_chat_id && job.telegram_on_complete) {
+        const words = await env.DB
+          .prepare(
+            `SELECT SUM(length(translated_text) - length(replace(translated_text, ' ', '')) + 1) AS words
+             FROM chunks WHERE job_id = ? AND status = 'completed'`,
+          )
+          .bind(jobId)
+          .first<{ words: number | null }>();
+        void sendTelegram(
+          job.telegram_bot_token,
+          job.telegram_chat_id,
+          `🎉 <b>Cloud translation complete!</b>\n${stats.completed} chunks • ~${(words?.words ?? 0).toLocaleString()} words\nOpen the app to download your .epub`,
+        );
+      }
+    }
+  }
+}
+
 // ─── HTTP API ───────────────────────────────────────────────────────────────
 
 export default {
@@ -484,137 +611,10 @@ export default {
           chunks.push({ text: rec.text });
         }
       }
-      if (keys.length === 0) return json({ error: "At least one API key required" }, 400);
-      if (chunks.length === 0) return json({ error: "No chunks provided" }, 400);
-      if (chunks.length > 5000) return json({ error: "Too many chunks (max 5000)" }, 400);
-
-      const jobIdNew = newId();
-      const now = Date.now();
-      const model = body.model || "openrouter/free";
-
-      const stmts = [
-        env.DB.prepare(
-          `INSERT INTO jobs (id, file_name, model, keys_json, status, created_at, updated_at,
-             telegram_bot_token, telegram_chat_id, telegram_on_start, telegram_on_progress,
-             telegram_on_error, telegram_on_complete, last_milestone)
-           VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
-        ).bind(
-          jobIdNew,
-          (body.fileName || "novel.txt").slice(0, 200),
-          model,
-          JSON.stringify(keys),
-          now,
-          now,
-          body.telegramBotToken || null,
-          body.telegramChatId || null,
-          body.telegramNotifyOnStart === false ? 0 : 1,
-          body.telegramNotifyOnProgress === false ? 0 : 1,
-          body.telegramNotifyOnError === false ? 0 : 1,
-          body.telegramNotifyOnComplete === false ? 0 : 1,
-        ),
-      ];
-      for (let i = 0; i < chunks.length; i++) {
-        stmts.push(
-          env.DB.prepare(
-            `INSERT INTO chunks (job_id, seq, text, status, attempts, updated_at)
-             VALUES (?, ?, ?, 'pending', 0, ?)`,
-          ).bind(jobIdNew, i, chunks[i].text, now),
-        );
-      }
-      // D1 batches up to ~100 statements; chunk into groups
-      for (let i = 0; i < stmts.length; i += 80) {
-        await env.DB.batch(stmts.slice(i, i + 80));
-      }
-
-      const t = {
-        bot: body.telegramBotToken || null,
-        chat: body.telegramChatId || null,
-        onStart: body.telegramNotifyOnStart !== false,
-      };
-      if (t.bot && t.chat && t.onStart) {
-        void sendTelegram(
-          t.bot,
-          t.chat,
-          `🚀 <b>Cloud translation started</b>\n📚 ${(body.fileName || "novel").slice(0, 60)}\n📦 ${chunks.length} chunks\n🌐 Running on Cloudflare — browser can close now`,
-        );
-      }
-
-      return json({ jobId: jobIdNew, totalChunks: chunks.length }, 201);
-    }
-
-    if (jobId) {
-      const job = await getJob(env.DB, jobId);
-      if (!job) return json({ error: "Job not found" }, 404);
-
-      // GET /api/jobs/:id — status
-      if (request.method === "GET" && !action) {
-        const stats = await jobStats(env.DB, jobId);
-        const activeModelRow = await env.DB
-          .prepare(
-            `SELECT model_used FROM chunks WHERE job_id = ? AND model_used IS NOT NULL
-             ORDER BY updated_at DESC LIMIT 1`,
-          )
-          .bind(jobId)
-          .first<{ model_used: string }>();
-        return json({
-          jobId,
-          fileName: job.file_name,
-          status: job.status,
-          createdAt: job.created_at,
-          totalChunks: stats.total,
-          completedChunks: stats.completed,
-          failedChunks: stats.failed,
-          activeModel: activeModelRow?.model_used ?? null,
-          updatedAt: job.updated_at,
-        });
-      }
-
-      // GET /api/jobs/:id/chunks?after=N — translated chunks completed since seq N
-      // (data-saving: the client only pulls newly-finished chunks, not the whole book)
-      if (request.method === "GET" && action === "chunks") {
-        const after = Number(url.searchParams.get("after") ?? "-1");
-        const { results } = await env.DB
-          .prepare(
-            `SELECT seq, translated_text FROM chunks
-             WHERE job_id = ? AND status = 'completed' AND seq > ? ORDER BY seq`,
-          )
-          .bind(jobId, Number.isFinite(after) ? after : -1)
-          .all<{ seq: number; translated_text: string }>();
-        return json({
-          chunks: (results ?? []).map((r) => ({ id: r.seq, text: r.translated_text })),
-        });
-      }
-
-      // POST /api/jobs/:id/cancel
-      if (request.method === "POST" && action === "cancel") {
-        await env.DB
-          .prepare(`UPDATE jobs SET status = 'cancelled', updated_at = ? WHERE id = ?`)
-          .bind(Date.now(), jobId)
-          .run();
-        return json({ ok: true });
-      }
-
-      // DELETE /api/jobs/:id
-      if (request.method === "DELETE" && !action) {
-        await env.DB.batch([
-          env.DB.prepare(`DELETE FROM chunks WHERE job_id = ?`).bind(jobId),
-          env.DB.prepare(`DELETE FROM jobs WHERE id = ?`).bind(jobId),
-        ]);
-        return json({ ok: true });
-      }
-    }
-
-    return json({ error: "Method not allowed" }, 405);
-  },
-
-  // ─── Cron: translate a bounded batch of pending chunks ──────────────────
-
-  async scheduled(_event: ScheduledController, env: Env): Promise<void> {
-    const maxChunks = Math.max(1, Math.min(40, Number(env.MAX_CHUNKS_PER_RUN ?? "15")));
-
-    // ── Stuck-chunk recovery ─────────────────────────────────────────────
-    // A previous cron invocation can be killed mid-translation (worker EV
-    // eviction, runtime limit). Chunks left in 'translating' would otherwise
+      if (keys.length === 0) return json({ error: "At least one API key r  async scheduled(_event: ScheduledController, env: Env): Promise<void> {
+    // The real work lives in runCronTick (shared with /api/cron-debug).
+    await runCronTick(env);
+  },// eviction, runtime limit). Chunks left in 'translating' would otherwise
     // stay there forever — only 'pending' chunks ever get claimed again.
     // Requeue anything stuck for longer than 10 minutes.
     await env.DB
@@ -635,7 +635,7 @@ export default {
            JOIN jobs j ON j.id = c.job_id
            WHERE c.status = 'pending' AND j.status = 'active'
            ORDER BY j.created_at, c.seq
-           LIMIT ??
+           LIMIT ?
          )`,
       ).bind(Date.now(), maxChunks),
     ]);
@@ -649,7 +649,7 @@ export default {
          FROM chunks c JOIN jobs j ON j.id = c.job_id
          WHERE c.status = 'translating' AND j.status = 'active'
          ORDER BY j.created_at, c.seq
-         LIMIT ??`,
+         LIMIT ?`,
       )
       .bind(maxChunks)
       .all<ChunkRow & { model: string; keys_json: string; telegram_bot_token: string | null; telegram_chat_id: string | null; telegram_on_error: number; telegram_on_progress: number }>();
