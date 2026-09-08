@@ -88,24 +88,30 @@ async function translateNonStreaming(
   apiKey: string,
   model: string,
 ): Promise<string> {
-  const response = await fetch(OPENROUTER_BASE, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model,
-      messages: [
-        { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content: text },
-      ],
-      temperature: 0.7,
-      top_p: 0.95,
-      max_tokens: 65536,
-      stream: false,
-    }),
-  });
+  // 8-minute cap: free models can legitimately take minutes on a big chunk,
+  // but a truly stalled connection must never hang the cron tick forever.
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 8 * 60 * 1000);
+  try {
+    const response = await fetch(OPENROUTER_BASE, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model,
+        messages: [
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user", content: text },
+        ],
+        temperature: 0.7,
+        top_p: 0.95,
+        max_tokens: 65536,
+        stream: false,
+      }),
+      signal: controller.signal,
+    });
 
   if (response.status === 429) throw new Error("RATE_LIMITED");
 
@@ -125,20 +131,28 @@ async function translateNonStreaming(
     throw new Error(`API error ${response.status}: ${body.slice(0, 200)}`);
   }
 
-  const data = await response.json() as {
-    error?: unknown;
-    choices?: { message?: { content?: string } }[];
-  };
-  if (data.error) {
-    const errMsg =
-      typeof data.error === "string" ? data.error : (data.error as { message?: string }).message || JSON.stringify(data.error);
-    throw new Error(`MODEL_ERROR: ${errMsg.slice(0, 200)}`);
+    const data = await response.json() as {
+      error?: unknown;
+      choices?: { message?: { content?: string } }[];
+    };
+    if (data.error) {
+      const errMsg =
+        typeof data.error === "string" ? data.error : (data.error as { message?: string }).message || JSON.stringify(data.error);
+      throw new Error(`MODEL_ERROR: ${errMsg.slice(0, 200)}`);
+    }
+    const content = data.choices?.[0]?.message?.content;
+    if (typeof content !== "string" || !content.trim()) {
+      throw new Error("Model returned empty translation");
+    }
+    return normalizeParagraphs(content);
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new Error("API_TIMEOUT: Request timed out after 8 minutes");
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeoutId);
   }
-  const content = data.choices?.[0]?.message?.content;
-  if (typeof content !== "string" || !content.trim()) {
-    throw new Error("Model returned empty translation");
-  }
-  return normalizeParagraphs(content);
 }
 
 /**
@@ -329,6 +343,78 @@ async function gunzipBase64(b64: string): Promise<string> {
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
   const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
   return new Response(stream).text();
+}
+
+/**
+ * Translate one claimed chunk (up to 3 attempts) and commit the result to D1.
+ * Called in parallel for the whole claimed batch by the cron handler.
+ */
+async function translateOneChunk(
+  env: Env,
+  chunk: ChunkRow & {
+    model: string;
+    keys_json: string;
+    telegram_bot_token: string | null;
+    telegram_chat_id: string | null;
+    telegram_on_error: number;
+    telegram_on_progress: number;
+  },
+  rotator: KeyRotator,
+): Promise<void> {
+  let translated: string | null = null;
+  let modelUsed: string | null = null;
+  let lastError = "";
+  let keyRejected = false;
+
+  for (let attempt = 1; attempt <= 3 && !translated; attempt++) {
+    try {
+      const key = await rotator.next();
+      rotator.markUsed(key);
+      const result = await translateChunk(chunk.text, key, chunk.model);
+      translated = result.text;
+      modelUsed = result.modelUsed;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      lastError = msg;
+      if (msg.startsWith("KEY_REJECTED")) {
+        keyRejected = true;
+        break; // don't burn attempts on a dead key this tick
+      }
+      if (msg.includes("RATE_LIMITED")) {
+        await new Promise((r) => setTimeout(r, 8000));
+      } else {
+        await new Promise((r) => setTimeout(r, 3000));
+      }
+    }
+  }
+
+  if (translated) {
+    await env.DB
+      .prepare(
+        `UPDATE chunks SET status = 'completed', translated_text = ?, model_used = ?,
+         error = NULL, attempts = attempts + 1, updated_at = ? WHERE id = ?`,
+      )
+      .bind(translated, modelUsed, Date.now(), chunk.id)
+      .run();
+  } else {
+    // Back to pending so the next cron tick retries (unless key dead —
+    // mark failed so the user can act on it).
+    await env.DB
+      .prepare(
+        `UPDATE chunks SET status = ?, error = ?, attempts = attempts + 1, updated_at = ?
+         WHERE id = ?`,
+      )
+      .bind(keyRejected ? "failed" : "pending", lastError.slice(0, 300), Date.now(), chunk.id)
+      .run();
+
+    if (keyRejected && chunk.telegram_bot_token && chunk.telegram_chat_id && chunk.telegram_on_error) {
+      void sendTelegram(
+        chunk.telegram_bot_token,
+        chunk.telegram_chat_id,
+        `❌ <b>Chunk ${chunk.seq + 1} failed</b>\n<code>${lastError.slice(0, 150)}</code>`,
+      );
+    }
+  }
 }
 
 // ─── HTTP API ───────────────────────────────────────────────────────────────
@@ -526,7 +612,20 @@ export default {
   async scheduled(_event: ScheduledController, env: Env): Promise<void> {
     const maxChunks = Math.max(1, Math.min(40, Number(env.MAX_CHUNKS_PER_RUN ?? "15")));
 
-    // Claim pending chunks from active jobs (oldest job first, seq order).
+    // ── Stuck-chunk recovery ─────────────────────────────────────────────
+    // A previous cron invocation can be killed mid-translation (worker EV
+    // eviction, runtime limit). Chunks left in 'translating' would otherwise
+    // stay there forever — only 'pending' chunks ever get claimed again.
+    // Requeue anything stuck for longer than 10 minutes.
+    await env.DB
+      .prepare(
+        `UPDATE chunks SET status = 'pending', updated_at = ?
+         WHERE status = 'translating' AND updated_at < ?`,
+      )
+      .bind(Date.now(), Date.now() - 10 * 60 * 1000)
+      .run();
+
+    // ── Claim a batch of pending chunks ─────────────────────────────────
     // Mark them 'translating' immediately so overlapping crons don't double-work.
     const claimResult = await env.DB.batch([
       env.DB.prepare(
@@ -571,64 +670,15 @@ export default {
       }
     }
 
-    for (const chunk of claimedRows) {
-      const rotator = rotators.get(chunk.job_id)!;
-      let translated: string | null = null;
-      let modelUsed: string | null = null;
-      let lastError = "";
-      let keyRejected = false;
-
-      // Up to 3 attempts per chunk within this tick
-      for (let attempt = 1; attempt <= 3 && !translated; attempt++) {
-        try {
-          const key = await rotator.next();
-          rotator.markUsed(key);
-          const result = await translateChunk(chunk.text, key, chunk.model);
-          translated = result.text;
-          modelUsed = result.modelUsed;
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          lastError = msg;
-          if (msg.startsWith("KEY_REJECTED")) {
-            keyRejected = true;
-            break; // don't burn attempts on a dead key this tick
-          }
-          if (msg.includes("RATE_LIMITED")) {
-            await new Promise((r) => setTimeout(r, 8000));
-          } else {
-            await new Promise((r) => setTimeout(r, 3000));
-          }
-        }
-      }
-
-      if (translated) {
-        await env.DB
-          .prepare(
-            `UPDATE chunks SET status = 'completed', translated_text = ?, model_used = ?,
-             error = NULL, attempts = attempts + 1, updated_at = ? WHERE id = ?`,
-          )
-          .bind(translated, modelUsed, Date.now(), chunk.id)
-          .run();
-      } else {
-        // Back to pending so the next cron tick retries (unless key dead —
-        // mark failed so the user can act on it).
-        await env.DB
-          .prepare(
-            `UPDATE chunks SET status = ?, error = ?, attempts = attempts + 1, updated_at = ?
-             WHERE id = ?`,
-          )
-          .bind(keyRejected ? "failed" : "pending", lastError.slice(0, 300), Date.now(), chunk.id)
-          .run();
-
-        if (keyRejected && chunk.telegram_bot_token && chunk.telegram_chat_id && chunk.telegram_on_error) {
-          void sendTelegram(
-            chunk.telegram_bot_token,
-            chunk.telegram_chat_id,
-            `❌ <b>Chunk ${chunk.seq + 1} failed</b>\n<code>${lastError.slice(0, 150)}</code>`,
-          );
-        }
-      }
-    }
+    // ── Translate claimed chunks IN PARALLEL ─────────────────────────
+    // A real chunk can take minutes; sequential loops exceed a single cron
+    // invocation's budget and deadlock the job. All claims finish together or
+    // get requeued together, so the batch stays small and predictable.
+    await Promise.all(
+      claimedRows.map((chunk) =>
+        translateOneChunk(env, chunk, rotators.get(chunk.job_id)!),
+      ),
+    );
 
     // Milestone + completion Telegram notices per affected job
     const jobIds = [...new Set(claimedRows.map((r) => r.job_id))];
