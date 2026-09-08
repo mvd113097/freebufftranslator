@@ -352,6 +352,7 @@ export default function Dashboard() {
             onError: (message) => console.error("[Cloud]", message),
           });
           cloudRunnerRef.current = runner;
+          await runner.attach();
           setIsRunning(true);
           runningRef.current = true;
         } else {
@@ -957,6 +958,16 @@ export default function Dashboard() {
     setCloudJobId("");
   }, [isRunning]);
 
+  // ─── Clear model cache ─────────────────────────────────────────
+  const clearModelCache = useCallback(() => {
+    try {
+      localStorage.removeItem(MODEL_AVAIL_KEY);
+      setModelAvailability({});
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
   // ─── Test all keys ──────────────────────────────────────────────
   const testAllKeys = useCallback(async () => {
     try {
@@ -1415,17 +1426,28 @@ export default function Dashboard() {
             <div className="rounded-2xl border border-stone-700/50 bg-stone-900/80 backdrop-blur-xl p-4 shadow-sm">
               <div className="flex items-center justify-between mb-2">
                 <label className="text-xs font-semibold text-stone-200">Model</label>
-                <button
-                  onClick={checkModels}
-                  disabled={checkingModels || keys.length === 0 || isRunning || isStarting}
-                  className="flex items-center gap-1 rounded-lg border border-stone-700 bg-stone-800/60 px-2 py-1 text-[10px] font-medium text-stone-400 hover:text-stone-200 hover:bg-stone-700 transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                >
-                  {checkingModels ? (
-                    <><Loader2 className="h-3 w-3 animate-spin" /> Checking...</>
-                  ) : (
-                    "Check Live"
+                <div className="flex items-center gap-1.5">
+                  {Object.keys(modelAvailability).length > 0 && (
+                    <button
+                      onClick={clearModelCache}
+                      disabled={isRunning || isStarting}
+                      className="flex items-center gap-1 rounded-lg border border-stone-700 bg-stone-800/60 px-2 py-1 text-[10px] font-medium text-stone-500 hover:text-stone-300 hover:bg-stone-700 transition-all cursor-pointer disabled:opacity-40"
+                    >
+                      Clear
+                    </button>
                   )}
-                </button>
+                  <button
+                    onClick={checkModels}
+                    disabled={checkingModels || keys.length === 0 || isRunning || isStarting}
+                    className="flex items-center gap-1 rounded-lg border border-stone-700 bg-stone-800/60 px-2 py-1 text-[10px] font-medium text-stone-400 hover:text-stone-200 hover:bg-stone-700 transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    {checkingModels ? (
+                      <><Loader2 className="h-3 w-3 animate-spin" /> Checking...</>
+                    ) : (
+                      "Check Live"
+                    )}
+                  </button>
+                </div>
               </div>
               <select
                 value={selectedModel}

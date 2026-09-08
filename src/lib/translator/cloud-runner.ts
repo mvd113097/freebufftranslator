@@ -94,6 +94,16 @@ export class CloudRunner {
     return this.jobId;
   }
 
+  /**
+   * Re-attach to an existing job after page reload.
+   * Fetches current status immediately, then starts polling.
+   */
+  async attach(): Promise<void> {
+    this.startTime = 0;
+    this.stopped = false;
+    this.startPolling();
+  }
+
   private startPolling() {
     const poll = async () => {
       if (this.stopped) return;
