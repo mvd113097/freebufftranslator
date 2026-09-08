@@ -13,6 +13,7 @@ import {
   ChevronDown,
   Settings2,
   Server,
+  Cloud,
   Loader2,
   Pause,
   Play,
@@ -48,6 +49,14 @@ import {
   type PipelineProgress,
 } from "@/lib/translator/pipeline";
 import { translateChunkSimple } from "@/lib/translator/gemini-api";
+import { CloudRunner } from "@/lib/translator/cloud-runner";
+import {
+  getWorkerUrl,
+  setWorkerUrl,
+  getWorkerSecret,
+  setWorkerSecret,
+} from "@/lib/translator/cloud-client";
+import { CloudSettings } from "@/components/translator/CloudSettings";
 
 const MODEL_OPTIONS = [
   { value: "openrouter/free", label: "Auto Free (best available)" },
@@ -107,6 +116,14 @@ export default function Dashboard() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [telegramOpen, setTelegramOpen] = useState(false);
 
+  // Cloud mode (translation continues on a Cloudflare worker with the browser closed)
+  const [translationMode, setTranslationMode] = useState<"client" | "cloud">(
+    () => loadSettings().translationMode,
+  );
+  const [workerUrl, setWorkerUrlState] = useState(() => getWorkerUrl());
+  const [workerSecret, setWorkerSecretState] = useState(() => getWorkerSecret());
+  const [cloudJobId, setCloudJobId] = useState(() => loadSettings().cloudJobId);
+
   // Auth gate (fully client-side)
   const [auth, setAuth] = useState<AuthState | null>(null);
   const [authReady, setAuthReady] = useState(false);
@@ -132,6 +149,8 @@ export default function Dashboard() {
   );
 
   const pipelineRef = useRef<TranslationPipeline | null>(null);
+  const cloudRunnerRef = useRef<CloudRunner | null>(null);
+  const cloudChunkTextRef = useRef<Map<number, string>>(new Map());
   const progressRef = useRef<PipelineProgress | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const wakeLockRef = useRef<WakeLockSentinel | null>(null);
@@ -157,7 +176,12 @@ export default function Dashboard() {
   const hasSession = totalChunks > 0;
   const isComplete = hasSession && completedCount + failedCount === totalChunks;
   const isDoneClean = isComplete && failedCount === 0;
-  const canStart = rawText.length > 0 && keys.length > 0 && !hasSession && !isStarting;
+  const canStart =
+    rawText.length > 0 &&
+    keys.length > 0 &&
+    !hasSession &&
+    !isStarting &&
+    (translationMode === "client" || workerUrl.trim().length > 0);
   const hasTranslatedChunks = completedCount > 0;
 
   // ─── Auth check: on mount and whenever the tab regains focus ────
@@ -225,6 +249,69 @@ export default function Dashboard() {
     };
   }, []);
 
+  // ─── Re-attach to a running cloud job after reload ──────────────
+  useEffect(() => {
+    const savedJobId = loadSettings().cloudJobId;
+    if (!savedJobId) return;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const { getCloudStatus } = await import("@/lib/translator/cloud-client");
+        const status = await getCloudStatus(savedJobId);
+        if (cancelled) return;
+
+        // Only re-attach if the job is still alive on the worker
+        if (status.status === "active") {
+          const runner = new CloudRunner(savedJobId, {
+            onProgress: (p) => {
+              setProgress(p);
+              setActiveModel(p.activeModel);
+              setElapsedMs(p.elapsedMs);
+            },
+            onChunkCompleted: async (chunkId, text) => {
+              setChunkProgress((prev) =>
+                prev.map((c) =>
+                  c.id === chunkId
+                    ? { ...c, status: "completed" as const, translatedText: text }
+                    : c,
+                ),
+              );
+              try {
+                await updateChunk({
+                  id: chunkId,
+                  text: cloudChunkTextRef.current.get(chunkId) ?? "",
+                  status: "completed",
+                  translatedText: text,
+                });
+              } catch {
+                /* ignore */
+              }
+            },
+            onDone: (failedChunks) => {
+              setIsRunning(false);
+              setIsPaused(failedChunks > 0);
+              cloudRunnerRef.current = null;
+            },
+            onError: (message) => console.error("[Cloud]", message),
+          });
+          cloudRunnerRef.current = runner;
+          setIsRunning(true);
+          runningRef.current = true;
+        } else {
+          // Job finished while we were away — refresh chunks from IndexedDB
+          setCloudJobId("");
+        }
+      } catch {
+        // Worker unreachable — keep local state, user can retry later
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // ─── Persist settings to localStorage on change ─────────────────
   useEffect(() => {
     saveSettings({
@@ -240,8 +327,10 @@ export default function Dashboard() {
       telegramNotifyOnComplete,
       telegramNotifyOnPause,
       telegramStatusInterval,
+      translationMode,
+      cloudJobId,
     });
-  }, [keys, selectedModel, chunkSize, concurrency, telegramBotToken, telegramChatId, telegramNotifyOnStart, telegramNotifyOnProgress, telegramNotifyOnError, telegramNotifyOnComplete, telegramNotifyOnPause, telegramStatusInterval]);
+  }, [keys, selectedModel, chunkSize, concurrency, telegramBotToken, telegramChatId, telegramNotifyOnStart, telegramNotifyOnProgress, telegramNotifyOnError, telegramNotifyOnComplete, telegramNotifyOnPause, telegramStatusInterval, translationMode, cloudJobId]);
 
   // ─── Online/offline awareness ───────────────────────────────────
   useEffect(() => {
@@ -336,6 +425,16 @@ export default function Dashboard() {
   const handleFileContent = useCallback((content: string, name: string) => {
     setRawText(content);
     setFileName(name);
+  }, []);
+
+  // ─── Cloud worker settings persistence ──────────────────────────
+  const handleWorkerUrlChange = useCallback((v: string) => {
+    setWorkerUrlState(v);
+    setWorkerUrl(v);
+  }, []);
+  const handleWorkerSecretChange = useCallback((v: string) => {
+    setWorkerSecretState(v);
+    setWorkerSecret(v);
   }, []);
 
   // ─── Persist one chunk to IndexedDB ─────────────────────────────
@@ -510,16 +609,91 @@ export default function Dashboard() {
 
       setUploadPhase(null);
       setIsStarting(false);
-      setIsRestored(false);
-
-      // Telegram start notice
+      setIsRestored(false);      // Telegram start notice (client mode only — the worker sends its own)
       const prefs = telegramPrefsRef.current;
-      if (prefs.onStart && prefs.botToken && prefs.chatId) {
+      if (translationMode === "client" && prefs.onStart && prefs.botToken && prefs.chatId) {
         sendTelegramDirect(
           prefs.botToken,
           prefs.chatId,
           `🚀 <b>Translation started</b>\n📚 ${fileName || "novel"}\n📦 ${chunks.length} chunks • ${(rawText.length / 1000).toFixed(0)}k chars\n⚙️ Model: ${selectedModel === "openrouter/free" ? "Auto Free" : selectedModel}`,
         );
+      }
+
+      // ── Cloud mode: upload to the worker and poll — browser can close ──
+      if (translationMode === "cloud") {
+        setUploadPhase("chunking"); // reuse phase label while uploading
+        try {
+          const runner = await CloudRunner.start(
+            {
+              fileName: fileName || "novel.txt",
+              model: selectedModel,
+              keys,
+              chunks: chunks.map((c) => ({ id: c.id, text: c.text })),
+              telegramBotToken: telegramBotToken || undefined,
+              telegramChatId: telegramChatId || undefined,
+              telegramNotifyOnStart: telegramNotifyOnStart,
+              telegramNotifyOnProgress: telegramNotifyOnProgress,
+              telegramNotifyOnError: telegramNotifyOnError,
+              telegramNotifyOnComplete: telegramNotifyOnComplete,
+            },
+            {
+              onProgress: (p) => {
+                setProgress(p);
+                setActiveModel(p.activeModel);
+                setElapsedMs(p.elapsedMs);
+              },
+              onChunkCompleted: async (chunkId, text) => {
+                setChunkProgress((prev) =>
+                  prev.map((c) =>
+                    c.id === chunkId
+                      ? { ...c, status: "completed" as const, translatedText: text }
+                      : c,
+                  ),
+                );
+                try {
+                  await updateChunk({
+                    id: chunkId,
+                    text: cloudChunkTextRef.current.get(chunkId) ?? "",
+                    status: "completed",
+                    translatedText: text,
+                  });
+                } catch {
+                  /* ignore */
+                }
+              },
+              onDone: (failedChunks) => {
+                setIsRunning(false);
+                setIsPaused(false);
+                if (failedChunks > 0) setIsPaused(true);
+                setCloudJobId(runner.getJobId());
+                cloudRunnerRef.current = null;
+              },
+              onError: (message) => {
+                console.error("[Cloud]", message);
+              },
+            },
+          );
+          cloudRunnerRef.current = runner;
+          setCloudJobId(runner.getJobId());
+          // Keep the original text around for IndexedDB persistence
+          cloudChunkTextRef.current = new Map(chunks.map((c) => [c.id, c.text]));
+          setUploadPhase(null);
+          setIsStarting(false);
+          setIsRunning(true);
+          setIsPaused(false);
+          runningRef.current = true;
+          return;
+        } catch (err) {
+          console.error("Cloud start failed:", err);
+          alert(
+            "Cloud start failed: " +
+              (err instanceof Error ? err.message : String(err)) +
+              "\n\nCheck the worker URL in Settings → Cloud Mode.",
+          );
+          setIsStarting(false);
+          setUploadPhase(null);
+          return;
+        }
       }
 
       await acquireWakeLock();
@@ -530,7 +704,7 @@ export default function Dashboard() {
       setIsStarting(false);
       setUploadPhase(null);
     }
-  }, [canStart, rawText, fileName, chunkSize, keys.length, selectedModel, runPipeline, acquireWakeLock]);
+  }, [canStart, rawText, fileName, chunkSize, keys, selectedModel, runPipeline, acquireWakeLock, translationMode, telegramBotToken, telegramChatId, telegramNotifyOnStart, telegramNotifyOnProgress, telegramNotifyOnError, telegramNotifyOnComplete]);
 
   // ─── Resume after pause/reload ──────────────────────────────────
   const resumeTranslation = useCallback(async () => {
@@ -546,6 +720,14 @@ export default function Dashboard() {
 
   // ─── Pause ──────────────────────────────────────────────────────
   const pauseTranslation = useCallback(() => {
+    if (translationMode === "cloud") {
+      void cloudRunnerRef.current?.cancel();
+      cloudRunnerRef.current = null;
+      setIsRunning(false);
+      setIsPaused(true);
+      runningRef.current = false;
+      return;
+    }
     pipelineRef.current?.abort();
     const prefs = telegramPrefsRef.current;
     if (prefs.onPause && prefs.botToken && prefs.chatId) {
@@ -560,6 +742,14 @@ export default function Dashboard() {
 
   // ─── Stop (hard stop, same as pause for client-side) ────────────
   const stopTranslation = useCallback(() => {
+    if (translationMode === "cloud") {
+      void cloudRunnerRef.current?.cancel();
+      cloudRunnerRef.current = null;
+      setIsRunning(false);
+      setIsPaused(true);
+      runningRef.current = false;
+      return;
+    }
     pipelineRef.current?.abort();
     setIsRunning(false);
     setIsPaused(true);
@@ -573,7 +763,7 @@ export default function Dashboard() {
         `⏹️ <b>Translation stopped</b>${p ? `\n📖 ${p.completedChunks}/${p.totalChunks} chunks (${p.overallPercent}%)` : ""}\nProgress is saved — Resume anytime.`,
       );
     }
-  }, [releaseWakeLock]);
+  }, [releaseWakeLock, translationMode]);
 
   // ─── Download helper ────────────────────────────────────────────
   const downloadTranslation = useCallback(
@@ -611,6 +801,8 @@ export default function Dashboard() {
   const handleReset = useCallback(async () => {
     if (isRunning) {
       pipelineRef.current?.abort();
+      void cloudRunnerRef.current?.cancel();
+      cloudRunnerRef.current = null;
     }
     try {
       await clearSession();
@@ -628,6 +820,7 @@ export default function Dashboard() {
     setRawText("");
     setFileName("");
     setShowScanResults(false);
+    setCloudJobId("");
   }, [isRunning]);
 
   // ─── Test all keys ──────────────────────────────────────────────
@@ -936,6 +1129,74 @@ export default function Dashboard() {
             transition={{ delay: 0.15 }}
             className="space-y-4"
           >
+            {/* Translation Mode: Client vs Cloud */}
+            <div className="rounded-2xl border border-stone-700/50 bg-stone-900/80 backdrop-blur-xl p-4 shadow-sm">
+              <label className="text-xs font-semibold text-stone-200 block mb-2.5">
+                Where translation runs
+              </label>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  onClick={() => setTranslationMode("client")}
+                  disabled={isRunning || isStarting || hasSession}
+                  className={cn(
+                    "flex flex-col items-start gap-1 rounded-xl border px-3 py-2.5 text-left transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed",
+                    translationMode === "client"
+                      ? "border-amber-500/50 bg-amber-500/10"
+                      : "border-stone-700 bg-stone-800/60 hover:bg-stone-800",
+                  )}
+                >
+                  <Laptop className={cn("h-4 w-4", translationMode === "client" ? "text-amber-400" : "text-stone-500")} />
+                  <span className={cn("text-xs font-semibold", translationMode === "client" ? "text-amber-300" : "text-stone-300")}>
+                    This Browser
+                  </span>
+                  <span className="text-[10px] text-stone-500 leading-tight">
+                    Zero data use. Tab must stay open.
+                  </span>
+                </button>
+                <button
+                  onClick={() => setTranslationMode("cloud")}
+                  disabled={isRunning || isStarting || hasSession}
+                  className={cn(
+                    "flex flex-col items-start gap-1 rounded-xl border px-3 py-2.5 text-left transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed",
+                    translationMode === "cloud"
+                      ? "border-sky-500/50 bg-sky-500/10"
+                      : "border-stone-700 bg-stone-800/60 hover:bg-stone-800",
+                  )}
+                >
+                  <Cloud className={cn("h-4 w-4", translationMode === "cloud" ? "text-sky-400" : "text-stone-500")} />
+                  <span className={cn("text-xs font-semibold", translationMode === "cloud" ? "text-sky-300" : "text-stone-300")}>
+                    Cloud (Cloudflare)
+                  </span>
+                  <span className="text-[10px] text-stone-500 leading-tight">
+                    Browser can close. Uses ~2-4 MB data.
+                  </span>
+                </button>
+              </div>
+              {translationMode === "cloud" && workerUrl.trim() === "" && (
+                <p className="mt-2.5 flex items-center gap-1.5 text-[10px] text-orange-300">
+                  <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+                  Add your worker URL below to start cloud jobs.
+                </p>
+              )}
+            </div>
+
+            {/* Cloud worker settings (only in cloud mode) */}
+            {translationMode === "cloud" && (
+              <div className="rounded-2xl border border-stone-700/50 bg-stone-900/80 backdrop-blur-xl p-4 shadow-sm">
+                <div className="flex items-center gap-2 mb-3">
+                  <Cloud className="h-4 w-4 text-sky-400" />
+                  <span className="text-sm font-semibold text-stone-200">Cloud Worker</span>
+                </div>
+                <CloudSettings
+                  workerUrl={workerUrl}
+                  workerSecret={workerSecret}
+                  onWorkerUrlChange={handleWorkerUrlChange}
+                  onWorkerSecretChange={handleWorkerSecretChange}
+                  disabled={isRunning || isStarting}
+                />
+              </div>
+            )}
+
             {/* Model Selector */}
             <div className="rounded-2xl border border-stone-700/50 bg-stone-900/80 backdrop-blur-xl p-4 shadow-sm">
               <label className="text-xs font-semibold text-stone-200 block mb-2">Model</label>

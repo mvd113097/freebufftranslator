@@ -24,6 +24,10 @@ export interface AppSettings {
   telegramNotifyOnComplete: boolean;
   telegramNotifyOnPause: boolean;
   telegramStatusInterval: number;
+  /** "client" = translate in this browser tab; "cloud" = Cloudflare worker (browser can close). */
+  translationMode: "client" | "cloud";
+  /** Active cloud job id (empty when none). */
+  cloudJobId: string;
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -39,6 +43,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   telegramNotifyOnComplete: true,
   telegramNotifyOnPause: true,
   telegramStatusInterval: 0,
+  translationMode: "client",
+  cloudJobId: "",
 };
 
 export function loadSettings(): AppSettings {
