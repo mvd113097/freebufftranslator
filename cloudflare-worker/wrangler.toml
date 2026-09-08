@@ -1,0 +1,24 @@
+name = "novel-translator-worker"
+main = "src/worker.ts"
+compatibility_date = "2024-11-01"
+
+# Free plan: one cron trigger allowed at a 5-minute cadence. Each invocation
+# processes a bounded batch of chunks, so it never runs long.
+[triggers]
+crons = ["*/5 * * * *"]
+
+# D1 database. Create it first with:
+#   npx wrangler d1 create novel-translator
+# then paste the returned database_id below.
+[[d1_databases]]
+binding = "DB"
+database_name = "novel-translator"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+
+[vars]
+# Max chunks processed per cron invocation (keeps us under the free plan's
+# 10ms CPU budget by committing each chunk to D1 immediately).
+MAX_CHUNKS_PER_RUN = "15"
+# Optional: require this header value on every job API call (a shared secret
+# so strangers can't create jobs on your worker). Leave empty to disable.
+JOB_SECRET = ""
