@@ -107,10 +107,15 @@ function saveModelAvailability(data: Record<string, "live" | "dead">): void {
 /** Returns the live models in quality order (first = best). Falls back to the static list. */
 function getLiveModelOrder(): string[] {
   const avail = loadModelAvailability();
+  // Include both live and rate-limited models (rate-limited are alive but quota-exceeded)
   const live = MODEL_OPTIONS
+    .filter((m) => m.value !== "openrouter/free" && (avail[m.value] === "live" || avail[m.value] === "dead"))
+    .map((m) => m.value);
+  // Prefer live-only if available, otherwise include all
+  const liveOnly = MODEL_OPTIONS
     .filter((m) => m.value !== "openrouter/free" && avail[m.value] === "live")
     .map((m) => m.value);
-  return live.length > 0 ? live : MODEL_OPTIONS.filter((m) => m.value !== "openrouter/free").map((m) => m.value);
+  return liveOnly.length > 0 ? liveOnly : (live.length > 0 ? live : MODEL_OPTIONS.filter((m) => m.value !== "openrouter/free").map((m) => m.value));
 }
 
 // ─── Telegram direct-from-browser ──────────────────────────────────
@@ -157,10 +162,10 @@ export default function Dashboard() {
   const [showScanResults, setShowScanResults] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [telegramOpen, setTelegramOpen] = useState(false);
-  const [modelAvailability, setModelAvailability] = useState<Record<string, "live" | "dead" | "checking">>(() => {
+  const [modelAvailability, setModelAvailability] = useState<Record<string, "live" | "dead" | "rate-limited" | "checking">>(() => {
     const saved = loadModelAvailability();
     // Convert saved {live|dead} to the UI state format
-    const init: Record<string, "live" | "dead" | "checking"> = {};
+    const init: Record<string, "live" | "dead" | "rate-limited" | "checking"> = {};
     for (const [k, v] of Object.entries(saved)) init[k] = v;
     return init;
   });
@@ -406,7 +411,7 @@ export default function Dashboard() {
     } else {
       // Background refresh — non-blocking
       const key = keys[0];
-      const results: Record<string, "live" | "dead" | "checking"> = {};
+      const results: Record<string, "live" | "dead" | "rate-limited" | "checking"> = {};
       for (const [k, v] of Object.entries(saved)) results[k] = v;
       (async () => {
         for (const m of MODEL_OPTIONS) {
@@ -414,14 +419,21 @@ export default function Dashboard() {
           try {
             await translateChunkSimple("Hi", key, m.value);
             results[m.value] = "live";
-          } catch {
-            results[m.value] = "dead";
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            if (msg.includes("RATE_LIMITED") || msg.includes("429") || msg.includes("rate limit")) {
+              results[m.value] = "rate-limited";
+            } else {
+              results[m.value] = "dead";
+            }
           }
           setModelAvailability({ ...results });
         }
         const toSave: Record<string, "live" | "dead"> = {};
         for (const [k, v] of Object.entries(results)) {
-          if (v === "live" || v === "dead") toSave[k] = v;
+          if (v === "live") toSave[k] = "live";
+          if (v === "dead") toSave[k] = "dead";
+          // Rate-limited models are NOT saved as dead
         }
         saveModelAvailability(toSave);
       })();
@@ -1016,7 +1028,7 @@ export default function Dashboard() {
     }
     setCheckingModels(true);
     const key = keys[0];
-    const results: Record<string, "live" | "dead" | "checking"> = {};
+    const results: Record<string, "live" | "dead" | "rate-limited" | "checking"> = {};
     // Initialize all as checking
     for (const m of MODEL_OPTIONS) {
       if (m.value === "openrouter/free") continue;
@@ -1030,15 +1042,23 @@ export default function Dashboard() {
       try {
         await translateChunkSimple("Hi", key, m.value);
         results[m.value] = "live";
-      } catch {
-        results[m.value] = "dead";
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg.includes("RATE_LIMITED") || msg.includes("429") || msg.includes("rate limit")) {
+          results[m.value] = "rate-limited";
+        } else {
+          results[m.value] = "dead";
+        }
       }
       setModelAvailability({ ...results });
     }
     // Persist results to localStorage
     const toSave: Record<string, "live" | "dead"> = {};
     for (const [k, v] of Object.entries(results)) {
-      if (v === "live" || v === "dead") toSave[k] = v;
+      if (v === "live") toSave[k] = "live";
+      // Only mark as dead if truly dead (not rate-limited)
+      if (v === "dead") toSave[k] = "dead";
+      // Rate-limited models are NOT saved as dead — they're alive but quota-exceeded
     }
     saveModelAvailability(toSave);
     setCheckingModels(false);
@@ -1455,7 +1475,15 @@ export default function Dashboard() {
               >
                 {MODEL_OPTIONS.map((m) => {
                   const status = modelAvailability[m.value];
-                  const indicator = status === "live" ? " [LIVE]" : status === "dead" ? " [DEAD]" : status === "checking" ? " ..." : "";
+                  const indicator = status === "live"
+                    ? " [LIVE]"
+                    : status === "dead"
+                      ? " [DEAD]"
+                      : status === "rate-limited"
+                        ? " [LIMITED]"
+                        : status === "checking"
+                          ? " ..."
+                          : "";
                   return (
                     <option key={m.value} value={m.value}>
                       {m.label}{indicator}
@@ -1478,6 +1506,14 @@ export default function Dashboard() {
                   Auto Free tries the best available model per chunk and automatically
                   skips dead or rate-limited models, falling back to the next one.
                 </p>
+              )}
+              {/* Rate limit warning */}
+              {Object.values(modelAvailability).includes("rate-limited") && (
+                <div className="mt-2.5 rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-3 py-2">
+                  <p className="text-[10px] text-yellow-300 leading-snug">
+                    <strong>Daily limit hit!</strong> OpenRouter free tier allows ~50 requests/day. Add $10 credit to unlock 1000 free requests/day. Models marked [RATE LIMITED] are alive but quota-exceeded.
+                  </p>
+                </div>
               )}
             </div>
 
