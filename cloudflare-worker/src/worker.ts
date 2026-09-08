@@ -40,14 +40,19 @@ Paragraph three text here.
 
 // ─── Auto-free model cascade (tried in order when a specific model isn't set) ──
 const AUTO_FREE_MODELS = [
-  "minimax/minimax-m3:free",
-  "qwen/qwen3.6-plus:free",
-  "qwen/qwen3-235b-a22b-07-25:free",
+  "google/gemma-4-26b-a4b-it:free",
+  "google/gemma-4-31b-it:free",
   "nvidia/nemotron-3-ultra-550b-a55b:free",
   "nvidia/nemotron-3.5-lightning:free",
-  "z-ai/glm-5.2:free",
+  "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+  "inclusionai/ling-3.0-flash-sante:free",
   "inclusionai/ling-3.0-flash-fin:free",
   "thinkingmachines/inkling:free",
+  "thinkingmachines/inkling-small:free",
+  "poolside/laguna-s-2.1:free",
+  "poolside/laguna-xs-2.1:free",
+  "liquid/lfm-2.5-2.6b:free",
+  "dots-studio/dots-3-note-preview:free",
 ];
 
 const BATCH_SIZE = 2; // chunks to translate per cron tick
@@ -174,89 +179,76 @@ function resolveModel(requested: string): string {
 
 // ─── Translation via OpenRouter ───────────────────────────────────────────────
 
+async function callOpenRouter(
+  text: string,
+  key: string,
+  model: string,
+): Promise<{ content: string; model: string }> {
+  const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${key}`,
+      "Content-Type": "application/json",
+      "HTTP-Referer": "https://novel-translator.app",
+      "X-Title": "Novel Translator",
+    },
+    body: JSON.stringify({
+      model,
+      messages: [
+        { role: "system", content: SYSTEM_PROMPT },
+        { role: "user", content: text },
+      ],
+      max_tokens: 32000,
+      temperature: 0.3,
+    }),
+  });
+
+  if (res.status === 429) throw new Error("RATE_LIMITED");
+
+  if (!res.ok) {
+    const errBody = await res.text().catch(() => "");
+    throw new Error(`HTTP ${res.status}: ${errBody.slice(0, 300)}`);
+  }
+
+  const data = (await res.json()) as { choices?: { message?: { content?: string } }[] };
+  const content = data?.choices?.[0]?.message?.content;
+  if (!content) throw new Error("Empty response from model");
+  return { content: content.trim(), model };
+}
+
 async function translateChunk(
   text: string,
   keys: string[],
   requestedModel: string,
 ): Promise<{ translated: string; model: string }> {
   if (!keys.length) throw new Error("No API keys provided");
-  // Round-robin through keys with stagger
-  const model = resolveModel(requestedModel);
+
+  // Build the model list: try the requested model first, then cascade through auto-free
+  const models = requestedModel === "openrouter/free"
+    ? [resolveModel(requestedModel), ...AUTO_FREE_MODELS.filter((m) => m !== resolveModel(requestedModel))]
+    : [requestedModel];
+
   let lastError: Error | null = null;
 
-  for (let attempt = 0; attempt < keys.length * MAX_RETRIES; attempt++) {
-    const key = keys[attempt % keys.length];
-    try {
-      const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${key}`,
-          "Content-Type": "application/json",
-          "HTTP-Referer": "https://novel-translator.app",
-          "X-Title": "Novel Translator",
-        },
-        body: JSON.stringify({
-          model,
-          messages: [
-            { role: "system", content: SYSTEM_PROMPT },
-            { role: "user", content: text },
-          ],
-          max_tokens: 32000,
-          temperature: 0.3,
-        }),
-      });
-
-      if (res.status === 429) {
-        // Rate-limited — back off and try next key
-        await new Promise((r) => setTimeout(r, STAGGER_MS));
-        continue;
-      }
-
-      if (!res.ok) {
-        const errBody = await res.text().catch(() => "");
-        // If model not found or other error, try next key/model
-        if (res.status === 404 || res.status === 400) {
-          // Model might be unavailable, try a different auto model
-          if (requestedModel === "openrouter/free") {
-            const fallback = AUTO_FREE_MODELS.filter((m) => m !== model);
-            const newModel = fallback[Math.floor(Math.random() * fallback.length)] ?? model;
-            const retryRes = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-              method: "POST",
-              headers: {
-                Authorization: `Bearer ${key}`,
-                "Content-Type": "application/json",
-                "HTTP-Referer": "https://novel-translator.app",
-                "X-Title": "Novel Translator",
-              },
-              body: JSON.stringify({
-                model: newModel,
-                messages: [
-                  { role: "system", content: SYSTEM_PROMPT },
-                  { role: "user", content: text },
-                ],
-                max_tokens: 32000,
-                temperature: 0.3,
-              }),
-            });
-            if (retryRes.ok) {
-              const data = (await retryRes.json()) as { choices?: { message?: { content?: string } }[] };
-              const content = data?.choices?.[0]?.message?.content;
-              if (content) return { translated: content.trim(), model: newModel };
-            }
-          }
-          throw new Error(`Model error ${res.status}: ${errBody.slice(0, 200)}`);
+  for (const model of models) {
+    for (let ki = 0; ki < keys.length; ki++) {
+      const key = keys[ki];
+      try {
+        const result = await callOpenRouter(text, key, model);
+        return { translated: result.content, model: result.model };
+      } catch (err) {
+        lastError = err instanceof Error ? err : new Error(String(err));
+        if (lastError.message === "RATE_LIMITED") {
+          await new Promise((r) => setTimeout(r, STAGGER_MS));
+          continue; // try next key
         }
-        throw new Error(`HTTP ${res.status}: ${errBody.slice(0, 200)}`);
+        // 404/400 — model unavailable, try next model
+        if (lastError.message.includes("404") || lastError.message.includes("400")) {
+          break; // move to next model
+        }
+        // Other error — try next key with stagger
+        await new Promise((r) => setTimeout(r, STAGGER_MS));
       }
-
-      const data = (await res.json()) as { choices?: { message?: { content?: string } }[] };
-      const content = data?.choices?.[0]?.message?.content;
-      if (!content) throw new Error("Empty response from model");
-      return { translated: content.trim(), model };
-    } catch (err) {
-      lastError = err instanceof Error ? err : new Error(String(err));
-      // Stagger before retry
-      await new Promise((r) => setTimeout(r, STAGGER_MS));
     }
   }
 
@@ -408,6 +400,17 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
     });
   }
 
+  // ── Manual cron trigger (for testing) ─────────────────────────
+  if (path === "/api/run-cron" && method === "POST") {
+    if (!verifySecret(request, env)) return json({ error: "Invalid secret" }, 403);
+    try {
+      await handleCron(env);
+      return json({ ok: true, message: "Cron executed manually" });
+    } catch (err) {
+      return json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+  }
+
   // ── Cancel job ────────────────────────────────────────────────
   const cancelMatch = path.match(/^\/api\/jobs\/([a-f0-9-]+)\/cancel$/);
   if (cancelMatch && method === "POST") {
@@ -530,13 +533,16 @@ async function handleCron(env: Env): Promise<void> {
           .run();
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : String(err);
-        const attempts = 1; // simplified
+        // Get current attempts from the chunk
+        const chunkRow = await env.DB.prepare(`SELECT attempts FROM chunks WHERE id = ?`).bind(chunkId).first();
+        const currentAttempts = (chunkRow?.attempts as number) ?? 0;
+        const newAttempts = currentAttempts + 1;
 
-        if (attempts >= MAX_RETRIES) {
+        if (newAttempts >= MAX_RETRIES) {
           await env.DB.prepare(
-            `UPDATE chunks SET status = 'failed', error = ?, attempts = attempts + 1, updated_at = ? WHERE id = ?`
+            `UPDATE chunks SET status = 'failed', error = ?, attempts = ?, updated_at = ? WHERE id = ?`
           )
-            .bind(errMsg.slice(0, 1000), Date.now(), chunkId)
+            .bind(errMsg.slice(0, 1000), newAttempts, Date.now(), chunkId)
             .run();
           failedDelta++;
 
@@ -551,9 +557,9 @@ async function handleCron(env: Env): Promise<void> {
         } else {
           // Retry — set back to pending
           await env.DB.prepare(
-            `UPDATE chunks SET status = 'pending', attempts = attempts + 1, updated_at = ? WHERE id = ?`
+            `UPDATE chunks SET status = 'pending', attempts = ?, error = ?, updated_at = ? WHERE id = ?`
           )
-            .bind(Date.now(), chunkId)
+            .bind(newAttempts, errMsg.slice(0, 500), Date.now(), chunkId)
             .run();
         }
       }

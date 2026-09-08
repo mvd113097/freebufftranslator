@@ -14,6 +14,10 @@ CREATE TABLE jobs (
   status TEXT NOT NULL DEFAULT 'active',       -- active | done | cancelled
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
+  completed_count INTEGER NOT NULL DEFAULT 0,
+  failed_count INTEGER NOT NULL DEFAULT 0,
+  last_heartbeat INTEGER NOT NULL DEFAULT 0,
+  active_model TEXT,
   telegram_bot_token TEXT,
   telegram_chat_id TEXT,
   telegram_on_start INTEGER NOT NULL DEFAULT 1,
@@ -33,6 +37,7 @@ CREATE TABLE chunks (
   model_used TEXT,
   error TEXT,
   attempts INTEGER NOT NULL DEFAULT 0,
+  processing_since INTEGER,
   updated_at INTEGER NOT NULL
 );
 

@@ -60,15 +60,15 @@ import { CloudSettings } from "@/components/translator/CloudSettings";
 
 const MODEL_OPTIONS = [
   { value: "openrouter/free", label: "Auto Free (best available)" },
-  { value: "minimax/minimax-m3:free", label: "MiniMax M3 (free, 1M ctx)" },
-  { value: "qwen/qwen3.6-plus:free", label: "Qwen 3.6 Plus (free, 1M ctx)" },
-  { value: "z-ai/glm-5.2:free", label: "GLM 5.2 (free, 256K ctx)" },
-  { value: "qwen/qwen3-235b-a22b-07-25:free", label: "Qwen 3 235B (free, 1M ctx)" },
+  { value: "google/gemma-4-31b-it:free", label: "Gemma 4 31B (free, Google)" },
+  { value: "google/gemma-4-26b-a4b-it:free", label: "Gemma 4 26B (free, Google)" },
   { value: "nvidia/nemotron-3-ultra-550b-a55b:free", label: "Nemotron 3 Ultra (free, 1M ctx)" },
-  { value: "nvidia/nemotron-3.5-lightning:free", label: "Nemotron 3.5 Lightning (free, 1M ctx)" },
-  { value: "inclusionai/ling-3.0-flash-fin:free", label: "Ling 3.0 Flash (free, 262K ctx)" },
-  { value: "nvidia/nemotron-3-super-120b-a12b:free", label: "Nemotron 3 Super (free, 262K ctx)" },
-  { value: "thinkingmachines/inkling:free", label: "Thinking Machines Inkling (free, 1M ctx)" },
+  { value: "nvidia/nemotron-3.5-lightning:free", label: "Nemotron 3.5 Lightning (free)" },
+  { value: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free", label: "Nemotron 3 Nano (free)" },
+  { value: "inclusionai/ling-3.0-flash-sante:free", label: "Ling 3.0 Flash Sante (free)" },
+  { value: "inclusionai/ling-3.0-flash-fin:free", label: "Ling 3.0 Flash Fin (free)" },
+  { value: "thinkingmachines/inkling:free", label: "Thinking Machines Inkling (free)" },
+  { value: "poolside/laguna-s-2.1:free", label: "Laguna S 2.1 (free)" },
 ];
 
 // ─── Telegram direct-from-browser ──────────────────────────────────
