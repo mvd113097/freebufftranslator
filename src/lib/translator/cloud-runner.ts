@@ -35,11 +35,12 @@ export class CloudRunner {
   private startTime = Date.now();
   private activeModel: string | undefined;
   private onChunkCompleted?: (chunkId: number, text: string) => void | Promise<void>;
+  private readonly jobId: string;
+  private readonly callbacks: CloudRunnerCallbacks;
 
-  constructor(
-    private jobId: string,
-    private callbacks: CloudRunnerCallbacks,
-  ) {
+  constructor(jobId: string, callbacks: CloudRunnerCallbacks) {
+    this.jobId = jobId;
+    this.callbacks = callbacks;
     this.onChunkCompleted = callbacks.onChunkCompleted;
   }
 

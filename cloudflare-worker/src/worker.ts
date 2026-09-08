@@ -174,17 +174,21 @@ class KeyRotator {
   private lastUse = new Map<string, number>();
   private readonly minIntervalMs: number;
 
-  constructor(private keys: string[], requestsPerMinutePerKey = 5) {
+  private readonly keys: string[];
+
+  constructor(keys: string[], requestsPerMinutePerKey = 5) {
+    this.keys = keys;
     this.minIntervalMs = Math.ceil(60000 / requestsPerMinutePerKey);
   }
 
   /** Returns the next available key, waiting if all are cooling down. */
   async next(): Promise<string> {
     if (this.keys.length === 0) throw new Error("No API keys configured for this job");
+    let bestKey = this.keys[0];
     for (let attempt = 0; attempt < 2; attempt++) {
       const now = Date.now();
       let oldestWait = Infinity;
-      let bestKey = this.keys[0];
+      bestKey = this.keys[0];
       for (const key of this.keys) {
         const last = this.lastUse.get(key) ?? 0;
         const wait = this.minIntervalMs - (now - last);
@@ -336,6 +340,11 @@ export default {
     if (request.method === "OPTIONS") return corsPreflight();
 
     if (url.pathname === "/api/ping") {
+      // Verify the secret too (when configured) so "Test Connection" in the
+      // app actually validates credentials, not just reachability.
+      if (!checkSecret(env, request)) {
+        return json({ error: "Unauthorized — secret mismatch" }, 401);
+      }
       return json({ ok: true, time: Date.now() });
     }
 
@@ -474,14 +483,16 @@ export default {
         });
       }
 
-      // GET /api/jobs/:id/chunks — translated chunks
+      // GET /api/jobs/:id/chunks?after=N — translated chunks completed since seq N
+      // (data-saving: the client only pulls newly-finished chunks, not the whole book)
       if (request.method === "GET" && action === "chunks") {
+        const after = Number(url.searchParams.get("after") ?? "-1");
         const { results } = await env.DB
           .prepare(
             `SELECT seq, translated_text FROM chunks
-             WHERE job_id = ? AND status = 'completed' ORDER BY seq`,
+             WHERE job_id = ? AND status = 'completed' AND seq > ? ORDER BY seq`,
           )
-          .bind(jobId)
+          .bind(jobId, Number.isFinite(after) ? after : -1)
           .all<{ seq: number; translated_text: string }>();
         return json({
           chunks: (results ?? []).map((r) => ({ id: r.seq, text: r.translated_text })),

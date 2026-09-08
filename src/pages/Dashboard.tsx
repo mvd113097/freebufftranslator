@@ -344,9 +344,9 @@ export default function Dashboard() {
     };
   }, []);
 
-  // ─── Elapsed timer ──────────────────────────────────────────────
+  // ─── Elapsed timer (client mode only — cloud polls report elapsed) ──
   useEffect(() => {
-    if (isRunning) {
+    if (isRunning && translationMode === "client") {
       const started = Date.now() - elapsedMs;
       timerRef.current = setInterval(() => {
         setElapsedMs(Date.now() - started);
@@ -355,7 +355,7 @@ export default function Dashboard() {
         if (timerRef.current) clearInterval(timerRef.current);
       };
     }
-  }, [isRunning]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [isRunning, translationMode]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ─── Telegram periodic status updates (every N minutes) ─────────
   useEffect(() => {
@@ -711,12 +711,87 @@ export default function Dashboard() {
     if (chunkProgress.length === 0) return;
     setIsResuming(true);
     try {
+      // Cloud mode: re-upload the unfinished chunks as a fresh cloud job
+      // (the old job was cancelled; completed chunks stay in IndexedDB).
+      if (translationMode === "cloud") {
+        const pending = chunkProgress.filter((c) => c.status !== "completed");
+        if (pending.length === 0) {
+          setIsResuming(false);
+          return;
+        }
+        try {
+          const runner = await CloudRunner.start(
+            {
+              fileName: fileName || "novel.txt",
+              model: selectedModel,
+              keys,
+              chunks: pending.map((c) => ({ id: c.id, text: c.originalText })),
+              telegramBotToken: telegramBotToken || undefined,
+              telegramChatId: telegramChatId || undefined,
+              telegramNotifyOnStart: telegramNotifyOnStart,
+              telegramNotifyOnProgress: telegramNotifyOnProgress,
+              telegramNotifyOnError: telegramNotifyOnError,
+              telegramNotifyOnComplete: telegramNotifyOnComplete,
+            },
+            {
+              onProgress: (p) => {
+                setProgress(p);
+                setActiveModel(p.activeModel);
+                setElapsedMs(p.elapsedMs);
+              },
+              onChunkCompleted: async (chunkId, text) => {
+                setChunkProgress((prev) =>
+                  prev.map((c) =>
+                    c.id === chunkId
+                      ? { ...c, status: "completed" as const, translatedText: text }
+                      : c,
+                  ),
+                );
+                try {
+                  await updateChunk({
+                    id: chunkId,
+                    text: cloudChunkTextRef.current.get(chunkId) ?? "",
+                    status: "completed",
+                    translatedText: text,
+                  });
+                } catch {
+                  /* ignore */
+                }
+              },
+              onDone: (failedChunks) => {
+                setIsRunning(false);
+                setIsPaused(failedChunks > 0);
+                cloudRunnerRef.current = null;
+              },
+              onError: (message) => console.error("[Cloud]", message),
+            },
+          );
+          cloudRunnerRef.current = runner;
+          setCloudJobId(runner.getJobId());
+          cloudChunkTextRef.current = new Map(
+            pending.map((c) => [c.id, c.originalText]),
+          );
+          setIsRunning(true);
+          setIsPaused(false);
+          runningRef.current = true;
+        } catch (err) {
+          console.error("Cloud resume failed:", err);
+          alert(
+            "Cloud resume failed: " +
+              (err instanceof Error ? err.message : String(err)),
+          );
+        } finally {
+          setIsResuming(false);
+        }
+        return;
+      }
+
       await acquireWakeLock();
       await runPipeline(chunkProgress);
     } finally {
       setTimeout(() => setIsResuming(false), 500);
     }
-  }, [chunkProgress, runPipeline, acquireWakeLock]);
+  }, [chunkProgress, runPipeline, acquireWakeLock, translationMode, fileName, selectedModel, keys, telegramBotToken, telegramChatId, telegramNotifyOnStart, telegramNotifyOnProgress, telegramNotifyOnError, telegramNotifyOnComplete]);
 
   // ─── Pause ──────────────────────────────────────────────────────
   const pauseTranslation = useCallback(() => {
@@ -1450,8 +1525,12 @@ export default function Dashboard() {
                     : "bg-stone-800 text-stone-500 cursor-not-allowed shadow-none",
                 )}
               >
-                <Server className="h-4 w-4" />
-                Start Translation
+                {translationMode === "cloud" ? (
+                  <Cloud className="h-4 w-4" />
+                ) : (
+                  <Server className="h-4 w-4" />
+                )}
+                {translationMode === "cloud" ? "Start Cloud Translation" : "Start Translation"}
               </button>
               {keys.length > 0 && (
                 <button

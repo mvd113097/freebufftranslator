@@ -132,8 +132,9 @@ export async function getCloudStatus(jobId: string): Promise<CloudJobStatus> {
 
 export async function getCloudChunks(
   jobId: string,
+  after = -1,
 ): Promise<{ id: number; text: string }[]> {
-  const res = await request(`/api/jobs/${jobId}/chunks`);
+  const res = await request(`/api/jobs/${jobId}/chunks?after=${after}`);
   const data = await res.json();
   return data.chunks ?? [];
 }
