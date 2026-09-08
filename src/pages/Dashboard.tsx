@@ -991,15 +991,10 @@ export default function Dashboard() {
     }
   }, [keys, selectedModel]);
 
-  // ─── Check which models are alive ───────────────────────────────
+  // ─── Check which models are available (FREE — uses model list API, no quota) ──
   const checkModels = useCallback(async () => {
-    if (keys.length === 0) {
-      alert("Add at least one API key first.");
-      return;
-    }
     setCheckingModels(true);
-    const key = keys[0];
-    const results: Record<string, "live" | "dead" | "rate-limited" | "checking"> = {};
+    const results: Record<string, "live" | "dead" | "checking"> = {};
     // Initialize all as checking
     for (const m of MODEL_OPTIONS) {
       if (m.value === "openrouter/free") continue;
@@ -1007,33 +1002,44 @@ export default function Dashboard() {
     }
     setModelAvailability({ ...results });
 
-    // Test each model sequentially to avoid rate limits
-    for (const m of MODEL_OPTIONS) {
-      if (m.value === "openrouter/free") continue;
-      try {
-        await translateChunkSimple("Hi", key, m.value);
-        results[m.value] = "live";
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        if (msg.includes("RATE_LIMITED") || msg.includes("429") || msg.includes("rate limit")) {
-          results[m.value] = "rate-limited";
+    try {
+      // Fetch the model list — this is a FREE endpoint, no quota used
+      const res = await fetch("https://openrouter.ai/api/v1/models");
+      const data = await res.json() as { data?: { id: string; pricing?: { prompt?: string } }[] };
+      const models = data.data ?? [];
+      const modelIds = new Set(models.map((m) => m.id));
+
+      for (const m of MODEL_OPTIONS) {
+        if (m.value === "openrouter/free") continue;
+        // Check if the model exists in the list and is free
+        const found = models.find((api) => api.id === m.value);
+        if (found && found.pricing?.prompt === "0") {
+          results[m.value] = "live";
+        } else if (found) {
+          // Exists but not free — mark as dead for free usage
+          results[m.value] = "dead";
         } else {
           results[m.value] = "dead";
         }
+        setModelAvailability({ ...results });
       }
-      setModelAvailability({ ...results });
+    } catch (err) {
+      console.error("Failed to fetch model list:", err);
+      // On error, mark all as unknown
+      for (const m of MODEL_OPTIONS) {
+        if (m.value !== "openrouter/free") results[m.value] = "dead";
+      }
     }
+
     // Persist results to localStorage
     const toSave: Record<string, "live" | "dead"> = {};
     for (const [k, v] of Object.entries(results)) {
       if (v === "live") toSave[k] = "live";
-      // Only mark as dead if truly dead (not rate-limited)
       if (v === "dead") toSave[k] = "dead";
-      // Rate-limited models are NOT saved as dead — they're alive but quota-exceeded
     }
     saveModelAvailability(toSave);
     setCheckingModels(false);
-  }, [keys]);
+  }, []);
 
   // ─── Scan for Chinese characters in translated text ─────────────
   const scanResults = useMemo(() => {
