@@ -24,6 +24,12 @@ export interface PipelineProgress {
   elapsedMs: number;
   estimatedRemainingMs: number;
   activeModel?: string;
+  /** Approximate English characters translated so far. */
+  charsTranslated?: number;
+  /** Characters translated per minute. */
+  charsPerMinute?: number;
+  /** Milliseconds since the most recent chunk completed (0 if none yet). */
+  timeSinceLastChunkMs?: number;
 }
 
 export type ProgressCallback = (progress: PipelineProgress) => void;

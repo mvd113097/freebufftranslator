@@ -54,6 +54,7 @@ export interface CloudJobStatus {
   completedChunks: number;
   failedChunks: number;
   activeModel: string | null;
+  createdAt: number;
   updatedAt: number;
 }
 

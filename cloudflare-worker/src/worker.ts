@@ -369,6 +369,7 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
         completedChunks: counts?.completed ?? 0,
         failedChunks: counts?.failed ?? 0,
         activeModel: job.active_model ?? null,
+        createdAt: job.created_at,
         updatedAt: job.updated_at,
       });
     }

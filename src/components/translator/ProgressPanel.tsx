@@ -1,4 +1,4 @@
-import { CheckCircle2, AlertTriangle, Loader2, Clock, BookOpen, Cpu } from "lucide-react";
+import { CheckCircle2, AlertTriangle, Loader2, Clock, BookOpen, Cpu, Zap, Activity } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { PipelineProgress, ChunkProgress } from "@/lib/translator/pipeline";
 
@@ -18,6 +18,12 @@ function formatTime(ms: number): string {
   const seconds = totalSeconds % 60;
   if (minutes > 0) return `${minutes}m ${seconds}s`;
   return `${seconds}s`;
+}
+
+function formatChars(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M chars`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K chars`;
+  return `${n} chars`;
 }
 
 export function ProgressPanel({
@@ -96,18 +102,48 @@ export function ProgressPanel({
           <StatCard
             icon={<Cpu className="h-4 w-4 text-blue-400" />}
             label="Active Model"
-            value={displayModel.split('/').pop()?.replace(/:free$/, '') ?? displayModel}
+            value={displayModel.split("/").pop()?.replace(/:free$/, "") ?? displayModel}
+          />
+        )}
+        {progress?.charsPerMinute != null && progress.charsPerMinute > 0 && (
+          <StatCard
+            icon={<Zap className="h-4 w-4 text-yellow-400" />}
+            label="Speed"
+            value={`${formatChars(progress.charsPerMinute)}/min`}
           />
         )}
       </div>
 
-      {/* Active status indicator */}
+      {/* Active status indicator with throughput */}
       {isRunning && (
-        <div className="flex items-center gap-2 rounded-xl bg-amber-500/10 border border-amber-500/20 px-3 py-2.5">
-          <Loader2 className="h-4 w-4 animate-spin text-amber-400" />
-          <span className="text-xs text-amber-300">
-            Translating... {progress?.activeChunks ?? 0} chunk{(progress?.activeChunks ?? 0) !== 1 ? "s" : ""} in progress
-          </span>
+        <div className="space-y-2">
+          <div className="flex items-center gap-2 rounded-xl bg-amber-500/10 border border-amber-500/20 px-3 py-2.5">
+            <Loader2 className="h-4 w-4 animate-spin text-amber-400" />
+            <span className="text-xs text-amber-300">
+              Translating... {progress?.activeChunks ?? 0} chunk{(progress?.activeChunks ?? 0) !== 1 ? "s" : ""} in progress
+            </span>
+          </div>
+          {(progress?.charsTranslated != null && progress.charsTranslated > 0) && (
+            <div className="flex items-center gap-3 rounded-xl bg-stone-800 border border-stone-700 px-3 py-2">
+              <Activity className="h-3.5 w-3.5 text-green-400 shrink-0" />
+              <div className="flex items-center gap-3 text-[10px] text-stone-400 flex-wrap">
+                {progress.charsTranslated > 0 && (
+                  <span className="text-amber-400/80">{formatChars(progress.charsTranslated)} translated</span>
+                )}
+                {progress.charsPerMinute != null && progress.charsPerMinute > 0 && (
+                  <span className="text-yellow-400/80">{formatChars(progress.charsPerMinute)}/min</span>
+                )}
+                {progress.timeSinceLastChunkMs != null && progress.timeSinceLastChunkMs > 0 && (
+                  <span className={progress.timeSinceLastChunkMs > 30000 ? "text-yellow-400" : "text-green-400"}>
+                    Last chunk {formatTime(progress.timeSinceLastChunkMs)} ago
+                  </span>
+                )}
+                {progress.charsTranslated > 0 && progress.completedChunks > 0 && (
+                  <span>Est. {formatChars(Math.round(progress.charsTranslated / Math.max(progress.completedChunks, 1) * progress.totalChunks))} total</span>
+                )}
+              </div>
+            </div>
+          )}
         </div>
       )}
 

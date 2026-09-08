@@ -32,7 +32,9 @@ export class CloudRunner {
   private stopped = false;
   private totalChunks = 0;
   private completedIds = new Set<number>();
-  private startTime = Date.now();
+  private startTime = 0;
+  private totalCharsTranslated = 0;
+  private lastChunkCompletedAt = 0;
   private activeModel: string | undefined;
   private onChunkCompleted?: (chunkId: number, text: string) => void | Promise<void>;
   private readonly jobId: string;
@@ -97,12 +99,19 @@ export class CloudRunner {
         const status = await getCloudStatus(this.jobId);
         this.activeModel = status.activeModel ?? undefined;
 
+        // Use createdAt from the server for accurate elapsed time across reloads
+        if (this.startTime === 0 && status.createdAt) {
+          this.startTime = status.createdAt;
+        }
+
         // Detect newly completed chunks for live persistence
         if (status.completedChunks > this.completedIds.size) {
           const chunks = await getCloudChunks(this.jobId);
           for (const chunk of chunks) {
             if (!this.completedIds.has(chunk.id)) {
               this.completedIds.add(chunk.id);
+              this.totalCharsTranslated += chunk.text.length;
+              this.lastChunkCompletedAt = Date.now();
               await this.onChunkCompleted?.(chunk.id, chunk.text);
             }
           }
@@ -116,6 +125,12 @@ export class CloudRunner {
         const elapsedMs = Date.now() - this.startTime;
         const avgPerChunk = done > 0 ? elapsedMs / done : 0;
         const remaining = status.totalChunks - done;
+        const charsPerMinute = elapsedMs > 0 && this.totalCharsTranslated > 0
+          ? Math.round((this.totalCharsTranslated / elapsedMs) * 60000)
+          : 0;
+        const timeSinceLastChunkMs = this.lastChunkCompletedAt > 0
+          ? Date.now() - this.lastChunkCompletedAt
+          : 0;
 
         this.callbacks.onProgress({
           totalChunks: status.totalChunks || this.totalChunks,
@@ -130,6 +145,9 @@ export class CloudRunner {
           elapsedMs,
           estimatedRemainingMs: remaining * avgPerChunk,
           activeModel: this.activeModel,
+          charsTranslated: this.totalCharsTranslated,
+          charsPerMinute,
+          timeSinceLastChunkMs,
         });
 
         if (status.status === "done" || status.status === "cancelled") {
