@@ -58,17 +58,23 @@ import {
 } from "@/lib/translator/cloud-client";
 import { CloudSettings } from "@/components/translator/CloudSettings";
 
+// Quality-ranked: best models first. "Auto Free" cascades through these on failure.
 const MODEL_OPTIONS = [
   { value: "openrouter/free", label: "Auto Free (best available)" },
-  { value: "google/gemma-4-31b-it:free", label: "Gemma 4 31B (free, Google)" },
-  { value: "google/gemma-4-26b-a4b-it:free", label: "Gemma 4 26B (free, Google)" },
-  { value: "nvidia/nemotron-3-ultra-550b-a55b:free", label: "Nemotron 3 Ultra (free, 1M ctx)" },
-  { value: "nvidia/nemotron-3.5-lightning:free", label: "Nemotron 3.5 Lightning (free)" },
-  { value: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free", label: "Nemotron 3 Nano (free)" },
-  { value: "inclusionai/ling-3.0-flash-sante:free", label: "Ling 3.0 Flash Sante (free)" },
-  { value: "inclusionai/ling-3.0-flash-fin:free", label: "Ling 3.0 Flash Fin (free)" },
-  { value: "thinkingmachines/inkling:free", label: "Thinking Machines Inkling (free)" },
-  { value: "poolside/laguna-s-2.1:free", label: "Laguna S 2.1 (free)" },
+  { value: "nvidia/nemotron-3-ultra-550b-a55b:free", label: "Nemotron 3 Ultra 550B (free, 1M ctx)" },
+  { value: "nvidia/nemotron-3-super-120b-a12b:free", label: "Nemotron 3 Super 120B (free, 262K ctx)" },
+  { value: "thinkingmachines/inkling:free", label: "Inkling (free, 1M ctx)" },
+  { value: "nvidia/nemotron-3.5-lightning:free", label: "Nemotron 3.5 Lightning (free, 1M ctx)" },
+  { value: "google/gemma-4-31b-it:free", label: "Gemma 4 31B (free, Google, 262K ctx)" },
+  { value: "google/gemma-4-26b-a4b-it:free", label: "Gemma 4 26B (free, Google, 262K ctx)" },
+  { value: "thinkingmachines/inkling-small:free", label: "Inkling Small (free, 1M ctx)" },
+  { value: "inclusionai/ling-3.0-flash-fin:free", label: "Ling 3.0 Flash Fin (free, 262K ctx)" },
+  { value: "inclusionai/ling-3.0-flash-sante:free", label: "Ling 3.0 Flash Sante (free, 262K ctx)" },
+  { value: "poolside/laguna-s-2.1:free", label: "Laguna S 2.1 (free, 262K ctx)" },
+  { value: "poolside/laguna-xs-2.1:free", label: "Laguna XS 2.1 (free, 262K ctx)" },
+  { value: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free", label: "Nemotron 3 Nano 30B (free, 256K ctx)" },
+  { value: "dots-studio/dots-3-note-preview:free", label: "Dots 3 Note (free, 512K ctx)" },
+  { value: "liquid/lfm-2.5-2.6b:free", label: "Liquid LFM 2.5 (free, 65K ctx)" },
 ];
 
 // ─── Telegram direct-from-browser ──────────────────────────────────
@@ -115,6 +121,8 @@ export default function Dashboard() {
   const [showScanResults, setShowScanResults] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [telegramOpen, setTelegramOpen] = useState(false);
+  const [modelAvailability, setModelAvailability] = useState<Record<string, "live" | "dead" | "checking">>({});
+  const [checkingModels, setCheckingModels] = useState(false);
 
   // Cloud mode (translation continues on a Cloudflare worker with the browser closed)
   const [translationMode, setTranslationMode] = useState<"client" | "cloud">(
@@ -921,6 +929,36 @@ export default function Dashboard() {
     }
   }, [keys, selectedModel]);
 
+  // ─── Check which models are alive ───────────────────────────────
+  const checkModels = useCallback(async () => {
+    if (keys.length === 0) {
+      alert("Add at least one API key first.");
+      return;
+    }
+    setCheckingModels(true);
+    const key = keys[0];
+    const results: Record<string, "live" | "dead" | "checking"> = {};
+    // Initialize all as checking
+    for (const m of MODEL_OPTIONS) {
+      if (m.value === "openrouter/free") continue;
+      results[m.value] = "checking";
+    }
+    setModelAvailability({ ...results });
+
+    // Test each model sequentially to avoid rate limits
+    for (const m of MODEL_OPTIONS) {
+      if (m.value === "openrouter/free") continue;
+      try {
+        await translateChunkSimple("Hi", key, m.value);
+        results[m.value] = "live";
+      } catch {
+        results[m.value] = "dead";
+      }
+      setModelAvailability({ ...results });
+    }
+    setCheckingModels(false);
+  }, [keys]);
+
   // ─── Scan for Chinese characters in translated text ─────────────
   const scanResults = useMemo(() => {
     const withChinese: { index: number; matches: string[] }[] = [];
@@ -1310,18 +1348,35 @@ export default function Dashboard() {
 
             {/* Model Selector */}
             <div className="rounded-2xl border border-stone-700/50 bg-stone-900/80 backdrop-blur-xl p-4 shadow-sm">
-              <label className="text-xs font-semibold text-stone-200 block mb-2">Model</label>
+              <div className="flex items-center justify-between mb-2">
+                <label className="text-xs font-semibold text-stone-200">Model</label>
+                <button
+                  onClick={checkModels}
+                  disabled={checkingModels || keys.length === 0 || isRunning || isStarting}
+                  className="flex items-center gap-1 rounded-lg border border-stone-700 bg-stone-800/60 px-2 py-1 text-[10px] font-medium text-stone-400 hover:text-stone-200 hover:bg-stone-700 transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  {checkingModels ? (
+                    <><Loader2 className="h-3 w-3 animate-spin" /> Checking...</>
+                  ) : (
+                    "Check Live"
+                  )}
+                </button>
+              </div>
               <select
                 value={selectedModel}
                 onChange={(e) => setSelectedModel(e.target.value)}
                 disabled={isRunning || isStarting}
                 className="w-full rounded-xl border border-stone-700 bg-stone-800 px-3 py-2 text-xs text-stone-200 focus:outline-none focus:ring-2 focus:ring-amber-400/30 disabled:opacity-50 cursor-pointer"
               >
-                {MODEL_OPTIONS.map((m) => (
-                  <option key={m.value} value={m.value}>
-                    {m.label}
-                  </option>
-                ))}
+                {MODEL_OPTIONS.map((m) => {
+                  const status = modelAvailability[m.value];
+                  const indicator = status === "live" ? " [LIVE]" : status === "dead" ? " [DEAD]" : status === "checking" ? " ..." : "";
+                  return (
+                    <option key={m.value} value={m.value}>
+                      {m.label}{indicator}
+                    </option>
+                  );
+                })}
               </select>
               {activeModel && (
                 <p className="mt-2 text-[10px] text-stone-400 flex items-center gap-1">
@@ -1335,8 +1390,8 @@ export default function Dashboard() {
               )}
               {selectedModel === "openrouter/free" && !activeModel && (
                 <p className="mt-2 text-[10px] text-stone-500 leading-snug">
-                  Auto Free tries the best available model per chunk and skips any that are
-                  rate-limited.
+                  Auto Free tries the best available model per chunk and automatically
+                  skips dead or rate-limited models, falling back to the next one.
                 </p>
               )}
             </div>
