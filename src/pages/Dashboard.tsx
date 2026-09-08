@@ -931,7 +931,10 @@ export default function Dashboard() {
               <p className="text-[10px] text-stone-400 flex items-center gap-1">
                 {isOnline ? (
                   <>
-                    <Wifi className="h-3 w-3 text-green-400" /> Client-side • Direct to OpenRouter
+                    <Wifi className="h-3 w-3 text-green-400" />{" "}
+                    {translationMode === "cloud"
+                      ? "Cloud mode • Cloudflare Worker"
+                      : "Client-side • Direct to OpenRouter"}
                   </>
                 ) : (
                   <>
@@ -943,8 +946,17 @@ export default function Dashboard() {
           </div>
           <div className="flex items-center gap-2">
             <div className="hidden sm:flex items-center gap-1.5 rounded-lg bg-stone-800 border border-stone-700 px-3 py-1.5 text-[10px] text-stone-400">
-              <Laptop className="h-3 w-3" />
-              Runs in your browser
+              {translationMode === "cloud" ? (
+                <>
+                  <Cloud className="h-3 w-3 text-sky-400" />
+                  Runs on your Cloudflare worker
+                </>
+              ) : (
+                <>
+                  <Laptop className="h-3 w-3" />
+                  Runs in your browser
+                </>
+              )}
             </div>
             {auth.mode === "user" && auth.email && (
               <div className="hidden sm:flex items-center gap-1.5 rounded-lg bg-stone-800 border border-stone-700 px-3 py-1.5 text-[10px] text-stone-300">
@@ -983,9 +995,9 @@ export default function Dashboard() {
       </header>
 
       <main className="mx-auto max-w-7xl px-4 sm:px-6 py-6 space-y-6">
-        {/* Keep-tab-open banner while running */}
+        {/* Keep-tab-open banner while running (client mode) or cloud note (cloud mode) */}
         <AnimatePresence>
-          {isRunning && (
+          {isRunning && translationMode === "client" && (
             <motion.div
               initial={{ opacity: 0, y: -12, height: 0 }}
               animate={{ opacity: 1, y: 0, height: "auto" }}
@@ -1002,6 +1014,30 @@ export default function Dashboard() {
                     <p className="text-xs text-amber-200/70 mt-1">
                       Every finished chunk is saved automatically. If the browser closes, just reopen
                       the app and press Resume — it continues exactly where it left off.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            </motion.div>
+          )}
+          {isRunning && translationMode === "cloud" && (
+            <motion.div
+              initial={{ opacity: 0, y: -12, height: 0 }}
+              animate={{ opacity: 1, y: 0, height: "auto" }}
+              exit={{ opacity: 0, y: -12, height: 0 }}
+              className="overflow-hidden"
+            >
+              <div className="rounded-2xl border border-sky-500/30 bg-sky-500/10 backdrop-blur-xl p-4 shadow-sm">
+                <div className="flex items-start gap-3">
+                  <Cloud className="h-5 w-5 text-sky-400 mt-0.5 shrink-0" />
+                  <div className="flex-1">
+                    <h3 className="text-sm font-semibold text-sky-300">
+                      Translating in the cloud — you can close this tab
+                    </h3>
+                    <p className="text-xs text-sky-200/70 mt-1">
+                      Your Cloudflare worker is translating this book in the background. Reopen the
+                      app anytime to check progress or download the finished .epub. Telegram updates
+                      are sent by the worker too.
                     </p>
                   </div>
                 </div>
