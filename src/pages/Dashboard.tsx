@@ -400,46 +400,6 @@ export default function Dashboard() {
     };
   }, []);
 
-  // ─── Auto-check model availability on mount ─────────────────────
-  useEffect(() => {
-    if (keys.length === 0) return;
-    const saved = loadModelAvailability();
-    const hasSavedResults = Object.keys(saved).length > 0;
-    // If no saved results, check immediately; if saved, check in background
-    if (!hasSavedResults) {
-      checkModels();
-    } else {
-      // Background refresh — non-blocking
-      const key = keys[0];
-      const results: Record<string, "live" | "dead" | "rate-limited" | "checking"> = {};
-      for (const [k, v] of Object.entries(saved)) results[k] = v;
-      (async () => {
-        for (const m of MODEL_OPTIONS) {
-          if (m.value === "openrouter/free") continue;
-          try {
-            await translateChunkSimple("Hi", key, m.value);
-            results[m.value] = "live";
-          } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            if (msg.includes("RATE_LIMITED") || msg.includes("429") || msg.includes("rate limit")) {
-              results[m.value] = "rate-limited";
-            } else {
-              results[m.value] = "dead";
-            }
-          }
-          setModelAvailability({ ...results });
-        }
-        const toSave: Record<string, "live" | "dead"> = {};
-        for (const [k, v] of Object.entries(results)) {
-          if (v === "live") toSave[k] = "live";
-          if (v === "dead") toSave[k] = "dead";
-          // Rate-limited models are NOT saved as dead
-        }
-        saveModelAvailability(toSave);
-      })();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [keys.length > 0 ? "ready" : "none"]);
 
   // ─── Elapsed timer (client mode only — cloud polls report elapsed) ──
   useEffect(() => {
