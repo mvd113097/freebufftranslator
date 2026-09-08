@@ -49,12 +49,14 @@ export function setWorkerSecret(secret: string): void {
 export interface CloudJobStatus {
   jobId: string;
   fileName: string;
-  status: "active" | "done" | "cancelled";
+  status: "active" | "done" | "cancelled" | "paused";
   totalChunks: number;
   completedChunks: number;
   failedChunks: number;
   activeModel: string | null;
   createdAt: number;
+  lastHeartbeat: number | null;
+  lastChunkAt: number | null;
   updatedAt: number;
 }
 

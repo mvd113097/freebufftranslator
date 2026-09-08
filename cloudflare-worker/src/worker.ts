@@ -372,6 +372,11 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
          FROM chunks WHERE job_id = ?`
       ).bind(jobId).first();
 
+      // Get the most recent chunk completion time for ETA
+      const lastChunk = await env.DB.prepare(
+        `SELECT MAX(updated_at) as last_at FROM chunks WHERE job_id = ? AND status = 'completed'`
+      ).bind(jobId).first();
+
       return json({
         jobId: job.id,
         fileName: job.file_name,
@@ -381,6 +386,8 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
         failedChunks: counts?.failed ?? 0,
         activeModel: job.active_model ?? null,
         createdAt: job.created_at,
+        lastHeartbeat: job.last_heartbeat,
+        lastChunkAt: lastChunk?.last_at ?? null,
         updatedAt: job.updated_at,
       });
     }
@@ -465,6 +472,11 @@ async function handleCron(env: Env): Promise<void> {
 
     if (!keys.length) continue;
 
+    // Update heartbeat on every cron tick so the UI knows the worker is alive
+    await env.DB.prepare(`UPDATE jobs SET last_heartbeat = ?, updated_at = ? WHERE id = ?`)
+      .bind(Date.now(), Date.now(), jobId)
+      .run();
+
     // Claim a batch of pending chunks
     const pending = await env.DB.prepare(
       `SELECT id, seq, text FROM chunks
@@ -477,6 +489,12 @@ async function handleCron(env: Env): Promise<void> {
 
     if (pending.results.length === 0) {
       // Check if all chunks are done → mark job as done
+      // But first: if the job was paused by the fail handler above, don't override
+      const currentJob = await env.DB.prepare(`SELECT status FROM jobs WHERE id = ?`).bind(jobId).first();
+      if (currentJob?.status === "paused") {
+        continue;
+      }
+
       const counts = await env.DB.prepare(
         `SELECT
            COUNT(*) as total,
@@ -599,6 +617,19 @@ async function handleCron(env: Env): Promise<void> {
         jobId,
       )
       .run();
+
+    // If chunks failed this tick, pause the job and notify
+    if (failedDelta > 0 && telegramToken && telegramChatId && notifyOnError) {
+      await env.DB.prepare(`UPDATE jobs SET status = 'paused', updated_at = ? WHERE id = ? AND status = 'active'`)
+        .bind(Date.now(), jobId)
+        .run();
+      const failedNow = (counts?.failed as number) ?? 0;
+      await sendTelegram(
+        telegramToken,
+        telegramChatId,
+        `⚠️ <b>Translation paused — chunk failed</b>\n${(counts?.completed ?? 0)}/${counts?.total ?? 0} done, ${failedNow} failed\nOpen the app and press Resume to retry the failed chunk.`,
+      ).catch(() => undefined);
+    }
 
     // Telegram progress milestone
     if (telegramToken && telegramChatId && notifyOnProgress && counts) {

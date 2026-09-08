@@ -284,7 +284,8 @@ export default function Dashboard() {
             id: c.id,
             status: c.status === "completed" ? ("completed" as const) : ("pending" as const),
             originalText: c.text,
-            translatedText: c.translatedText,
+            // Only use saved translatedText if it's actually non-empty
+            translatedText: c.translatedText && c.translatedText.length > 0 ? c.translatedText : "",
             tokensReceived: 0,
             retries: 0,
           })),
@@ -497,13 +498,13 @@ export default function Dashboard() {
 
   useEffect(() => releaseWakeLock, [releaseWakeLock]);
 
-  // ─── Word counter (approximate, throttled by chunk completions) ──
+  // ─── Word counter (approximate, recalculates on any chunk change) ──
   useEffect(() => {
     const words = chunkProgress
-      .filter((c) => c.status === "completed")
+      .filter((c) => c.status === "completed" && c.translatedText.length > 0)
       .reduce((sum, c) => sum + c.translatedText.split(/\s+/).filter(Boolean).length, 0);
     setActiveEnglishWords(words);
-  }, [completedCount]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [chunkProgress]);
 
   // ─── File upload handler ────────────────────────────────────────
   const handleFileContent = useCallback((content: string, name: string) => {

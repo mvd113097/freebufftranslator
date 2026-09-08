@@ -134,6 +134,10 @@ export class CloudRunner {
           ? Date.now() - this.lastChunkCompletedAt
           : 0;
 
+        const workerHeartbeatMs = status.lastHeartbeat
+          ? Date.now() - status.lastHeartbeat
+          : 0;
+
         this.callbacks.onProgress({
           totalChunks: status.totalChunks || this.totalChunks,
           completedChunks: status.completedChunks,
@@ -150,9 +154,10 @@ export class CloudRunner {
           charsTranslated: this.totalCharsTranslated,
           charsPerMinute,
           timeSinceLastChunkMs,
+          workerHeartbeatMs,
         });
 
-        if (status.status === "done" || status.status === "cancelled") {
+        if (status.status === "done" || status.status === "cancelled" || status.status === "paused") {
           this.stopPolling();
           this.callbacks.onDone(status.failedChunks);
           return;

@@ -1,4 +1,4 @@
-import { CheckCircle2, AlertTriangle, Loader2, Clock, BookOpen, Cpu, Zap, Activity } from "lucide-react";
+import { CheckCircle2, AlertTriangle, Loader2, Clock, BookOpen, Cpu, Zap, Activity, HeartPulse } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { PipelineProgress, ChunkProgress } from "@/lib/translator/pipeline";
 
@@ -123,6 +123,17 @@ export function ProgressPanel({
               Translating... {progress?.activeChunks ?? 0} chunk{(progress?.activeChunks ?? 0) !== 1 ? "s" : ""} in progress
             </span>
           </div>
+          {/* Worker heartbeat (cloud mode) */}
+          {progress?.workerHeartbeatMs != null && progress.workerHeartbeatMs > 0 && (
+            <div className="flex items-center gap-2 rounded-xl bg-stone-800 border border-stone-700 px-3 py-2">
+              <HeartPulse className={cn("h-3.5 w-3.5 shrink-0", progress.workerHeartbeatMs < 90000 ? "text-green-400 animate-pulse" : progress.workerHeartbeatMs < 180000 ? "text-yellow-400" : "text-red-400")} />
+              <span className={cn("text-[10px]",
+                progress.workerHeartbeatMs < 90000 ? "text-green-400" : progress.workerHeartbeatMs < 180000 ? "text-yellow-400" : "text-red-400"
+              )}>
+                Worker alive — last heartbeat {progress.workerHeartbeatMs < 60000 ? "just now" : formatTime(progress.workerHeartbeatMs) + " ago"}
+              </span>
+            </div>
+          )}
           {(progress?.charsTranslated != null && progress.charsTranslated > 0) && (
             <div className="flex items-center gap-3 rounded-xl bg-stone-800 border border-stone-700 px-3 py-2">
               <Activity className="h-3.5 w-3.5 text-green-400 shrink-0" />

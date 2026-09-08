@@ -30,6 +30,8 @@ export interface PipelineProgress {
   charsPerMinute?: number;
   /** Milliseconds since the most recent chunk completed (0 if none yet). */
   timeSinceLastChunkMs?: number;
+  /** Milliseconds since the worker last sent a heartbeat (cloud mode). */
+  workerHeartbeatMs?: number;
 }
 
 export type ProgressCallback = (progress: PipelineProgress) => void;
