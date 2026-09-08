@@ -1,24 +1,17 @@
-import { defineWorkersConfig } from "@cloudflare/workers-types";
-import type { Config } from "wrangler";
+name = "novel-translator-worker"
+main = "src/worker.ts"
+compatibility_date = "2024-09-23"
+compatibility_flags = ["nodejs_compat"]
+account_id = "92618a9d6be6c79af7848c6fd7e2ef75"
 
-export default defineWorkersConfig({
-  name: "novel-translator-worker",
-  main: "src/worker.ts",
-  compatibility_date: "2024-09-23",
-  compatibility_flags: ["nodejs_compat"],
-  d1_databases: [
-    {
-      binding: "DB",
-      database_name: "novel-translator",
-      // TODO: paste the database_id printed by
-      //   npx wrangler d1 create novel-translator
-      database_id: "REPLACE_ME",
-      migrations_dir: "drizzle",
-    },
-  ],
-  triggers: {
-    // Every minute: pick up pending chunks and translate a batch.
-    crons: ["* * * * *"],
-  },
-  vars: {},
-}) as Config;
+[[d1_databases]]
+binding = "DB"
+database_name = "novel-translator"
+database_id = "0f8b4c0d-9c76-4e48-a4ea-95c40fe9dbaf"
+
+[triggers]
+# Every minute: pick up pending chunks and translate a batch.
+crons = ["* * * * *"]
+
+[vars]
+JOB_SECRET = "3ad7c4d2df5fdac8868be559294a8913"

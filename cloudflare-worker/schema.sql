@@ -1,47 +1,40 @@
 -- Novel Translator worker — D1 schema.
+-- MUST match the column names used in src/worker.ts exactly.
 -- Run once per deployment: bun run db:init (remote) or bun run db:init:local (dev)
 
-CREATE TABLE IF NOT EXISTS jobs (
+DROP TABLE IF EXISTS chunks;
+DROP TABLE IF EXISTS jobs;
+DROP TABLE IF EXISTS key_hits;
+
+CREATE TABLE jobs (
   id TEXT PRIMARY KEY,
   file_name TEXT NOT NULL,
-  status TEXT NOT NULL DEFAULT 'active',      -- active | done | cancelled
   model TEXT NOT NULL,
-  keys TEXT NOT NULL,                          -- JSON array of OpenRouter keys
-  total_chunks INTEGER NOT NULL,
-  completed_chunks INTEGER NOT NULL DEFAULT 0,
-  failed_chunks INTEGER NOT NULL DEFAULT 0,
-  active_model TEXT,
+  keys_json TEXT NOT NULL,                     -- JSON array of OpenRouter keys
+  status TEXT NOT NULL DEFAULT 'active',       -- active | done | cancelled
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
   telegram_bot_token TEXT,
   telegram_chat_id TEXT,
-  telegram_notify_on_start INTEGER NOT NULL DEFAULT 1,
-  telegram_notify_on_progress INTEGER NOT NULL DEFAULT 1,
-  telegram_notify_on_error INTEGER NOT NULL DEFAULT 1,
-  telegram_notify_on_complete INTEGER NOT NULL DEFAULT 1,
-  telegram_status_interval INTEGER NOT NULL DEFAULT 0,
-  last_status_notify_at INTEGER NOT NULL DEFAULT 0,
-  notified_start INTEGER NOT NULL DEFAULT 0,
-  created_at INTEGER NOT NULL,
+  telegram_on_start INTEGER NOT NULL DEFAULT 1,
+  telegram_on_progress INTEGER NOT NULL DEFAULT 1,
+  telegram_on_error INTEGER NOT NULL DEFAULT 1,
+  telegram_on_complete INTEGER NOT NULL DEFAULT 1,
+  last_milestone INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE chunks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,        -- rowid used by the cron claim query
+  job_id TEXT NOT NULL,
+  seq INTEGER NOT NULL,                        -- chunk order in the original book
+  text TEXT NOT NULL,                          -- source text (plain, or base64 gzip when the client flags it)
+  status TEXT NOT NULL DEFAULT 'pending',      -- pending | translating | completed | failed
+  translated_text TEXT,
+  model_used TEXT,
+  error TEXT,
+  attempts INTEGER NOT NULL DEFAULT 0,
   updated_at INTEGER NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS chunks (
-  job_id TEXT NOT NULL,
-  id INTEGER NOT NULL,
-  status TEXT NOT NULL DEFAULT 'pending',      -- pending | processing | completed | failed
-  source_text TEXT NOT NULL,                   -- plain text, or base64 gzip when source_gzip = 1
-  source_gzip INTEGER NOT NULL DEFAULT 0,
-  translated_text TEXT NOT NULL DEFAULT '',
-  retries INTEGER NOT NULL DEFAULT 0,
-  error TEXT,
-  used_model TEXT,
-  processing_since INTEGER,
-  PRIMARY KEY (job_id, id)
-);
-
--- Rolling per-key request window (RPM limiting across worker invocations).
-CREATE TABLE IF NOT EXISTS key_hits (
-  key TEXT NOT NULL,
-  ts INTEGER NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_key_hits_key_ts ON key_hits (key, ts);
+CREATE INDEX idx_chunks_job_seq ON chunks (job_id, seq);
+CREATE INDEX idx_chunks_status ON chunks (status, updated_at);
