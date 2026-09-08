@@ -1,24 +1,24 @@
-name = "novel-translator-worker"
-main = "src/worker.ts"
-compatibility_date = "2024-11-01"
+import { defineWorkersConfig } from "@cloudflare/workers-types";
+import type { Config } from "wrangler";
 
-# Free plan: one cron trigger allowed at a 5-minute cadence. Each invocation
-# processes a bounded batch of chunks, so it never runs long.
-[triggers]
-crons = ["*/5 * * * *"]
-
-# D1 database. Create it first with:
-#   npx wrangler d1 create novel-translator
-# then paste the returned database_id below.
-[[d1_databases]]
-binding = "DB"
-database_name = "novel-translator"
-database_id = "REPLACE_WITH_D1_DATABASE_ID"
-
-[vars]
-# Max chunks processed per cron invocation (keeps us under the free plan's
-# 10ms CPU budget by committing each chunk to D1 immediately).
-MAX_CHUNKS_PER_RUN = "15"
-# Optional: require this header value on every job API call (a shared secret
-# so strangers can't create jobs on your worker). Leave empty to disable.
-JOB_SECRET = ""
+export default defineWorkersConfig({
+  name: "novel-translator-worker",
+  main: "src/worker.ts",
+  compatibility_date: "2024-09-23",
+  compatibility_flags: ["nodejs_compat"],
+  d1_databases: [
+    {
+      binding: "DB",
+      database_name: "novel-translator",
+      // TODO: paste the database_id printed by
+      //   npx wrangler d1 create novel-translator
+      database_id: "REPLACE_ME",
+      migrations_dir: "drizzle",
+    },
+  ],
+  triggers: {
+    // Every minute: pick up pending chunks and translate a batch.
+    crons: ["* * * * *"],
+  },
+  vars: {},
+}) as Config;
