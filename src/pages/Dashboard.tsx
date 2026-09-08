@@ -101,6 +101,8 @@ export default function Dashboard() {
   const [telegramNotifyOnProgress, setTelegramNotifyOnProgress] = useState(() => loadSettings().telegramNotifyOnProgress);
   const [telegramNotifyOnError, setTelegramNotifyOnError] = useState(() => loadSettings().telegramNotifyOnError);
   const [telegramNotifyOnComplete, setTelegramNotifyOnComplete] = useState(() => loadSettings().telegramNotifyOnComplete);
+  const [telegramNotifyOnPause, setTelegramNotifyOnPause] = useState(() => loadSettings().telegramNotifyOnPause);
+  const [telegramStatusInterval, setTelegramStatusInterval] = useState(() => loadSettings().telegramStatusInterval);
   const [showScanResults, setShowScanResults] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [telegramOpen, setTelegramOpen] = useState(false);
@@ -130,12 +132,13 @@ export default function Dashboard() {
   );
 
   const pipelineRef = useRef<TranslationPipeline | null>(null);
+  const progressRef = useRef<PipelineProgress | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const wakeLockRef = useRef<WakeLockSentinel | null>(null);
   const runningRef = useRef(false);
 
   // Settings snapshot for the Telegram callbacks (avoid stale closures)
-  const telegramPrefsRef = useRef({ botToken: "", chatId: "", onStart: true, onProgress: true, onError: true, onComplete: true });
+  const telegramPrefsRef = useRef({ botToken: "", chatId: "", onStart: true, onProgress: true, onError: true, onComplete: true, onPause: true });
   telegramPrefsRef.current = {
     botToken: telegramBotToken,
     chatId: telegramChatId,
@@ -143,7 +146,9 @@ export default function Dashboard() {
     onProgress: telegramNotifyOnProgress,
     onError: telegramNotifyOnError,
     onComplete: telegramNotifyOnComplete,
+    onPause: telegramNotifyOnPause,
   };
+  progressRef.current = progress;
 
   // ─── Derived flags ──────────────────────────────────────────────
   const completedCount = chunkProgress.filter((c) => c.status === "completed").length;
@@ -233,10 +238,10 @@ export default function Dashboard() {
       telegramNotifyOnProgress,
       telegramNotifyOnError,
       telegramNotifyOnComplete,
-      telegramNotifyOnPause: true,
-      telegramStatusInterval: 0,
+      telegramNotifyOnPause,
+      telegramStatusInterval,
     });
-  }, [keys, selectedModel, chunkSize, concurrency, telegramBotToken, telegramChatId, telegramNotifyOnStart, telegramNotifyOnProgress, telegramNotifyOnError, telegramNotifyOnComplete]);
+  }, [keys, selectedModel, chunkSize, concurrency, telegramBotToken, telegramChatId, telegramNotifyOnStart, telegramNotifyOnProgress, telegramNotifyOnError, telegramNotifyOnComplete, telegramNotifyOnPause, telegramStatusInterval]);
 
   // ─── Online/offline awareness ───────────────────────────────────
   useEffect(() => {
@@ -262,6 +267,26 @@ export default function Dashboard() {
       };
     }
   }, [isRunning]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ─── Telegram periodic status updates (every N minutes) ─────────
+  useEffect(() => {
+    if (!isRunning) return;
+    const minutes = telegramStatusInterval;
+    if (!minutes || minutes <= 0) return;
+    const id = setInterval(() => {
+      const prefs = telegramPrefsRef.current;
+      const p = progressRef.current;
+      if (!prefs.botToken || !prefs.chatId || !p || p.totalChunks === 0) return;
+      const elapsedMin = Math.floor(p.elapsedMs / 60000);
+      const etaMin = p.estimatedRemainingMs > 0 ? Math.ceil(p.estimatedRemainingMs / 60000) : 0;
+      void sendTelegramDirect(
+        prefs.botToken,
+        prefs.chatId,
+        `⏱️ <b>Status update</b>\n📖 ${p.completedChunks}/${p.totalChunks} chunks (${p.overallPercent}%)\n⚡ ${p.activeChunks} translating • ⏳ ${elapsedMin}m elapsed${etaMin ? ` • ~${etaMin}m left` : ""}`,
+      );
+    }, minutes * 60_000);
+    return () => clearInterval(id);
+  }, [isRunning, telegramStatusInterval]);
 
   // ─── Wake Lock: keep the screen on while translating ────────────
   const acquireWakeLock = useCallback(async () => {
@@ -343,7 +368,6 @@ export default function Dashboard() {
       setIsPaused(false);
 
       let lastMilestone = 0;
-      let telegramStartSent = false;
 
       pipeline.setProgressCallback((p) => {
         setProgress(p);
@@ -357,7 +381,8 @@ export default function Dashboard() {
           p.totalChunks > 0
         ) {
           const pct = Math.floor(p.overallPercent / 25) * 25;
-          if (pct >= lastMilestone + 25 && p.completedChunks > 0) {
+          // 100% is covered by the dedicated completion message — skip it here
+          if (pct >= lastMilestone + 25 && pct < 100 && p.completedChunks > 0) {
             lastMilestone = pct;
             sendTelegramDirect(
               prefs.botToken,
@@ -522,6 +547,15 @@ export default function Dashboard() {
   // ─── Pause ──────────────────────────────────────────────────────
   const pauseTranslation = useCallback(() => {
     pipelineRef.current?.abort();
+    const prefs = telegramPrefsRef.current;
+    if (prefs.onPause && prefs.botToken && prefs.chatId) {
+      const p = progressRef.current;
+      void sendTelegramDirect(
+        prefs.botToken,
+        prefs.chatId,
+        `⏸️ <b>Translation paused</b>${p ? `\n📖 ${p.completedChunks}/${p.totalChunks} chunks (${p.overallPercent}%)` : ""}\nOpen the app and press Resume to continue.`,
+      );
+    }
   }, []);
 
   // ─── Stop (hard stop, same as pause for client-side) ────────────
@@ -530,6 +564,15 @@ export default function Dashboard() {
     setIsRunning(false);
     setIsPaused(true);
     releaseWakeLock();
+    const prefs = telegramPrefsRef.current;
+    if (prefs.onPause && prefs.botToken && prefs.chatId) {
+      const p = progressRef.current;
+      void sendTelegramDirect(
+        prefs.botToken,
+        prefs.chatId,
+        `⏹️ <b>Translation stopped</b>${p ? `\n📖 ${p.completedChunks}/${p.totalChunks} chunks (${p.overallPercent}%)` : ""}\nProgress is saved — Resume anytime.`,
+      );
+    }
   }, [releaseWakeLock]);
 
   // ─── Download helper ────────────────────────────────────────────
@@ -1025,6 +1068,25 @@ export default function Dashboard() {
                         </p>
                       </div>
                       <div className="space-y-2">
+                        <label className="text-xs font-medium text-stone-400">Status update every</label>
+                        <select
+                          value={telegramStatusInterval}
+                          onChange={(e) => setTelegramStatusInterval(Number(e.target.value))}
+                          disabled={isRunning}
+                          className="w-full rounded-xl border border-stone-700 bg-stone-800 px-3 py-2 text-xs text-stone-200 focus:outline-none focus:ring-2 focus:ring-blue-400/30 disabled:opacity-50 cursor-pointer"
+                        >
+                          <option value={0}>Off — milestones only (25% steps)</option>
+                          <option value={1}>Every 1 minute</option>
+                          <option value={5}>Every 5 minutes</option>
+                          <option value={10}>Every 10 minutes</option>
+                          <option value={15}>Every 15 minutes</option>
+                          <option value={30}>Every 30 minutes</option>
+                        </select>
+                        <p className="text-[10px] text-stone-600">
+                          Periodic progress snapshots while translating. Pause or finish the run to change it.
+                        </p>
+                      </div>
+                      <div className="space-y-2">
                         <label className="text-xs font-medium text-stone-400">Notify me when...</label>
                         <div className="space-y-1.5">
                           {(
@@ -1033,6 +1095,7 @@ export default function Dashboard() {
                               { label: "Progress milestones (every 25%)", checked: telegramNotifyOnProgress, set: setTelegramNotifyOnProgress },
                               { label: "A chunk fails (error)", checked: telegramNotifyOnError, set: setTelegramNotifyOnError },
                               { label: "Translation completes", checked: telegramNotifyOnComplete, set: setTelegramNotifyOnComplete },
+                              { label: "Paused or stopped", checked: telegramNotifyOnPause, set: setTelegramNotifyOnPause },
                             ] as const
                           ).map(({ label, checked, set }) => (
                             <label key={label} className="flex items-center gap-2 cursor-pointer group">
