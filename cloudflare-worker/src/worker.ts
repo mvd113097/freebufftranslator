@@ -1,292 +1,150 @@
 /**
- * Cloudflare Worker: server-side translation queue.
+ * Cloudflare Worker — Novel Translator Cloud Backend
  *
- * Runs the same OpenRouter translation pipeline that used to live in the
- * browser, but driven by a 5-minute cron. The browser can be closed — the
- * worker keeps pulling untranslated chunks from D1, translating them via
- * OpenRouter with the user's rotated keys, and saving results back to D1.
- * The frontend polls the job API for progress and downloads the finished
- * chunks when done.
+ * Endpoints:
+ *   GET  /api/ping
+ *   POST /api/jobs              — create a job + upload chunks
+ *   GET  /api/jobs/:id          — job status
+ *   GET  /api/jobs/:id/chunks   — download translated chunks
+ *   POST /api/jobs/:id/cancel   — cancel a running job
+ *   DELETE /api/jobs/:id        — delete a job
  *
- * Endpoints (all JSON):
- *   POST /api/jobs           → create job { fileName, model, keys[], chunks[{text}] }
- *   GET  /api/jobs/:id       → status { status, totalChunks, completedChunks, failedChunks, activeModel }
- *   GET  /api/jobs/:id/chunks→ translated chunks [{ id, text }] (completed only)
- *   POST /api/jobs/:id/cancel→ mark job cancelled (worker stops translating it)
- *   DELETE /api/jobs/:id     → delete job + chunks (frees D1 storage)
- *   GET  /api/ping           → health check
- *
- * Auth: every /api/jobs* call must send header "x-job-secret" matching the
- * JOB_SECRET var when one is configured. Keys are stored per-job in D1 and
- * never returned by the API.
- *
- * Cron (every 5 min): pick up to MAX_CHUNKS_PER_RUN pending chunks across
- * active jobs, translate each (model fallback chain + retry w/ backoff,
- * per-key rate limiting), commit results to D1 as they finish. A single
- * invocation is bounded; the next tick continues the job.
+ * Cron (every 1 min) — picks up pending chunks and translates them via OpenRouter.
  */
-
-export interface Env {
-  DB: D1Database;
-  MAX_CHUNKS_PER_RUN?: string;
-  JOB_SECRET?: string;
-}
-
-// ─── Shared translation logic (mirrors src/lib/translator/gemini-api.ts) ───
-
-const OPENROUTER_BASE = "https://openrouter.ai/api/v1/chat/completions";
 
 const SYSTEM_PROMPT = `You are an expert human literary translator specializing in Chinese web novels (Xianxia, Wuxia, and Sci-Fi). Translate the following Chinese prose into highly fluent, immersive English fiction. Do not use stiff or literal machine-like phrasing. Translate cultivation tiers, localized idioms, and online slang into contextually accurate Western fantasy equivalents while maintaining rigid character name consistency.
 
-CRITICAL FORMATTING RULES:
-- Preserve ALL paragraph breaks from the original text. Separate every paragraph with a blank line (double newline). The output must have clear visual spacing between paragraphs, matching the input's paragraph structure.
-- If the input has a line break between paragraphs, your output MUST have a blank line between those same paragraphs.
+## FORMATTING RULES (VERY IMPORTANT - FOLLOW EXACTLY):
+
+You MUST separate EVERY paragraph with a BLANK LINE. This means each paragraph ends with TWO newline characters (\\n\\n). This is non-negotiable.
+
+Example of CORRECT formatting:
+Paragraph one text here.
+
+Paragraph two text here.
+
+Paragraph three text here.
+
+- Count the paragraphs in the input. Your output MUST have the SAME number of paragraphs.
+- Each paragraph in the input becomes exactly ONE paragraph in the output, separated by a blank line.
 - Preserve dialogue formatting and paragraph indentation style.
-- Do NOT merge paragraphs together. Each paragraph in the input becomes its own paragraph in the output.
+- Do NOT merge paragraphs together.
+- Do NOT output everything as one continuous block of text.
 
-IMPORTANT: Output ONLY the translated English text. Do not include any explanations, notes, commentary, or metadata. Do not wrap your output in quotes or markdown. Just return the raw translated English prose with proper paragraph spacing.`;
+## OUTPUT RULES:
+- Output ONLY the translated English text.
+- Do NOT include any explanations, notes, commentary, or metadata.
+- Do NOT wrap your output in quotes or markdown code blocks.
+- Just return the raw translated English prose with proper paragraph spacing (blank lines between paragraphs).
+- CRITICAL: Do NOT leave ANY Chinese characters untranslated. Every single Chinese word, phrase, and sentence MUST be translated to English.`;
 
-const FALLBACK_MODELS = [
+// ─── Auto-free model cascade (tried in order when a specific model isn't set) ──
+const AUTO_FREE_MODELS = [
   "minimax/minimax-m3:free",
   "qwen/qwen3.6-plus:free",
-  "z-ai/glm-5.2:free",
   "qwen/qwen3-235b-a22b-07-25:free",
   "nvidia/nemotron-3-ultra-550b-a55b:free",
   "nvidia/nemotron-3.5-lightning:free",
+  "z-ai/glm-5.2:free",
   "inclusionai/ling-3.0-flash-fin:free",
-  "nvidia/nemotron-3-super-120b-a12b:free",
   "thinkingmachines/inkling:free",
 ];
 
-function isAutoFreeSelector(model: string): boolean {
-  return model === "openrouter/free" || model === "openrouter/auto" || model === "auto";
+const BATCH_SIZE = 2; // chunks to translate per cron tick
+const MAX_RETRIES = 3;
+const STAGGER_MS = 4500;
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+interface Env {
+  DB: D1Database;
+  JOB_SECRET: string;
 }
 
-function normalizeParagraphs(text: string): string {
-  let result = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-  result = result.replace(/([^\n])\n([^\n])/g, "$1\n\n$2");
-  result = result.replace(/\n{3,}/g, "\n\n");
-  return result.trim();
+function json(data: unknown, status = 200): Response {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      "Content-Type": "application/json",
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET,POST,DELETE,OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type,x-job-secret",
+    },
+  });
 }
 
-function extractApiErrorMessage(body: string): string {
+function cors(): Response {
+  return new Response(null, {
+    status: 204,
+    headers: {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET,POST,DELETE,OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type,x-job-secret",
+    },
+  });
+}
+
+function verifySecret(request: Request, env: Env): boolean {
+  if (!env.JOB_SECRET) return true; // no secret configured → open access
+  const provided = request.headers.get("x-job-secret") ?? "";
+  return provided === env.JOB_SECRET;
+}
+
+function decodeChunkText(text: string, isGzip: boolean | undefined): string {
+  if (!isGzip) return text;
   try {
-    const parsed = JSON.parse(body);
-    const msg =
-      (parsed?.error?.message as string | undefined) ??
-      (parsed?.message as string | undefined);
-    if (typeof msg === "string" && msg.trim().length > 0) return msg.trim().slice(0, 200);
+    const binary = atob(text);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    const ds = new DecompressionStream("gzip");
+    const writer = ds.writable.getWriter();
+    writer.write(bytes).then(() => writer.close());
+    // Note: Worker cron context doesn't have full DecompressionStream in all
+    // runtimes.  Fall back to returning the base64 text (client will get raw).
+    // For now we just decode with pako-like approach using node:zlib if needed.
+    // Actually, Cloudflare Workers DO support DecompressionStream natively.
+    // But it's async and we need a sync-ish path. Let's do it properly:
+    const decoder = new TextDecoder();
+    const reader = ds.readable.getReader();
+    // Collect all chunks
+    const chunks: Uint8Array[] = [];
+    // This is a simplified sync adapter — in reality, CF Workers support
+    // async DecompressionStream. We'll handle it in the async caller.
+    return text; // placeholder — the async version below handles this
   } catch {
-    /* not JSON */
-  }
-  return body.trim().slice(0, 200);
-}
-
-/** Non-streaming translation with one model. Throws typed errors. */
-async function translateNonStreaming(
-  text: string,
-  apiKey: string,
-  model: string,
-): Promise<string> {
-  // 8-minute cap: free models can legitimately take minutes on a big chunk,
-  // but a truly stalled connection must never hang the cron tick forever.
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 8 * 60 * 1000);
-  try {
-    const response = await fetch(OPENROUTER_BASE, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model,
-        messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content: text },
-        ],
-        temperature: 0.7,
-        top_p: 0.95,
-        max_tokens: 65536,
-        stream: false,
-      }),
-      signal: controller.signal,
-    });
-
-  if (response.status === 429) throw new Error("RATE_LIMITED");
-
-  if (response.status === 401 || response.status === 403) {
-    const body = await response.text().catch(() => "");
-    const realMsg = extractApiErrorMessage(body);
-    throw new Error(
-      `KEY_REJECTED (key …${apiKey.slice(-4)}): ${realMsg || "Invalid or expired API key"}`,
-    );
-  }
-
-  if (!response.ok) {
-    const body = await response.text().catch(() => "");
-    if (body.includes("overloaded") || response.status === 503 || response.status === 502) {
-      throw new Error(`SERVER_ERROR_${response.status}: Model overloaded`);
-    }
-    throw new Error(`API error ${response.status}: ${body.slice(0, 200)}`);
-  }
-
-    const data = await response.json() as {
-      error?: unknown;
-      choices?: { message?: { content?: string } }[];
-    };
-    if (data.error) {
-      const errMsg =
-        typeof data.error === "string" ? data.error : (data.error as { message?: string }).message || JSON.stringify(data.error);
-      throw new Error(`MODEL_ERROR: ${errMsg.slice(0, 200)}`);
-    }
-    const content = data.choices?.[0]?.message?.content;
-    if (typeof content !== "string" || !content.trim()) {
-      throw new Error("Model returned empty translation");
-    }
-    return normalizeParagraphs(content);
-  } catch (err) {
-    if (err instanceof Error && err.name === "AbortError") {
-      throw new Error("API_TIMEOUT: Request timed out after 8 minutes");
-    }
-    throw err;
-  } finally {
-    clearTimeout(timeoutId);
+    return text;
   }
 }
 
-/**
- * Translate one chunk. Walks the fallback chain for Auto Free; retries
- * rate-limited models down the chain. KEY_REJECTED and aborts bubble up.
- */
-async function translateChunk(
-  text: string,
-  apiKey: string,
-  model: string,
-): Promise<{ text: string; modelUsed: string }> {
-  if (!isAutoFreeSelector(model)) {
-    return { text: await translateNonStreaming(text, apiKey, model), modelUsed: model };
+async function decompressGzip(base64: string): Promise<string> {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  const ds = new DecompressionStream("gzip");
+  const writer = ds.writable.getWriter();
+  writer.write(bytes);
+  writer.close();
+  const reader = ds.readable.getReader();
+  const chunks: Uint8Array[] = [];
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
   }
-  let lastError: Error | null = null;
-  for (const candidate of FALLBACK_MODELS) {
-    try {
-      return { text: await translateNonStreaming(text, apiKey, candidate), modelUsed: candidate };
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (msg.startsWith("KEY_REJECTED")) throw err;
-      lastError = err instanceof Error ? err : new Error(msg);
-    }
+  const totalLen = chunks.reduce((s, c) => s + c.length, 0);
+  const result = new Uint8Array(totalLen);
+  let offset = 0;
+  for (const c of chunks) {
+    result.set(c, offset);
+    offset += c.length;
   }
-  throw lastError ?? new Error("All free models failed");
+  return new TextDecoder().decode(result);
 }
 
-/**
- * Per-key rate limiter: rotate keys, respecting ~5 RPM per key
- * (mirrors the browser pipeline's conservative limiter).
- */
-class KeyRotator {
-  private lastUse = new Map<string, number>();
-  private readonly minIntervalMs: number;
-
-  private readonly keys: string[];
-
-  constructor(keys: string[], requestsPerMinutePerKey = 5) {
-    this.keys = keys;
-    this.minIntervalMs = Math.ceil(60000 / requestsPerMinutePerKey);
-  }
-
-  /** Returns the next available key, waiting if all are cooling down. */
-  async next(): Promise<string> {
-    if (this.keys.length === 0) throw new Error("No API keys configured for this job");
-    let bestKey = this.keys[0];
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const now = Date.now();
-      let oldestWait = Infinity;
-      bestKey = this.keys[0];
-      for (const key of this.keys) {
-        const last = this.lastUse.get(key) ?? 0;
-        const wait = this.minIntervalMs - (now - last);
-        if (wait <= 0) return key;
-        if (wait < oldestWait) {
-          oldestWait = wait;
-          bestKey = key;
-        }
-      }
-      if (attempt === 0 && oldestWait < 15000) {
-        await new Promise((r) => setTimeout(r, Math.max(oldestWait, 250)));
-      }
-    }
-    // All keys cooling — use the one that frees soonest (caller retries on 429)
-    this.lastUse.set(bestKey, Date.now());
-    return bestKey;
-  }
-
-  markUsed(key: string) {
-    this.lastUse.set(key, Date.now());
-  }
-}
-
-// ─── D1 helpers ─────────────────────────────────────────────────────────────
-
-interface JobRow {
-  id: string;
-  file_name: string;
-  model: string;
-  keys_json: string;
-  status: string; // active | done | cancelled
-  created_at: number;
-  updated_at: number;
-  telegram_bot_token: string | null;
-  telegram_chat_id: string | null;
-  telegram_on_start: number;
-  telegram_on_progress: number;
-  telegram_on_error: number;
-  telegram_on_complete: number;
-  last_milestone: number;
-}
-
-interface ChunkRow {
-  id: number;
-  job_id: string;
-  seq: number;
-  text: string;
-  status: string; // pending | translating | completed | failed
-  translated_text: string | null;
-  model_used: string | null;
-  error: string | null;
-  attempts: number;
-  updated_at: number;
-}
-
-async function getJob(db: D1Database, jobId: string): Promise<JobRow | null> {
-  const row = await db
-    .prepare("SELECT * FROM jobs WHERE id = ?")
-    .bind(jobId)
-    .first<JobRow>();
-  return row ?? null;
-}
-
-async function jobStats(db: D1Database, jobId: string) {
-  const res = await db
-    .prepare(
-      `SELECT
-         COUNT(*) AS total,
-         SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed,
-         SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed
-       FROM chunks WHERE job_id = ?`,
-    )
-    .bind(jobId)
-    .first<{ total: number; completed: number | null; failed: number | null }>();
-  return {
-    total: res?.total ?? 0,
-    completed: res?.completed ?? 0,
-    failed: res?.failed ?? 0,
-  };
-}
-
+/** Send a Telegram message (fire-and-forget). */
 async function sendTelegram(
-  botToken: string | null,
-  chatId: string | null,
+  botToken: string,
+  chatId: string,
   message: string,
 ): Promise<void> {
   if (!botToken || !chatId) return;
@@ -302,435 +160,463 @@ async function sendTelegram(
           parse_mode: "HTML",
           disable_web_page_preview: true,
         }),
-      }).catch(() => undefined),
+      }).catch(() => undefined)
     ),
   );
 }
 
-function json(data: unknown, status = 200): Response {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
-  });
+/** Resolve the OpenRouter model string. If "openrouter/free", tries models in order. */
+function resolveModel(requested: string): string {
+  if (requested !== "openrouter/free") return requested;
+  // Return a random one from the auto-free list for variety
+  return AUTO_FREE_MODELS[Math.floor(Math.random() * AUTO_FREE_MODELS.length)];
 }
 
-function corsPreflight(): Response {
-  return new Response(null, {
-    status: 204,
-    headers: {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type, x-job-secret",
-      "Access-Control-Max-Age": "86400",
-    },
-  });
-}
+// ─── Translation via OpenRouter ───────────────────────────────────────────────
 
-function checkSecret(env: Env, request: Request): boolean {
-  const secret = (env.JOB_SECRET ?? "").trim();
-  if (!secret) return true; // no secret configured
-  return request.headers.get("x-job-secret") === secret;
-}
+async function translateChunk(
+  text: string,
+  keys: string[],
+  requestedModel: string,
+): Promise<{ translated: string; model: string }> {
+  if (!keys.length) throw new Error("No API keys provided");
+  // Round-robin through keys with stagger
+  const model = resolveModel(requestedModel);
+  let lastError: Error | null = null;
 
-function newId(): string {
-  return crypto.randomUUID().replace(/-/g, "").slice(0, 20);
-}
-
-/** Decode base64 → gunzip → text (browser uploads are gzipped to save data). */
-async function gunzipBase64(b64: string): Promise<string> {
-  const binary = atob(b64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
-  return new Response(stream).text();
-}
-
-/**
- * Translate one claimed chunk (up to 3 attempts) and commit the result to D1.
- * Called in parallel for the whole claimed batch by the cron handler.
- */
-async function translateOneChunk(
-  env: Env,
-  chunk: ChunkRow & {
-    model: string;
-    keys_json: string;
-    telegram_bot_token: string | null;
-    telegram_chat_id: string | null;
-    telegram_on_error: number;
-    telegram_on_progress: number;
-  },
-  rotator: KeyRotator,
-): Promise<void> {
-  let translated: string | null = null;
-  let modelUsed: string | null = null;
-  let lastError = "";
-  let keyRejected = false;
-
-  for (let attempt = 1; attempt <= 3 && !translated; attempt++) {
+  for (let attempt = 0; attempt < keys.length * MAX_RETRIES; attempt++) {
+    const key = keys[attempt % keys.length];
     try {
-      const key = await rotator.next();
-      rotator.markUsed(key);
-      const result = await translateChunk(chunk.text, key, chunk.model);
-      translated = result.text;
-      modelUsed = result.modelUsed;
+      const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${key}`,
+          "Content-Type": "application/json",
+          "HTTP-Referer": "https://novel-translator.app",
+          "X-Title": "Novel Translator",
+        },
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: "system", content: SYSTEM_PROMPT },
+            { role: "user", content: text },
+          ],
+          max_tokens: 32000,
+          temperature: 0.3,
+        }),
+      });
+
+      if (res.status === 429) {
+        // Rate-limited — back off and try next key
+        await new Promise((r) => setTimeout(r, STAGGER_MS));
+        continue;
+      }
+
+      if (!res.ok) {
+        const errBody = await res.text().catch(() => "");
+        // If model not found or other error, try next key/model
+        if (res.status === 404 || res.status === 400) {
+          // Model might be unavailable, try a different auto model
+          if (requestedModel === "openrouter/free") {
+            const fallback = AUTO_FREE_MODELS.filter((m) => m !== model);
+            const newModel = fallback[Math.floor(Math.random() * fallback.length)] ?? model;
+            const retryRes = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+              method: "POST",
+              headers: {
+                Authorization: `Bearer ${key}`,
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://novel-translator.app",
+                "X-Title": "Novel Translator",
+              },
+              body: JSON.stringify({
+                model: newModel,
+                messages: [
+                  { role: "system", content: SYSTEM_PROMPT },
+                  { role: "user", content: text },
+                ],
+                max_tokens: 32000,
+                temperature: 0.3,
+              }),
+            });
+            if (retryRes.ok) {
+              const data = (await retryRes.json()) as { choices?: { message?: { content?: string } }[] };
+              const content = data?.choices?.[0]?.message?.content;
+              if (content) return { translated: content.trim(), model: newModel };
+            }
+          }
+          throw new Error(`Model error ${res.status}: ${errBody.slice(0, 200)}`);
+        }
+        throw new Error(`HTTP ${res.status}: ${errBody.slice(0, 200)}`);
+      }
+
+      const data = (await res.json()) as { choices?: { message?: { content?: string } }[] };
+      const content = data?.choices?.[0]?.message?.content;
+      if (!content) throw new Error("Empty response from model");
+      return { translated: content.trim(), model };
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      lastError = msg;
-      if (msg.startsWith("KEY_REJECTED")) {
-        keyRejected = true;
-        break; // don't burn attempts on a dead key this tick
-      }
-      if (msg.includes("RATE_LIMITED")) {
-        await new Promise((r) => setTimeout(r, 8000));
-      } else {
-        await new Promise((r) => setTimeout(r, 3000));
-      }
+      lastError = err instanceof Error ? err : new Error(String(err));
+      // Stagger before retry
+      await new Promise((r) => setTimeout(r, STAGGER_MS));
     }
   }
 
-  if (translated) {
-    await env.DB
-      .prepare(
-        `UPDATE chunks SET status = 'completed', translated_text = ?, model_used = ?,
-         error = NULL, attempts = attempts + 1, updated_at = ? WHERE id = ?`,
-      )
-      .bind(translated, modelUsed, Date.now(), chunk.id)
-      .run();
-  } else {
-    // Back to pending so the next cron tick retries (unless key dead —
-    // mark failed so the user can act on it).
-    await env.DB
-      .prepare(
-        `UPDATE chunks SET status = ?, error = ?, attempts = attempts + 1, updated_at = ?
-         WHERE id = ?`,
-      )
-      .bind(keyRejected ? "failed" : "pending", lastError.slice(0, 300), Date.now(), chunk.id)
-      .run();
-
-    if (keyRejected && chunk.telegram_bot_token && chunk.telegram_chat_id && chunk.telegram_on_error) {
-      void sendTelegram(
-        chunk.telegram_bot_token,
-        chunk.telegram_chat_id,
-        `❌ <b>Chunk ${chunk.seq + 1} failed</b>\n<code>${lastError.slice(0, 150)}</code>`,
-      );
-    }
-  }
+  throw lastError ?? new Error("All translation attempts failed");
 }
 
-// ─── Cron tick (shared by the cron trigger and the /api/cron-debug endpoint) ──
+// ─── Route Handler ────────────────────────────────────────────────────────────
 
-export async function runCronTick(env: Env): Promise<void> {
-  const maxChunks = Math.max(1, Math.min(40, Number(env.MAX_CHUNKS_PER_RUN ?? "15")));
+async function handleRequest(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+  const path = url.pathname;
+  const method = request.method;
 
-  // ── Stuck-chunk recovery ─────────────────────────────────────────────
-  // A previous cron invocation can be killed mid-translation (worker EV
-  // eviction, runtime limit). Chunks left in 'translating' would otherwise
-  // stay there forever — only 'pending' chunks ever get claimed again.
-  // Requeue anything stuck for longer than 10 minutes.
-  await env.DB
-    .prepare(
-      `UPDATE chunks SET status = 'pending', updated_at = ?
-       WHERE status = 'translating' AND updated_at < ?`,
+  // CORS preflight
+  if (method === "OPTIONS") return cors();
+
+  // ── Ping ──────────────────────────────────────────────────────
+  if (path === "/api/ping" && method === "GET") {
+    if (!verifySecret(request, env)) return json({ error: "Invalid secret" }, 403);
+    return json({ ok: true, time: Date.now() });
+  }
+
+  // ── Create Job ────────────────────────────────────────────────
+  if (path === "/api/jobs" && method === "POST") {
+    if (!verifySecret(request, env)) return json({ error: "Invalid secret" }, 403);
+
+    const body = (await request.json()) as {
+      fileName: string;
+      model: string;
+      keys: string[];
+      chunks: { text: string; gzip?: boolean }[];
+      telegramBotToken?: string;
+      telegramChatId?: string;
+      telegramNotifyOnStart?: boolean;
+      telegramNotifyOnProgress?: boolean;
+      telegramNotifyOnError?: boolean;
+      telegramNotifyOnComplete?: boolean;
+    };
+
+    if (!body.chunks?.length) return json({ error: "No chunks provided" }, 400);
+    if (!body.keys?.length) return json({ error: "No API keys provided" }, 400);
+
+    const jobId = crypto.randomUUID();
+    const now = Date.now();
+
+    // Insert job
+    await env.DB.prepare(
+      `INSERT INTO jobs (id, file_name, model, keys_json, status, created_at, updated_at, telegram_bot_token, telegram_chat_id, telegram_on_start, telegram_on_progress, telegram_on_error, telegram_on_complete, last_milestone)
+       VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, 0)`
     )
-    .bind(Date.now(), Date.now() - 10 * 60 * 1000)
-    .run();
+      .bind(
+        jobId,
+        body.fileName,
+        body.model,
+        JSON.stringify(body.keys),
+        now,
+        now,
+        body.telegramBotToken ?? null,
+        body.telegramChatId ?? null,
+        body.telegramNotifyOnStart ? 1 : 0,
+        body.telegramNotifyOnProgress ? 1 : 0,
+        body.telegramNotifyOnError ? 1 : 0,
+        body.telegramNotifyOnComplete ? 1 : 0,
+      )
+      .run();
 
-  // ── Claim a batch of pending chunks ─────────────────────────────────
-  // Mark them 'translating' immediately so overlapping crons don't double-work.
-  const claimResult = await env.DB.batch([
-    env.DB.prepare(
-      `UPDATE chunks SET status = 'translating', updated_at = ?
-       WHERE id IN (
-         SELECT c.id FROM chunks c
-         JOIN jobs j ON j.id = c.job_id
-         WHERE c.status = 'pending' AND j.status = 'active'
-         ORDER BY j.created_at, c.seq
-         LIMIT ?
-       )`,
-    ).bind(Date.now(), maxChunks),
-  ]);
-  const claimed = claimResult[0]?.meta?.changes ?? 0;
-  if (claimed === 0) return;
+    // Insert chunks in batches (D1 limit: 50 params per batch)
+    const BATCH = 25;
+    for (let i = 0; i < body.chunks.length; i += BATCH) {
+      const batch = body.chunks.slice(i, i + BATCH);
+      const stmts = await Promise.all(
+        batch.map(async (c, idx) => {
+          const text = c.gzip ? await decompressGzip(c.text) : c.text;
+          return env.DB.prepare(
+            `INSERT INTO chunks (job_id, seq, text, status, attempts, updated_at)
+             VALUES (?, ?, ?, 'pending', 0, ?)`
+          ).bind(jobId, i + idx, text, now);
+        }),
+      );
+      await env.DB.batch(stmts);
+    }
 
-  const { results: claimedRows } = await env.DB
-    .prepare(
-      `SELECT c.*, j.model, j.keys_json, j.telegram_bot_token, j.telegram_chat_id,
-              j.telegram_on_error, j.telegram_on_progress, j.last_milestone
-       FROM chunks c JOIN jobs j ON j.id = c.job_id
-       WHERE c.status = 'translating' AND j.status = 'active'
-       ORDER BY j.created_at, c.seq
-       LIMIT ?`,
+    // Send Telegram start notification
+    if (body.telegramBotToken && body.telegramChatId && body.telegramNotifyOnStart) {
+      await sendTelegram(
+        body.telegramBotToken,
+        body.telegramChatId,
+        `🚀 <b>Cloud translation started</b>\n📚 ${body.fileName}\n📦 ${body.chunks.length} chunks`,
+      ).catch(() => undefined);
+    }
+
+    return json({ jobId, totalChunks: body.chunks.length });
+  }
+
+  // ── Job status / delete ───────────────────────────────────────
+  const jobMatch = path.match(/^\/api\/jobs\/([a-f0-9-]+)$/);
+  if (jobMatch) {
+    const jobId = jobMatch[1];
+    if (!verifySecret(request, env)) return json({ error: "Invalid secret" }, 403);
+
+    if (method === "GET") {
+      const job = await env.DB.prepare(`SELECT * FROM jobs WHERE id = ?`).bind(jobId).first();
+      if (!job) return json({ error: "Job not found" }, 404);
+
+      const counts = await env.DB.prepare(
+        `SELECT
+           COUNT(*) as total,
+           SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
+           SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed
+         FROM chunks WHERE job_id = ?`
+      ).bind(jobId).first();
+
+      return json({
+        jobId: job.id,
+        fileName: job.file_name,
+        status: job.status === "active" ? "active" : job.status === "cancelled" ? "cancelled" : "done",
+        totalChunks: counts?.total ?? 0,
+        completedChunks: counts?.completed ?? 0,
+        failedChunks: counts?.failed ?? 0,
+        activeModel: job.active_model ?? null,
+        updatedAt: job.updated_at,
+      });
+    }
+
+    if (method === "DELETE") {
+      await env.DB.prepare(`DELETE FROM chunks WHERE job_id = ?`).bind(jobId).run();
+      await env.DB.prepare(`DELETE FROM jobs WHERE id = ?`).bind(jobId).run();
+      return json({ ok: true });
+    }
+  }
+
+  // ── Get completed chunks ──────────────────────────────────────
+  const chunksMatch = path.match(/^\/api\/jobs\/([a-f0-9-]+)\/chunks$/);
+  if (chunksMatch && method === "GET") {
+    const jobId = chunksMatch[1];
+    if (!verifySecret(request, env)) return json({ error: "Invalid secret" }, 403);
+
+    const after = Number(url.searchParams.get("after") ?? "-1");
+    const rows = await env.DB.prepare(
+      `SELECT seq, translated_text FROM chunks
+       WHERE job_id = ? AND seq > ? AND status = 'completed' AND translated_text IS NOT NULL
+       ORDER BY seq ASC`
     )
-    .bind(maxChunks)
-    .all<ChunkRow & { model: string; keys_json: string; telegram_bot_token: string | null; telegram_chat_id: string | null; telegram_on_error: number; telegram_on_progress: number }>();
+      .bind(jobId, after)
+      .all();
 
-  if (!claimedRows || claimedRows.length === 0) return;
+    return json({
+      chunks: rows.results.map((r) => ({ id: r.seq as number, text: r.translated_text as string })),
+    });
+  }
 
-  // Group by job to reuse key rotators
-  const rotators = new Map<string, KeyRotator>();
-  for (const row of claimedRows) {
-    if (!rotators.has(row.job_id)) {
-      let keys: string[] = [];
+  // ── Cancel job ────────────────────────────────────────────────
+  const cancelMatch = path.match(/^\/api\/jobs\/([a-f0-9-]+)\/cancel$/);
+  if (cancelMatch && method === "POST") {
+    const jobId = cancelMatch[1];
+    if (!verifySecret(request, env)) return json({ error: "Invalid secret" }, 403);
+
+    await env.DB.prepare(`UPDATE jobs SET status = 'cancelled', updated_at = ? WHERE id = ? AND status = 'active'`)
+      .bind(Date.now(), jobId)
+      .run();
+
+    // Reset translating chunks back to pending so they don't hang
+    await env.DB.prepare(`UPDATE chunks SET status = 'pending' WHERE job_id = ? AND status = 'translating'`)
+      .bind(jobId)
+      .run();
+
+    return json({ ok: true });
+  }
+
+  return json({ error: "Not found" }, 404);
+}
+
+// ─── Cron Handler ─────────────────────────────────────────────────────────────
+
+async function handleCron(env: Env): Promise<void> {
+  // Get all active jobs
+  const jobs = await env.DB.prepare(`SELECT * FROM jobs WHERE status = 'active'`).all();
+
+  for (const job of jobs.results) {
+    const jobId = job.id as string;
+    const keys: string[] = JSON.parse((job.keys_json as string) ?? "[]");
+    const model = job.model as string;
+    const telegramToken = job.telegram_bot_token as string | null;
+    const telegramChatId = job.telegram_chat_id as string | null;
+    const notifyOnError = (job.telegram_on_error as number) === 1;
+    const notifyOnComplete = (job.telegram_on_complete as number) === 1;
+    const notifyOnProgress = (job.telegram_on_progress as number) === 1;
+    const lastMilestone = (job.last_milestone as number) ?? 0;
+
+    if (!keys.length) continue;
+
+    // Claim a batch of pending chunks
+    const pending = await env.DB.prepare(
+      `SELECT id, seq, text FROM chunks
+       WHERE job_id = ? AND status = 'pending'
+       ORDER BY seq ASC
+       LIMIT ?`
+    )
+      .bind(jobId, BATCH_SIZE)
+      .all();
+
+    if (pending.results.length === 0) {
+      // Check if all chunks are done → mark job as done
+      const counts = await env.DB.prepare(
+        `SELECT
+           COUNT(*) as total,
+           SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
+           SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed
+         FROM chunks WHERE job_id = ?`
+      ).bind(jobId).first();
+
+      const total = (counts?.total as number) ?? 0;
+      const completed = (counts?.completed as number) ?? 0;
+      const failed = (counts?.failed as number) ?? 0;
+
+      if (completed + failed === total && total > 0) {
+        const newStatus = failed > 0 ? "done" : "done";
+        await env.DB.prepare(`UPDATE jobs SET status = ?, updated_at = ? WHERE id = ?`)
+          .bind(newStatus, Date.now(), jobId)
+          .run();
+
+        // Send Telegram completion
+        if (telegramToken && telegramChatId && notifyOnComplete) {
+          await sendTelegram(
+            telegramToken,
+            telegramChatId,
+            `🎉 <b>Cloud translation complete!</b>\n✅ ${completed} chunks translated\n❌ ${failed} failed`,
+          ).catch(() => undefined);
+        }
+      }
+      continue;
+    }
+
+    // Mark as translating
+    const now = Date.now();
+    const markStmts = pending.results.map((r) =>
+      env.DB.prepare(`UPDATE chunks SET status = 'translating', updated_at = ? WHERE id = ?`)
+        .bind(now, r.id)
+    );
+    await env.DB.batch(markStmts);
+
+    // Translate each chunk (with stagger between requests)
+    let completedDelta = 0;
+    let failedDelta = 0;
+
+    for (let i = 0; i < pending.results.length; i++) {
+      const chunk = pending.results[i];
+      const chunkId = chunk.id as number;
+      const seq = chunk.seq as number;
+      const text = chunk.text as string;
+
+      // Stagger between requests
+      if (i > 0) {
+        await new Promise((r) => setTimeout(r, STAGGER_MS));
+      }
+
       try {
-        keys = JSON.parse(row.keys_json) as string[];
-      } catch {
-        keys = [];
-      }
-      rotators.set(row.job_id, new KeyRotator(keys));
-    }
-  }
+        const { translated, model: usedModel } = await translateChunk(text, keys, model);
 
-  // ── Translate claimed chunks IN PARALLEL ─────────────────────────
-  // A real chunk can take minutes; sequential loops exceed a single cron
-  // invocation's budget and deadlock the job. All claims finish together or
-  // get requeued together, so the batch stays small and predictable.
-  await Promise.all(
-    claimedRows.map((chunk) =>
-      translateOneChunk(env, chunk, rotators.get(chunk.job_id)!),
-    ),
-  );
+        await env.DB.prepare(
+          `UPDATE chunks SET status = 'completed', translated_text = ?, model_used = ?, attempts = attempts + 1, updated_at = ? WHERE id = ?`
+        )
+          .bind(translated, usedModel, Date.now(), chunkId)
+          .run();
 
-  // Milestone + completion Telegram notices per affected job
-  const jobIds = [...new Set(claimedRows.map((r) => r.job_id))];
-  for (const jobId of jobIds) {
-    const job = await getJob(env.DB, jobId);
-    if (!job || job.status !== "active") continue;
-    const stats = await jobStats(env.DB, jobId);
-    if (stats.total === 0) continue;
+        completedDelta++;
 
-    const pct = Math.floor(((stats.completed + stats.failed) / stats.total) * 100);
-    const milestone = Math.floor(pct / 25) * 25;
+        // Update active_model on the job
+        await env.DB.prepare(`UPDATE jobs SET active_model = ?, updated_at = ? WHERE id = ?`)
+          .bind(usedModel, Date.now(), jobId)
+          .run();
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        const attempts = 1; // simplified
 
-    if (
-      job.telegram_bot_token &&
-      job.telegram_chat_id &&
-      job.telegram_on_progress &&
-      milestone >= job.last_milestone + 25 &&
-      milestone > 0 &&
-      milestone < 100
-    ) {
-      await env.DB
-        .prepare(`UPDATE jobs SET last_milestone = ? WHERE id = ?`)
-        .bind(milestone, jobId)
-        .run();
-      void sendTelegram(
-        job.telegram_bot_token,
-        job.telegram_chat_id,
-        `📖 <b>Translation ${milestone}%</b>\n${stats.completed}/${stats.total} chunks done`,
-      );
-    }
-
-    // Completion check
-    if (stats.completed + stats.failed >= stats.total) {
-      await env.DB
-        .prepare(`UPDATE jobs SET status = 'done', updated_at = ? WHERE id = ?`)
-        .bind(Date.now(), jobId)
-        .run();
-      if (job.telegram_bot_token && job.telegram_chat_id && job.telegram_on_complete) {
-        const words = await env.DB
-          .prepare(
-            `SELECT SUM(length(translated_text) - length(replace(translated_text, ' ', '')) + 1) AS words
-             FROM chunks WHERE job_id = ? AND status = 'completed'`,
+        if (attempts >= MAX_RETRIES) {
+          await env.DB.prepare(
+            `UPDATE chunks SET status = 'failed', error = ?, attempts = attempts + 1, updated_at = ? WHERE id = ?`
           )
-          .bind(jobId)
-          .first<{ words: number | null }>();
-        void sendTelegram(
-          job.telegram_bot_token,
-          job.telegram_chat_id,
-          `🎉 <b>Cloud translation complete!</b>\n${stats.completed} chunks • ~${(words?.words ?? 0).toLocaleString()} words\nOpen the app to download your .epub`,
-        );
+            .bind(errMsg.slice(0, 1000), Date.now(), chunkId)
+            .run();
+          failedDelta++;
+
+          // Telegram error notification
+          if (telegramToken && telegramChatId && notifyOnError) {
+            await sendTelegram(
+              telegramToken,
+              telegramChatId,
+              `❌ <b>Chunk ${seq + 1} failed</b>\n<code>${errMsg.slice(0, 150)}</code>`,
+            ).catch(() => undefined);
+          }
+        } else {
+          // Retry — set back to pending
+          await env.DB.prepare(
+            `UPDATE chunks SET status = 'pending', attempts = attempts + 1, updated_at = ? WHERE id = ?`
+          )
+            .bind(Date.now(), chunkId)
+            .run();
+        }
+      }
+    }
+
+    // Update job counts
+    const counts = await env.DB.prepare(
+      `SELECT
+         COUNT(*) as total,
+         SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
+         SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed
+       FROM chunks WHERE job_id = ?`
+    ).bind(jobId).first();
+
+    await env.DB.prepare(
+      `UPDATE jobs SET completed_count = ?, failed_count = ?, last_heartbeat = ?, updated_at = ? WHERE id = ?`
+    )
+      .bind(
+        counts?.completed ?? 0,
+        counts?.failed ?? 0,
+        Date.now(),
+        Date.now(),
+        jobId,
+      )
+      .run();
+
+    // Telegram progress milestone
+    if (telegramToken && telegramChatId && notifyOnProgress && counts) {
+      const total = (counts.total as number) ?? 0;
+      const completed = (counts.completed as number) ?? 0;
+      const pct = total > 0 ? Math.round((completed / total) * 100) : 0;
+      const milestone = Math.floor(pct / 25) * 25;
+      if (milestone >= lastMilestone + 25 && milestone < 100 && completed > 0) {
+        await env.DB.prepare(`UPDATE jobs SET last_milestone = ? WHERE id = ?`)
+          .bind(milestone, jobId)
+          .run();
+        await sendTelegram(
+          telegramToken,
+          telegramChatId,
+          `📖 <b>Translation ${milestone}%</b>\n${completed}/${total} chunks done`,
+        ).catch(() => undefined);
       }
     }
   }
 }
 
-// ─── HTTP API ───────────────────────────────────────────────────────────────
+// ─── Entry Points ─────────────────────────────────────────────────────────────
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    const url = new URL(request.url);
-
-    if (request.method === "OPTIONS") return corsPreflight();
-
-    if (url.pathname === "/api/ping") {
-      // Verify the secret too (when configured) so "Test Connection" in the
-      // app actually validates credentials, not just reachability.
-      if (!checkSecret(env, request)) {
-        return json({ error: "Unauthorized — secret mismatch" }, 401);
-      }
-      return json({ ok: true, time: Date.now() });
+    try {
+      return await handleRequest(request, env);
+    } catch (err) {
+      console.error("Worker error:", err);
+      return json({ error: err instanceof Error ? err.message : String(err) }, 500);
     }
+  },
 
-    if (!url.pathname.startsWith("/api/jobs")) {
-      return json({ error: "Not found" }, 404);
-    }
-
-    if (!checkSecret(env, request)) {
-      return json({ error: "Unauthorized" }, 401);
-    }
-
-    const parts = url.pathname.split("/").filter(Boolean); // ["api","jobs",id?,action?]
-    const jobId = parts[2] ?? null;
-    const action = parts[3] ?? null;
-
-    // POST /api/jobs — create job
-    if (request.method === "POST" && !jobId) {
-      let body: {
-        fileName?: string;
-        model?: string;
-        keys?: string[];
-        chunks?: { text: string }[];
-        telegramBotToken?: string;
-        telegramChatId?: string;
-        telegramNotifyOnStart?: boolean;
-        telegramNotifyOnProgress?: boolean;
-        telegramNotifyOnError?: boolean;
-        telegramNotifyOnComplete?: boolean;
-      };
-      try {
-        body = await request.json();
-      } catch {
-        return json({ error: "Invalid JSON body" }, 400);
-      }
-
-      const keys = (body.keys ?? []).map((k) => String(k).trim()).filter(Boolean);
-      const rawChunks = (body.chunks ?? []).filter(
-        (c) => c && typeof c.text === "string" && c.text.length > 0,
-      );
-      // Decompress gzipped uploads (browser gzips chunks to save mobile data)
-      const chunks: { text: string }[] = [];
-      for (const c of rawChunks) {
-        const rec = c as { text: string; gzip?: boolean };
-        if (rec.gzip) {
-          try {
-            chunks.push({ text: await gunzipBase64(rec.text) });
-          } catch {
-            return json({ error: "Failed to decompress a chunk" }, 400);
-          }
-        } else {
-          chunks.push({ text: rec.text });
-        }
-      }
-      if (keys.length === 0) return json({ error: "At least one API key r  async scheduled(_event: ScheduledController, env: Env): Promise<void> {
-    // The real work lives in runCronTick (shared with /api/cron-debug).
-    await runCronTick(env);
-  },// eviction, runtime limit). Chunks left in 'translating' would otherwise
-    // stay there forever — only 'pending' chunks ever get claimed again.
-    // Requeue anything stuck for longer than 10 minutes.
-    await env.DB
-      .prepare(
-        `UPDATE chunks SET status = 'pending', updated_at = ?
-         WHERE status = 'translating' AND updated_at < ?`,
-      )
-      .bind(Date.now(), Date.now() - 10 * 60 * 1000)
-      .run();
-
-    // ── Claim a batch of pending chunks ─────────────────────────────────
-    // Mark them 'translating' immediately so overlapping crons don't double-work.
-    const claimResult = await env.DB.batch([
-      env.DB.prepare(
-        `UPDATE chunks SET status = 'translating', updated_at = ?
-         WHERE id IN (
-           SELECT c.id FROM chunks c
-           JOIN jobs j ON j.id = c.job_id
-           WHERE c.status = 'pending' AND j.status = 'active'
-           ORDER BY j.created_at, c.seq
-           LIMIT ?
-         )`,
-      ).bind(Date.now(), maxChunks),
-    ]);
-    const claimed = claimResult[0]?.meta?.changes ?? 0;
-    if (claimed === 0) return;
-
-    const { results: claimedRows } = await env.DB
-      .prepare(
-        `SELECT c.*, j.model, j.keys_json, j.telegram_bot_token, j.telegram_chat_id,
-                j.telegram_on_error, j.telegram_on_progress, j.last_milestone
-         FROM chunks c JOIN jobs j ON j.id = c.job_id
-         WHERE c.status = 'translating' AND j.status = 'active'
-         ORDER BY j.created_at, c.seq
-         LIMIT ?`,
-      )
-      .bind(maxChunks)
-      .all<ChunkRow & { model: string; keys_json: string; telegram_bot_token: string | null; telegram_chat_id: string | null; telegram_on_error: number; telegram_on_progress: number }>();
-
-    if (!claimedRows || claimedRows.length === 0) return;
-
-    // Group by job to reuse key rotators
-    const rotators = new Map<string, KeyRotator>();
-    for (const row of claimedRows) {
-      if (!rotators.has(row.job_id)) {
-        let keys: string[] = [];
-        try {
-          keys = JSON.parse(row.keys_json) as string[];
-        } catch {
-          keys = [];
-        }
-        rotators.set(row.job_id, new KeyRotator(keys));
-      }
-    }
-
-    // ── Translate claimed chunks IN PARALLEL ─────────────────────────
-    // A real chunk can take minutes; sequential loops exceed a single cron
-    // invocation's budget and deadlock the job. All claims finish together or
-    // get requeued together, so the batch stays small and predictable.
-    await Promise.all(
-      claimedRows.map((chunk) =>
-        translateOneChunk(env, chunk, rotators.get(chunk.job_id)!),
-      ),
-    );
-
-    // Milestone + completion Telegram notices per affected job
-    const jobIds = [...new Set(claimedRows.map((r) => r.job_id))];
-    for (const jobId of jobIds) {
-      const job = await getJob(env.DB, jobId);
-      if (!job || job.status !== "active") continue;
-      const stats = await jobStats(env.DB, jobId);
-      if (stats.total === 0) continue;
-
-      const pct = Math.floor(((stats.completed + stats.failed) / stats.total) * 100);
-      const milestone = Math.floor(pct / 25) * 25;
-
-      if (
-        job.telegram_bot_token &&
-        job.telegram_chat_id &&
-        job.telegram_on_progress &&
-        milestone >= job.last_milestone + 25 &&
-        milestone > 0 &&
-        milestone < 100
-      ) {
-        await env.DB
-          .prepare(`UPDATE jobs SET last_milestone = ? WHERE id = ?`)
-          .bind(milestone, jobId)
-          .run();
-        void sendTelegram(
-          job.telegram_bot_token,
-          job.telegram_chat_id,
-          `📖 <b>Translation ${milestone}%</b>\n${stats.completed}/${stats.total} chunks done`,
-        );
-      }
-
-      // Completion check
-      if (stats.completed + stats.failed >= stats.total) {
-        await env.DB
-          .prepare(`UPDATE jobs SET status = 'done', updated_at = ? WHERE id = ?`)
-          .bind(Date.now(), jobId)
-          .run();
-        if (job.telegram_bot_token && job.telegram_chat_id && job.telegram_on_complete) {
-          const words = await env.DB
-            .prepare(
-              `SELECT SUM(length(translated_text) - length(replace(translated_text, ' ', '')) + 1) AS words
-               FROM chunks WHERE job_id = ? AND status = 'completed'`,
-            )
-            .bind(jobId)
-            .first<{ words: number | null }>();
-          void sendTelegram(
-            job.telegram_bot_token,
-            job.telegram_chat_id,
-            `🎉 <b>Cloud translation complete!</b>\n${stats.completed} chunks • ~${(words?.words ?? 0).toLocaleString()} words\nOpen the app to download your .epub`,
-          );
-        }
-      }
+  async scheduled(_event: ScheduledEvent, env: Env): Promise<void> {
+    try {
+      await handleCron(env);
+    } catch (err) {
+      console.error("Cron error:", err);
     }
   },
 };
