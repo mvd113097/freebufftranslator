@@ -108,6 +108,8 @@ export interface CreateJobInput {
   model: string;
   keys: string[];
   chunks: { text: string }[];
+  /** Quality-ranked live model slugs. Worker uses this for the auto-free cascade. */
+  liveModels?: string[];
   telegramBotToken?: string;
   telegramChatId?: string;
   telegramNotifyOnStart?: boolean;

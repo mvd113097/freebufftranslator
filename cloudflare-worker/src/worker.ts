@@ -222,12 +222,16 @@ async function translateChunk(
   text: string,
   keys: string[],
   requestedModel: string,
+  liveModels?: string[] | null,
 ): Promise<{ translated: string; model: string }> {
   if (!keys.length) throw new Error("No API keys provided");
 
   // Build the model list: try the requested model first, then cascade through auto-free
+  // If liveModels is provided (from the frontend's Check Live), use that quality-ranked order
   const models = requestedModel === "openrouter/free"
-    ? [resolveModel(requestedModel), ...AUTO_FREE_MODELS.filter((m) => m !== resolveModel(requestedModel))]
+    ? (liveModels && liveModels.length > 0
+        ? liveModels
+        : [resolveModel(requestedModel), ...AUTO_FREE_MODELS.filter((m) => m !== resolveModel(requestedModel))])
     : [requestedModel];
 
   let lastError: Error | null = null;
@@ -282,6 +286,7 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
       model: string;
       keys: string[];
       chunks: { text: string; gzip?: boolean }[];
+      liveModels?: string[];
       telegramBotToken?: string;
       telegramChatId?: string;
       telegramNotifyOnStart?: boolean;
@@ -297,9 +302,12 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
     const now = Date.now();
 
     // Insert job
+    const liveModelsJson = body.liveModels && body.liveModels.length > 0
+      ? JSON.stringify(body.liveModels) : null;
+
     await env.DB.prepare(
-      `INSERT INTO jobs (id, file_name, model, keys_json, status, created_at, updated_at, telegram_bot_token, telegram_chat_id, telegram_on_start, telegram_on_progress, telegram_on_error, telegram_on_complete, last_milestone)
-       VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, 0)`
+      `INSERT INTO jobs (id, file_name, model, keys_json, status, created_at, updated_at, live_models_json, telegram_bot_token, telegram_chat_id, telegram_on_start, telegram_on_progress, telegram_on_error, telegram_on_complete, last_milestone)
+       VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`
     )
       .bind(
         jobId,
@@ -308,6 +316,7 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
         JSON.stringify(body.keys),
         now,
         now,
+        liveModelsJson,
         body.telegramBotToken ?? null,
         body.telegramChatId ?? null,
         body.telegramNotifyOnStart ? 1 : 0,
@@ -445,6 +454,8 @@ async function handleCron(env: Env): Promise<void> {
     const jobId = job.id as string;
     const keys: string[] = JSON.parse((job.keys_json as string) ?? "[]");
     const model = job.model as string;
+    const liveModels: string[] | null = job.live_models_json
+      ? JSON.parse(job.live_models_json as string) : null;
     const telegramToken = job.telegram_bot_token as string | null;
     const telegramChatId = job.telegram_chat_id as string | null;
     const notifyOnError = (job.telegram_on_error as number) === 1;
@@ -520,7 +531,7 @@ async function handleCron(env: Env): Promise<void> {
       }
 
       try {
-        const { translated, model: usedModel } = await translateChunk(text, keys, model);
+        const { translated, model: usedModel } = await translateChunk(text, keys, model, liveModels);
 
         await env.DB.prepare(
           `UPDATE chunks SET status = 'completed', translated_text = ?, model_used = ?, attempts = attempts + 1, updated_at = ? WHERE id = ?`

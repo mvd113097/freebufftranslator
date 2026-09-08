@@ -77,6 +77,42 @@ const MODEL_OPTIONS = [
   { value: "liquid/lfm-2.5-2.6b:free", label: "Liquid LFM 2.5 (free, 65K ctx)" },
 ];
 
+// ─── Model availability persistence ──────────────────────────────
+const MODEL_AVAIL_KEY = "novel-translator-model-availability";
+
+function loadModelAvailability(): Record<string, "live" | "dead"> {
+  try {
+    const raw = localStorage.getItem(MODEL_AVAIL_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    // Only accept "live" or "dead" values
+    const result: Record<string, "live" | "dead"> = {};
+    for (const [k, v] of Object.entries(parsed)) {
+      if (v === "live" || v === "dead") result[k] = v;
+    }
+    return result;
+  } catch {
+    return {};
+  }
+}
+
+function saveModelAvailability(data: Record<string, "live" | "dead">): void {
+  try {
+    localStorage.setItem(MODEL_AVAIL_KEY, JSON.stringify(data));
+  } catch {
+    /* ignore */
+  }
+}
+
+/** Returns the live models in quality order (first = best). Falls back to the static list. */
+function getLiveModelOrder(): string[] {
+  const avail = loadModelAvailability();
+  const live = MODEL_OPTIONS
+    .filter((m) => m.value !== "openrouter/free" && avail[m.value] === "live")
+    .map((m) => m.value);
+  return live.length > 0 ? live : MODEL_OPTIONS.filter((m) => m.value !== "openrouter/free").map((m) => m.value);
+}
+
 // ─── Telegram direct-from-browser ──────────────────────────────────
 
 async function sendTelegramDirect(
@@ -121,7 +157,13 @@ export default function Dashboard() {
   const [showScanResults, setShowScanResults] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [telegramOpen, setTelegramOpen] = useState(false);
-  const [modelAvailability, setModelAvailability] = useState<Record<string, "live" | "dead" | "checking">>({});
+  const [modelAvailability, setModelAvailability] = useState<Record<string, "live" | "dead" | "checking">>(() => {
+    const saved = loadModelAvailability();
+    // Convert saved {live|dead} to the UI state format
+    const init: Record<string, "live" | "dead" | "checking"> = {};
+    for (const [k, v] of Object.entries(saved)) init[k] = v;
+    return init;
+  });
   const [checkingModels, setCheckingModels] = useState(false);
 
   // Cloud mode (translation continues on a Cloudflare worker with the browser closed)
@@ -351,6 +393,40 @@ export default function Dashboard() {
       window.removeEventListener("offline", off);
     };
   }, []);
+
+  // ─── Auto-check model availability on mount ─────────────────────
+  useEffect(() => {
+    if (keys.length === 0) return;
+    const saved = loadModelAvailability();
+    const hasSavedResults = Object.keys(saved).length > 0;
+    // If no saved results, check immediately; if saved, check in background
+    if (!hasSavedResults) {
+      checkModels();
+    } else {
+      // Background refresh — non-blocking
+      const key = keys[0];
+      const results: Record<string, "live" | "dead" | "checking"> = {};
+      for (const [k, v] of Object.entries(saved)) results[k] = v;
+      (async () => {
+        for (const m of MODEL_OPTIONS) {
+          if (m.value === "openrouter/free") continue;
+          try {
+            await translateChunkSimple("Hi", key, m.value);
+            results[m.value] = "live";
+          } catch {
+            results[m.value] = "dead";
+          }
+          setModelAvailability({ ...results });
+        }
+        const toSave: Record<string, "live" | "dead"> = {};
+        for (const [k, v] of Object.entries(results)) {
+          if (v === "live" || v === "dead") toSave[k] = v;
+        }
+        saveModelAvailability(toSave);
+      })();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [keys.length > 0 ? "ready" : "none"]);
 
   // ─── Elapsed timer (client mode only — cloud polls report elapsed) ──
   useEffect(() => {
@@ -637,6 +713,7 @@ export default function Dashboard() {
               model: selectedModel,
               keys,
               chunks: chunks.map((c) => ({ id: c.id, text: c.text })),
+              liveModels: getLiveModelOrder(),
               telegramBotToken: telegramBotToken || undefined,
               telegramChatId: telegramChatId || undefined,
               telegramNotifyOnStart: telegramNotifyOnStart,
@@ -734,6 +811,7 @@ export default function Dashboard() {
               model: selectedModel,
               keys,
               chunks: pending.map((c) => ({ id: c.id, text: c.originalText })),
+              liveModels: getLiveModelOrder(),
               telegramBotToken: telegramBotToken || undefined,
               telegramChatId: telegramChatId || undefined,
               telegramNotifyOnStart: telegramNotifyOnStart,
@@ -956,6 +1034,12 @@ export default function Dashboard() {
       }
       setModelAvailability({ ...results });
     }
+    // Persist results to localStorage
+    const toSave: Record<string, "live" | "dead"> = {};
+    for (const [k, v] of Object.entries(results)) {
+      if (v === "live" || v === "dead") toSave[k] = v;
+    }
+    saveModelAvailability(toSave);
     setCheckingModels(false);
   }, [keys]);
 

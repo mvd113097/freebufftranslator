@@ -18,6 +18,7 @@ CREATE TABLE jobs (
   failed_count INTEGER NOT NULL DEFAULT 0,
   last_heartbeat INTEGER NOT NULL DEFAULT 0,
   active_model TEXT,
+  live_models_json TEXT,                    -- JSON array of quality-ranked live model slugs
   telegram_bot_token TEXT,
   telegram_chat_id TEXT,
   telegram_on_start INTEGER NOT NULL DEFAULT 1,

@@ -52,6 +52,7 @@ export class CloudRunner {
       model: string;
       keys: string[];
       chunks: { id: number; text: string }[];
+      liveModels?: string[];
       telegramBotToken?: string;
       telegramChatId?: string;
       telegramNotifyOnStart?: boolean;
@@ -73,6 +74,7 @@ export class CloudRunner {
       model: input.model,
       keys: input.keys,
       chunks: payload,
+      liveModels: input.liveModels,
       telegramBotToken: input.telegramBotToken,
       telegramChatId: input.telegramChatId,
       telegramNotifyOnStart: input.telegramNotifyOnStart,
