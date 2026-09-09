@@ -1047,15 +1047,22 @@ export default function Dashboard() {
 
     // Cloud mode: the worker is the source of truth — fetch the freshest
     // completed chunks (includes parts finished while this tab was closed)
-    // and keep whichever copy is longer per chunk id.
+    // and keep whichever copy is longer per chunk id. IMPORTANT: the worker
+    // stores upload-units (oversized chunks are split into ~5-6k char parts),
+    // so the raw list must be merged back to ORIGINAL chunks via the upload
+    // plan before exporting — otherwise the epub gets garbled/missing chunks.
     if (translationMode === "cloud") {
       try {
         const jobId = cloudRunnerRef.current?.getJobId() || cloudJobId;
         if (jobId) {
           const { getCloudChunks } = await import("@/lib/translator/cloud-client");
+          const { mapUnitsToOriginals, loadStoredPlan } = await import(
+            "@/lib/translator/cloud-runner"
+          );
           const remote = await getCloudChunks(jobId);
+          const merged = mapUnitsToOriginals(remote, loadStoredPlan(jobId));
           const byId = new Map(done.map((c) => [c.index, c.text]));
-          for (const r of remote) {
+          for (const r of merged) {
             if ((byId.get(r.id) ?? "").length < r.text.length) {
               byId.set(r.id, r.text);
             }
@@ -1498,6 +1505,19 @@ export default function Dashboard() {
                         </>
                       ) : (
                         <><strong>{fileName}</strong> — {completedCount} of {totalChunks} chunks done.</>
+                      )}
+                      {translationMode === "cloud" && (
+                        <p className="mt-2 text-[11px] text-yellow-200/60 leading-snug">
+                          Cloud jobs pause only when the worker runs out of working models/keys
+                          (daily free-tier limits) — <strong>closing the browser does NOT pause it</strong>.
+                          Your finished chunks are saved on the worker; Resume re-uploads the remaining
+                          chunks as a fresh cloud job when a model has quota again.
+                        </p>
+                      )}
+                      {translationMode === "cloud" && pauseReason && pauseReason !== "quota_exhausted" && (
+                        <p className="mt-1 text-[11px] text-yellow-200/50 break-words">
+                          Worker reason: {pauseReason.slice(0, 200)}
+                        </p>
                       )}
                     </p>
                   </div>
