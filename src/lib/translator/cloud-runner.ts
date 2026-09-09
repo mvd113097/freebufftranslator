@@ -29,6 +29,7 @@ import {
   cancelCloudJob,
 } from "./cloud-client";
 import { prepareChunkForUpload } from "./compress";
+import { sanitizeModel, resolveAutoModel } from "./models";
 import type { PipelineProgress } from "./pipeline";
 
 /** Chunks larger than this are split before upload. The currently-deployed
@@ -232,7 +233,11 @@ export class CloudRunner {
 
     const { jobId } = await createCloudJob({
       fileName: input.fileName,
-      model: input.model,
+      // Defense in depth: never send a removed/dead model slug (e.g. one saved
+      // by an older build) or the Auto sentinel to the worker — resolve to a
+      // specific verified-live slug here so the deployed worker, whatever
+      // version it runs, always starts from a working model.
+      model: resolveAutoModel(sanitizeModel(input.model)),
       keys: input.keys,
       chunks: payload,
       liveModels: input.liveModels,

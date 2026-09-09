@@ -8,6 +8,8 @@
 
 const OPENROUTER_BASE = "https://openrouter.ai/api/v1/chat/completions";
 
+import { LIVE_MODEL_SLUGS } from "./models";
+
 const SYSTEM_PROMPT = `You are an expert human literary translator specializing in Chinese web novels (Xianxia, Wuxia, and Sci-Fi). Translate the following Chinese prose into highly fluent, immersive English fiction. Do not use stiff or literal machine-like phrasing. Translate cultivation tiers, localized idioms, and online slang into contextually accurate Western fantasy equivalents while maintaining rigid character name consistency.
 
 CRITICAL FORMATTING RULES:
@@ -30,22 +32,7 @@ export const DEFAULT_MODEL = "openrouter/free";
  * against /api/v1/models on 2026-09). Paid slugs (no :free suffix) are rejected
  * with HTTP 402 on free-tier accounts.
  */
-const FALLBACK_MODELS = [
-  "inclusionai/ling-3.0-flash-fin:free",
-  "inclusionai/ling-3.0-flash-sante:free",
-  "google/gemma-4-31b-it:free",
-  "google/gemma-4-26b-a4b-it:free",
-  "poolside/laguna-s-2.1:free",
-  "nex-agi/nex-n2.5-pro:free",
-  "nex-agi/nex-n2.5-mini:free",
-  "nvidia/nemotron-3-ultra-550b-a55b:free",
-  "thinkingmachines/inkling:free",
-  "nvidia/nemotron-3.5-lightning:free",
-  "thinkingmachines/inkling-small:free",
-  "dots-studio/dots-3-note-preview:free",
-  "nvidia/nemotron-3-super-120b-a12b:free",
-  "liquid/lfm-2.5-2.6b:free",
-];
+const FALLBACK_MODELS = LIVE_MODEL_SLUGS;
 
 /**
  * Cap on requested max_tokens. Free-tier OpenRouter accounts can only

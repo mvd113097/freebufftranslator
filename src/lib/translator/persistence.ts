@@ -6,6 +6,7 @@
  */
 
 import { openDB, type IDBPDatabase } from "idb";
+import { sanitizeModel } from "./models";
 
 // ─── localStorage helpers ──────────────────────────────────────────
 
@@ -61,6 +62,16 @@ export function loadSettings(): AppSettings {
       const mapped = `${settings.model}:free`;
       console.log(`[Settings] Migrated model "${settings.model}" → "${mapped}"`);
       settings.model = mapped;
+    }
+
+    // Sanitize: any saved slug that is no longer a known live model (removed
+    // or dead, e.g. minimax/minimax-m3:free saved by an older build) is reset
+    // to Auto, which resolves to a verified-live model at start/resume time.
+    // This prevents a stale slug from ever being sent to the worker again.
+    const clean = sanitizeModel(settings.model);
+    if (clean !== settings.model) {
+      console.log(`[Settings] Sanitized stale model "${settings.model}" → "${clean}"`);
+      settings.model = clean;
       try {
         localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
       } catch {
