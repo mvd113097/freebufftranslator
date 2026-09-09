@@ -533,7 +533,7 @@ export default function Dashboard() {
       runningRef.current = true;
       setIsRunning(true);
       setIsPaused(false);
-          setPauseReason(null);
+      setPauseReason(null);
 
       let lastMilestone = 0;
 
@@ -695,7 +695,8 @@ export default function Dashboard() {
 
       setUploadPhase(null);
       setIsStarting(false);
-      setIsRestored(false);      // Telegram start notice (client mode only — the worker sends its own)
+      setIsRestored(false);
+      // Telegram start notice (client mode only — the worker sends its own)
       const prefs = telegramPrefsRef.current;
       if (translationMode === "client" && prefs.onStart && prefs.botToken && prefs.chatId) {
         sendTelegramDirect(
@@ -955,13 +956,40 @@ export default function Dashboard() {
     await downloadTranslation(done, baseName);
   }, [chunkProgress, fileName, downloadTranslation]);
 
-  // ─── Download progress (partial) ────────────────────────────────
+  // ─── Download progress (partial, cumulative) ────────────────────
   const handleDownloadProgress = useCallback(async () => {
-    const done = chunkProgress
-      .filter((c) => c.status === "completed")
+    // Start from locally-known completed chunks (IndexedDB-backed).
+    let done = chunkProgress
+      .filter((c) => c.status === "completed" && c.translatedText.length > 0)
       .map((c) => ({ index: c.id, text: c.translatedText }));
+
+    // Cloud mode: the worker is the source of truth — fetch the freshest
+    // completed chunks (includes parts finished while this tab was closed)
+    // and keep whichever copy is longer per chunk id.
+    if (translationMode === "cloud") {
+      try {
+        const jobId = cloudRunnerRef.current?.getJobId() || cloudJobId;
+        if (jobId) {
+          const { getCloudChunks } = await import("@/lib/translator/cloud-client");
+          const remote = await getCloudChunks(jobId);
+          const byId = new Map(done.map((c) => [c.index, c.text]));
+          for (const r of remote) {
+            if ((byId.get(r.id) ?? "").length < r.text.length) {
+              byId.set(r.id, r.text);
+            }
+          }
+          done = [...byId.entries()]
+            .map(([index, text]) => ({ index, text }))
+            .filter((c) => c.text.length > 0)
+            .sort((a, b) => a.index - b.index);
+        }
+      } catch {
+        // Worker unreachable — local state is still a valid snapshot
+      }
+    }
+
     await downloadTranslation(done, "incomplete_english.epub");
-  }, [chunkProgress, downloadTranslation]);
+  }, [chunkProgress, downloadTranslation, translationMode, cloudJobId]);
 
   // ─── Reset ──────────────────────────────────────────────────────
   const handleReset = useCallback(async () => {
@@ -981,7 +1009,7 @@ export default function Dashboard() {
     setElapsedMs(0);
     setIsRunning(false);
     setIsPaused(false);
-          setPauseReason(null);
+    setPauseReason(null);
     setIsRestored(false);
     setRestoredTotal(0);
     setRawText("");
@@ -1802,8 +1830,8 @@ export default function Dashboard() {
             </button>
           )}
 
-          {/* Download Progress — partial export */}
-          {hasSession && hasTranslatedChunks && !isRunning && (
+          {/* Download Progress — partial, cumulative export (available even mid-translation) */}
+          {hasSession && hasTranslatedChunks && (
             <button
               onClick={handleDownloadProgress}
               className="flex items-center gap-2 rounded-xl border border-green-500/30 bg-green-500/10 backdrop-blur-md px-4 py-2.5 text-sm font-medium text-green-300 hover:bg-green-500/20 active:bg-green-500/30 transition-all cursor-pointer"
