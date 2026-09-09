@@ -56,6 +56,7 @@ import {
   setWorkerUrl,
   getWorkerSecret,
   setWorkerSecret,
+  getCloudStatus,
 } from "@/lib/translator/cloud-client";
 import { CloudSettings } from "@/components/translator/CloudSettings";
 
@@ -186,6 +187,8 @@ export default function Dashboard() {
   const [workerUrl, setWorkerUrlState] = useState(() => getWorkerUrl());
   const [workerSecret, setWorkerSecretState] = useState(() => getWorkerSecret());
   const [cloudJobId, setCloudJobId] = useState(() => loadSettings().cloudJobId);
+  /** True when a saved cloud job exists but auto-reconnect failed (manual Reconnect shown). */
+  const [cloudReconnectAvailable, setCloudReconnectAvailable] = useState(false);
 
   // Auth gate (fully client-side)
   const [auth, setAuth] = useState<AuthState | null>(null);
@@ -314,70 +317,148 @@ export default function Dashboard() {
     };
   }, []);
 
-  // ─── Re-attach to a running cloud job after reload ──────────────
-  useEffect(() => {
-    const savedJobId = loadSettings().cloudJobId;
-    if (!savedJobId) return;
-    let cancelled = false;
-
-    (async () => {
-      try {
-        const { getCloudStatus } = await import("@/lib/translator/cloud-client");
-        const status = await getCloudStatus(savedJobId);
-        if (cancelled) return;
-
-        // Only re-attach if the job is still alive on the worker
-        if (status.status === "active") {
-          const runner = new CloudRunner(savedJobId, {
-            onProgress: (p) => {
-              setProgress(p);
-              setActiveModel(p.activeModel);
-              setElapsedMs(p.elapsedMs);
-            },
-            onChunkCompleted: async (chunkId, text) => {
-              setChunkProgress((prev) =>
-                prev.map((c) =>
-                  c.id === chunkId
-                    ? { ...c, status: "completed" as const, translatedText: text }
-                    : c,
-                ),
-              );
-              try {
-                await updateChunk({
-                  id: chunkId,
-                  text: cloudChunkTextRef.current.get(chunkId) ?? "",
-                  status: "completed",
-                  translatedText: text,
-                });
-              } catch {
-                /* ignore */
-              }
-            },
-            onDone: (failedChunks, reason) => {
-              setIsRunning(false);
-              setIsPaused(failedChunks > 0);
-              setPauseReason(reason ?? null);
-              cloudRunnerRef.current = null;
-            },
-            onError: (message) => console.error("[Cloud]", message),
+  /**
+   * Pull everything the worker already finished into local state + IndexedDB.
+   * (Chunks completed while this tab was closed would otherwise never show.)
+   */
+  const importWorkerChunks = useCallback(async (jobId: string) => {
+    try {
+      const { mapUnitsToOriginals, loadStoredPlan } = await import(
+        "@/lib/translator/cloud-runner"
+      );
+      const { getCloudChunks } = await import("@/lib/translator/cloud-client");
+      const plan = loadStoredPlan(jobId);
+      const units = await getCloudChunks(jobId);
+      const merged = mapUnitsToOriginals(units, plan);
+      for (const m of merged) {
+        setChunkProgress((prev) =>
+          prev.some((c) => c.id === m.id)
+            ? prev.map((c) =>
+                c.id === m.id
+                  ? { ...c, status: "completed" as const, translatedText: m.text }
+                  : c,
+              )
+            : prev,
+        );
+        try {
+          await updateChunk({
+            id: m.id,
+            text: cloudChunkTextRef.current.get(m.id) ?? "",
+            status: "completed",
+            translatedText: m.text,
           });
-          cloudRunnerRef.current = runner;
-          await runner.attach();
-          setIsRunning(true);
-          runningRef.current = true;
-        } else {
-          // Job finished while we were away — refresh chunks from IndexedDB
-          setCloudJobId("");
+        } catch {
+          /* ignore */
         }
-      } catch {
-        // Worker unreachable — keep local state, user can retry later
       }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
+    } catch (err) {
+      console.warn("[Cloud] chunk import failed:", err);
+    }
   }, []);
+
+  /**
+   * Re-attach to a cloud job after reload (or manual Reconnect). Handles every
+   * job state so the user is never left with no path forward:
+   *   active    → poll again (Pause/Stop visible, translation continues)
+   *   paused    → offer Resume (pending chunks re-translate as a new job)
+   *   done      → import all finished chunks, clear the job id
+   *   cancelled → clear the job id (local chunks remain in IndexedDB)
+   * The worker keeps translating through reloads regardless — this only
+   * restores the UI connection. Status fetches are retried in case the phone
+   * briefly lost connectivity right after reload.
+   */
+  const reattachCloudJob = useCallback(async (): Promise<boolean> => {
+    const savedJobId = loadSettings().cloudJobId;
+    if (!savedJobId) return false;
+
+    // Retry status fetches — mobile reloads often race the network
+    let status: Awaited<ReturnType<typeof getCloudStatus>> | null = null;
+    let lastErr: unknown = null;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      try {
+        status = await getCloudStatus(savedJobId);
+        break;
+      } catch (err) {
+        lastErr = err;
+        await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
+      }
+    }
+    if (!status) {
+      // Worker unreachable after retries — keep the saved job id and offer a
+      // manual Reconnect instead of silently dropping the running job.
+      console.warn("[Cloud] could not re-attach:", lastErr);
+      setCloudReconnectAvailable(true);
+      return false;
+    }
+    setCloudReconnectAvailable(false);
+
+    if (status.status === "active") {
+      const runner = new CloudRunner(savedJobId, {
+        onProgress: (p) => {
+          setProgress(p);
+          setActiveModel(p.activeModel);
+          setElapsedMs(p.elapsedMs);
+        },
+        onChunkCompleted: async (chunkId, text) => {
+          setChunkProgress((prev) =>
+            prev.map((c) =>
+              c.id === chunkId
+                ? { ...c, status: "completed" as const, translatedText: text }
+                : c,
+            ),
+          );
+          try {
+            await updateChunk({
+              id: chunkId,
+              text: cloudChunkTextRef.current.get(chunkId) ?? "",
+              status: "completed",
+              translatedText: text,
+            });
+          } catch {
+            /* ignore */
+          }
+        },
+        onDone: (failedChunks, reason) => {
+          setIsRunning(false);
+          setIsPaused(failedChunks > 0);
+          setPauseReason(reason ?? null);
+          cloudRunnerRef.current = null;
+        },
+        onError: (message) => console.error("[Cloud]", message),
+      });
+      cloudRunnerRef.current = runner;
+      await runner.attach();
+      setIsRunning(true);
+      setIsPaused(false);
+      setPauseReason(null);
+      runningRef.current = true;
+      // Import already-finished chunks after a short delay so the IndexedDB
+      // session restore has populated chunk state first.
+      setTimeout(() => void importWorkerChunks(savedJobId), 1500);
+      return true;
+    }
+
+    // paused / done / cancelled — no polling; import finished chunks so the
+    // UI shows real numbers instead of 0/N.
+    await importWorkerChunks(savedJobId);
+    if (status.status === "paused") {
+      setIsRunning(false);
+      setIsPaused(true);
+      setPauseReason(status.pauseReason ?? null);
+    } else {
+      // done or cancelled — clear the job id; chunks stay in IndexedDB
+      setIsRunning(false);
+      setIsPaused(false);
+      setPauseReason(null);
+      setCloudJobId("");
+    }
+    return true;
+  }, [importWorkerChunks]);
+
+  // Auto re-attach on mount (covers reload while a cloud job is running)
+  useEffect(() => {
+    void reattachCloudJob();
+  }, [reattachCloudJob]);
 
   // ─── Persist settings to localStorage on change ─────────────────
   useEffect(() => {
@@ -1286,6 +1367,33 @@ export default function Dashboard() {
                       Your Cloudflare worker is translating this book in the background. Reopen the
                       app anytime to check progress or download the finished .epub. Telegram updates
                       are sent by the worker too.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Reconnect banner (cloud job exists but auto-reconnect failed) */}
+        <AnimatePresence>
+          {cloudReconnectAvailable && !isRunning && (
+            <motion.div
+              initial={{ opacity: 0, y: -12, height: 0 }}
+              animate={{ opacity: 1, y: 0, height: "auto" }}
+              exit={{ opacity: 0, y: -12, height: 0 }}
+              className="overflow-hidden"
+            >
+              <div className="rounded-2xl border border-sky-500/30 bg-sky-500/10 backdrop-blur-xl p-4 shadow-sm">
+                <div className="flex items-start gap-3">
+                  <Cloud className="h-5 w-5 text-sky-400 mt-0.5 shrink-0" />
+                  <div className="flex-1">
+                    <h3 className="text-sm font-semibold text-sky-300">
+                      Couldn't reconnect to your cloud job
+                    </h3>
+                    <p className="text-xs text-sky-200/70 mt-1">
+                      The worker may still be translating right now — nothing was lost. Check your
+                      connection, then press "Reconnect to Cloud Job" below to re-attach.
                     </p>
                   </div>
                 </div>
