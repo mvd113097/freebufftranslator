@@ -58,6 +58,7 @@ export interface CloudJobStatus {
   lastHeartbeat: number | null;
   lastChunkAt: number | null;
   updatedAt: number;
+  pauseReason: string | null;
 }
 
 async function request(

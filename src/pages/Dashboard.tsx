@@ -10,6 +10,7 @@ import {
   RotateCcw,
   Zap,
   AlertCircle,
+  AlertTriangle,
   ChevronDown,
   Settings2,
   Server,
@@ -191,6 +192,7 @@ export default function Dashboard() {
   // Live pipeline state
   const [isRunning, setIsRunning] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
+  const [pauseReason, setPauseReason] = useState<string | null>(null);
   const [isStarting, setIsStarting] = useState(false);
   const [isResuming, setIsResuming] = useState(false);
   const [uploadPhase, setUploadPhase] = useState<"chunking" | null>(null);
@@ -344,9 +346,10 @@ export default function Dashboard() {
                 /* ignore */
               }
             },
-            onDone: (failedChunks) => {
+            onDone: (failedChunks, reason) => {
               setIsRunning(false);
               setIsPaused(failedChunks > 0);
+              setPauseReason(reason ?? null);
               cloudRunnerRef.current = null;
             },
             onError: (message) => console.error("[Cloud]", message),
@@ -523,6 +526,7 @@ export default function Dashboard() {
       runningRef.current = true;
       setIsRunning(true);
       setIsPaused(false);
+          setPauseReason(null);
 
       let lastMilestone = 0;
 
@@ -583,6 +587,7 @@ export default function Dashboard() {
         if (allDone) {
           setIsRunning(false);
           setIsPaused(false);
+          setPauseReason(null);
           releaseWakeLock();
 
           const prefs = telegramPrefsRef.current;
@@ -720,10 +725,10 @@ export default function Dashboard() {
                   /* ignore */
                 }
               },
-              onDone: (failedChunks) => {
+              onDone: (failedChunks, reason) => {
                 setIsRunning(false);
-                setIsPaused(false);
-                if (failedChunks > 0) setIsPaused(true);
+                setIsPaused(failedChunks > 0);
+                setPauseReason(reason ?? null);
                 setCloudJobId(runner.getJobId());
                 cloudRunnerRef.current = null;
               },
@@ -740,6 +745,7 @@ export default function Dashboard() {
           setIsStarting(false);
           setIsRunning(true);
           setIsPaused(false);
+          setPauseReason(null);
           runningRef.current = true;
           return;
         } catch (err) {
@@ -818,9 +824,10 @@ export default function Dashboard() {
                   /* ignore */
                 }
               },
-              onDone: (failedChunks) => {
+              onDone: (failedChunks, reason) => {
                 setIsRunning(false);
                 setIsPaused(failedChunks > 0);
+                setPauseReason(reason ?? null);
                 cloudRunnerRef.current = null;
               },
               onError: (message) => console.error("[Cloud]", message),
@@ -833,6 +840,7 @@ export default function Dashboard() {
           );
           setIsRunning(true);
           setIsPaused(false);
+          setPauseReason(null);
           runningRef.current = true;
         } catch (err) {
           console.error("Cloud resume failed:", err);
@@ -950,6 +958,7 @@ export default function Dashboard() {
     setElapsedMs(0);
     setIsRunning(false);
     setIsPaused(false);
+          setPauseReason(null);
     setIsRestored(false);
     setRestoredTotal(0);
     setRawText("");
@@ -1278,15 +1287,42 @@ export default function Dashboard() {
               exit={{ opacity: 0, y: -12, height: 0 }}
               className="overflow-hidden"
             >
-              <div className="rounded-2xl border border-yellow-500/30 bg-yellow-500/10 backdrop-blur-xl p-4 shadow-sm">
+              <div className={cn(
+                "rounded-2xl border backdrop-blur-xl p-4 shadow-sm",
+                pauseReason === "quota_exhausted"
+                  ? "border-orange-500/30 bg-orange-500/10"
+                  : "border-yellow-500/30 bg-yellow-500/10"
+              )}>
                 <div className="flex items-start gap-3">
-                  <Pause className="h-5 w-5 text-yellow-400 mt-0.5 shrink-0" />
+                  {pauseReason === "quota_exhausted" ? (
+                    <AlertTriangle className="h-5 w-5 text-orange-400 mt-0.5 shrink-0" />
+                  ) : (
+                    <Pause className="h-5 w-5 text-yellow-400 mt-0.5 shrink-0" />
+                  )}
                   <div className="flex-1">
-                    <h3 className="text-sm font-semibold text-yellow-300">
-                      Translation paused
+                    <h3 className={cn(
+                      "text-sm font-semibold",
+                      pauseReason === "quota_exhausted" ? "text-orange-300" : "text-yellow-300"
+                    )}>
+                      {pauseReason === "quota_exhausted"
+                        ? "Daily quota exhausted"
+                        : "Translation paused"}
                     </h3>
-                    <p className="text-xs text-yellow-200/70 mt-1">
-                      <strong>{fileName}</strong> — {completedCount} of {totalChunks} chunks done.
+                    <p className={cn(
+                      "text-xs mt-1",
+                      pauseReason === "quota_exhausted" ? "text-orange-200/70" : "text-yellow-200/70"
+                    )}>
+                      {pauseReason === "quota_exhausted" ? (
+                        <>
+                          All your OpenRouter keys hit the daily free limit (50 req/key/day).<br />
+                          <strong>Resets at midnight UTC.</strong> Or add $10 credit at{' '}
+                          <a href="https://openrouter.ai/credits" target="_blank" rel="noopener" className="underline hover:text-orange-200">openrouter.ai/credits</a>{' '}
+                          for 1000 req/day.<br />
+                          Press Resume when quota is available.
+                        </>
+                      ) : (
+                        <><strong>{fileName}</strong> — {completedCount} of {totalChunks} chunks done.</>
+                      )}
                     </p>
                   </div>
                 </div>

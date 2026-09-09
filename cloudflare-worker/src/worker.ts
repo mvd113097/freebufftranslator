@@ -243,12 +243,9 @@ async function translateChunk(
     : [requestedModel];
 
   let lastError: Error | null = null;
-  let modelsAttempted = 0;
-  const MAX_MODELS_TO_TRY = 1; // Stay under 30s Worker CPU limit — fail fast, retry next tick
+  let allRateLimited = true; // assume all rate-limited until we find a non-429 error or success
 
   for (const model of models) {
-    if (modelsAttempted >= MAX_MODELS_TO_TRY) break;
-    modelsAttempted++;
     for (let ki = 0; ki < keys.length; ki++) {
       const key = keys[ki];
       try {
@@ -257,15 +254,20 @@ async function translateChunk(
       } catch (err) {
         lastError = err instanceof Error ? err : new Error(String(err));
         if (lastError.message === "RATE_LIMITED") {
-          continue; // try next key immediately
+          continue; // try next key for this model
         }
-        // Dead/timeout — skip to next model immediately
-        if (lastError.message.includes("404") || lastError.message.includes("400") || lastError.message.includes("unavailable") || lastError.message.includes("abort")) {
-          break;
-        }
-        await new Promise((r) => setTimeout(r, 500));
+        // Non-rate-limit error (404, 400, timeout, etc.) — model is dead/broken
+        allRateLimited = false;
+        break; // skip to next model
       }
     }
+    // If we got a non-429 error from this model, we already broke out.
+    // If all keys for this model were 429, allRateLimited stays true and we try next model.
+  }
+
+  // If ALL models and ALL keys returned 429, it's a daily quota exhaustion
+  if (allRateLimited && lastError?.message === "RATE_LIMITED") {
+    throw new Error("QUOTA_EXHAUSTED");
   }
 
   throw lastError ?? new Error("All translation attempts failed");
@@ -387,10 +389,19 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
         `SELECT MAX(updated_at) as last_at FROM chunks WHERE job_id = ? AND status = 'completed'`
       ).bind(jobId).first();
 
+      // Detect if the pause reason is quota exhaustion
+      let pauseReason: string | null = null;
+      if (job.status === "paused") {
+        const failedSample = await env.DB.prepare(
+          `SELECT error FROM chunks WHERE job_id = ? AND status = 'failed' AND error LIKE '%quota%' LIMIT 1`
+        ).bind(jobId).first();
+        if (failedSample) pauseReason = "quota_exhausted";
+      }
+
       return json({
         jobId: job.id,
         fileName: job.file_name,
-        status: job.status === "active" ? "active" : job.status === "cancelled" ? "cancelled" : "done",
+        status: job.status === "active" ? "active" : job.status === "cancelled" ? "cancelled" : job.status === "paused" ? "paused" : "done",
         totalChunks: counts?.total ?? 0,
         completedChunks: counts?.completed ?? 0,
         failedChunks: counts?.failed ?? 0,
@@ -399,6 +410,7 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
         lastHeartbeat: job.last_heartbeat,
         lastChunkAt: lastChunk?.last_at ?? null,
         updatedAt: job.updated_at,
+        pauseReason,
       });
     }
 
@@ -575,7 +587,33 @@ async function handleCron(env: Env): Promise<void> {
           .run();
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : String(err);
-        // Get current attempts from the chunk
+
+        // QUOTA_EXHAUSTED: all keys + all models returned 429 → pause immediately, no retry
+        if (errMsg === "QUOTA_EXHAUSTED") {
+          await env.DB.prepare(
+            `UPDATE chunks SET status = 'failed', error = 'Daily free-tier quota exhausted', attempts = attempts + 1, updated_at = ? WHERE id = ?`
+          )
+            .bind(Date.now(), chunkId)
+            .run();
+          failedDelta++;
+
+          // Pause the entire job immediately
+          await env.DB.prepare(`UPDATE jobs SET status = 'paused', updated_at = ? WHERE id = ? AND status = 'active'`)
+            .bind(Date.now(), jobId)
+            .run();
+
+          // Telegram: quota exhausted notification
+          if (telegramToken && telegramChatId && notifyOnError) {
+            await sendTelegram(
+              telegramToken,
+              telegramChatId,
+              `⏸️ <b>Translation paused — daily quota exhausted</b>\nAll your OpenRouter keys have hit their daily free limit (50 req/key/day).\n\n⏱️ Resets at midnight UTC.\n💡 Or add $10 credit at openrouter.ai/credits for 1000 req/day.\n\nOpen the app and press Resume when quota is available.`,
+            ).catch(() => undefined);
+          }
+          break; // stop processing more chunks this tick
+        }
+
+        // Other errors: normal retry logic
         const chunkRow = await env.DB.prepare(`SELECT attempts FROM chunks WHERE id = ?`).bind(chunkId).first();
         const currentAttempts = (chunkRow?.attempts as number) ?? 0;
         const newAttempts = currentAttempts + 1;
@@ -629,7 +667,9 @@ async function handleCron(env: Env): Promise<void> {
       .run();
 
     // If chunks failed this tick, pause the job and notify
-    if (failedDelta > 0 && telegramToken && telegramChatId && notifyOnError) {
+    // (skip if already paused by QUOTA_EXHAUSTED handler above)
+    const postJobStatus = await env.DB.prepare(`SELECT status FROM jobs WHERE id = ?`).bind(jobId).first();
+    if (failedDelta > 0 && postJobStatus?.status === "active" && telegramToken && telegramChatId && notifyOnError) {
       await env.DB.prepare(`UPDATE jobs SET status = 'paused', updated_at = ? WHERE id = ? AND status = 'active'`)
         .bind(Date.now(), jobId)
         .run();

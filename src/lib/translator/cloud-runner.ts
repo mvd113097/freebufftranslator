@@ -23,7 +23,7 @@ import type { PipelineProgress } from "./pipeline";
 export interface CloudRunnerCallbacks {
   onProgress: (progress: PipelineProgress) => void;
   onChunkCompleted?: (chunkId: number, text: string) => void | Promise<void>;
-  onDone: (failedChunks: number) => void;
+  onDone: (failedChunks: number, pauseReason?: string | null) => void;
   onError: (message: string) => void;
 }
 
@@ -169,7 +169,7 @@ export class CloudRunner {
 
         if (status.status === "done" || status.status === "cancelled" || status.status === "paused") {
           this.stopPolling();
-          this.callbacks.onDone(status.failedChunks);
+          this.callbacks.onDone(status.failedChunks, status.pauseReason);
           return;
         }
       } catch (err) {
