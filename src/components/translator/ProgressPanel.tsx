@@ -120,7 +120,9 @@ export function ProgressPanel({
           <div className="flex items-center gap-2 rounded-xl bg-amber-500/10 border border-amber-500/20 px-3 py-2.5">
             <Loader2 className="h-4 w-4 animate-spin text-amber-400" />
             <span className="text-xs text-amber-300">
-              Translating... {progress?.activeChunks ?? 0} chunk{(progress?.activeChunks ?? 0) !== 1 ? "s" : ""} in progress
+              {progress?.workerHeartbeatMs != null
+                ? "Worker is translating — progress updates every few seconds"
+                : `Translating... ${progress?.activeChunks ?? 0} chunk${(progress?.activeChunks ?? 0) !== 1 ? "s" : ""} in progress`}
             </span>
           </div>
           {/* Worker heartbeat (cloud mode) */}
