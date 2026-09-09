@@ -185,7 +185,7 @@ async function callOpenRouter(
   text: string,
   key: string,
   model: string,
-  timeoutMs = 20000,
+  timeoutMs = 28000,
 ): Promise<{ content: string; model: string }> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -419,6 +419,17 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
       await env.DB.prepare(`DELETE FROM jobs WHERE id = ?`).bind(jobId).run();
       return json({ ok: true });
     }
+  }
+
+  // ── Debug: get chunk errors for a job ─────────────────────────
+  const debugMatch = path.match(/^\/api\/jobs\/([a-f0-9-]+)\/debug$/);
+  if (debugMatch && method === "GET") {
+    const jobId = debugMatch[1];
+    if (!verifySecret(request, env)) return json({ error: "Invalid secret" }, 403);
+    const rows = await env.DB.prepare(
+      `SELECT seq, status, error, model_used, attempts FROM chunks WHERE job_id = ? ORDER BY seq ASC`
+    ).bind(jobId).all();
+    return json({ chunks: rows.results });
   }
 
   // ── Get completed chunks ──────────────────────────────────────
