@@ -41,20 +41,20 @@ Paragraph three text here.
 // ─── Auto-free model cascade (tried in order when a specific model isn't set) ──
 // Quality-ranked: best models first. Dead models are skipped automatically.
 const AUTO_FREE_MODELS = [
-  "nvidia/nemotron-3-ultra-550b-a55b:free",       // 550B params, 1M ctx — best
-  "nvidia/nemotron-3-super-120b-a12b:free",       // 120B params, 262K ctx
-  "thinkingmachines/inkling:free",                 // 1M ctx, strong reasoning
-  "nvidia/nemotron-3.5-lightning:free",            // 1M ctx, fast
-  "google/gemma-4-31b-it:free",                   // Google, 262K ctx
-  "google/gemma-4-26b-a4b-it:free",               // Google, 262K ctx
-  "thinkingmachines/inkling-small:free",           // 1M ctx, lighter
-  "inclusionai/ling-3.0-flash-fin:free",           // 262K ctx
-  "inclusionai/ling-3.0-flash-sante:free",         // 262K ctx
-  "poolside/laguna-s-2.1:free",                   // 262K ctx
-  "poolside/laguna-xs-2.1:free",                  // 262K ctx, lighter
-  "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free", // 30B, 256K ctx
-  "dots-studio/dots-3-note-preview:free",         // 512K ctx
-  "liquid/lfm-2.5-2.6b:free",                    // 65K ctx, smallest fallback
+  "nvidia/nemotron-3-ultra-550b-a55b",       // 550B params, 1M ctx — best
+  "nvidia/nemotron-3-super-120b-a12b",       // 120B params, 262K ctx
+  "thinkingmachines/inkling",                 // 1M ctx, strong reasoning
+  "nvidia/nemotron-3.5-lightning",            // 1M ctx, fast
+  "google/gemma-4-31b-it",                   // Google, 262K ctx
+  "google/gemma-4-26b-a4b-it",               // Google, 262K ctx
+  "thinkingmachines/inkling-small",           // 1M ctx, lighter
+  "inclusionai/ling-3.0-flash-fin",           // 262K ctx
+  "inclusionai/ling-3.0-flash-sante",         // 262K ctx
+  "poolside/laguna-s-2.1",                   // 262K ctx
+  "poolside/laguna-xs-2.1",                  // 262K ctx, lighter
+  "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning", // 30B, 256K ctx
+  "dots-studio/dots-3-note-preview",         // 512K ctx
+  "liquid/lfm-2.5-2.6b",                    // 65K ctx, smallest fallback
 ];
 
 const BATCH_SIZE = 1; // chunks per cron tick — stay under 30s Worker CPU limit

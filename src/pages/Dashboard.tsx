@@ -61,21 +61,21 @@ import { CloudSettings } from "@/components/translator/CloudSettings";
 
 // Quality-ranked: best models first. "Auto Free" cascades through these on failure.
 const MODEL_OPTIONS = [
-  { value: "openrouter/free", label: "Auto Free (best available)" },
-  { value: "nvidia/nemotron-3-ultra-550b-a55b:free", label: "Nemotron 3 Ultra 550B (free, 1M ctx)" },
-  { value: "nvidia/nemotron-3-super-120b-a12b:free", label: "Nemotron 3 Super 120B (free, 262K ctx)" },
-  { value: "thinkingmachines/inkling:free", label: "Inkling (free, 1M ctx)" },
-  { value: "nvidia/nemotron-3.5-lightning:free", label: "Nemotron 3.5 Lightning (free, 1M ctx)" },
-  { value: "google/gemma-4-31b-it:free", label: "Gemma 4 31B (free, Google, 262K ctx)" },
-  { value: "google/gemma-4-26b-a4b-it:free", label: "Gemma 4 26B (free, Google, 262K ctx)" },
-  { value: "thinkingmachines/inkling-small:free", label: "Inkling Small (free, 1M ctx)" },
-  { value: "inclusionai/ling-3.0-flash-fin:free", label: "Ling 3.0 Flash Fin (free, 262K ctx)" },
-  { value: "inclusionai/ling-3.0-flash-sante:free", label: "Ling 3.0 Flash Sante (free, 262K ctx)" },
-  { value: "poolside/laguna-s-2.1:free", label: "Laguna S 2.1 (free, 262K ctx)" },
-  { value: "poolside/laguna-xs-2.1:free", label: "Laguna XS 2.1 (free, 262K ctx)" },
-  { value: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free", label: "Nemotron 3 Nano 30B (free, 256K ctx)" },
-  { value: "dots-studio/dots-3-note-preview:free", label: "Dots 3 Note (free, 512K ctx)" },
-  { value: "liquid/lfm-2.5-2.6b:free", label: "Liquid LFM 2.5 (free, 65K ctx)" },
+  { value: "openrouter/free", label: "Auto (best available)" },
+  { value: "nvidia/nemotron-3-ultra-550b-a55b", label: "Nemotron 3 Ultra 550B (1M ctx)" },
+  { value: "nvidia/nemotron-3-super-120b-a12b", label: "Nemotron 3 Super 120B (262K ctx)" },
+  { value: "thinkingmachines/inkling", label: "Inkling (1M ctx)" },
+  { value: "nvidia/nemotron-3.5-lightning", label: "Nemotron 3.5 Lightning (1M ctx)" },
+  { value: "google/gemma-4-31b-it", label: "Gemma 4 31B (Google, 262K ctx)" },
+  { value: "google/gemma-4-26b-a4b-it", label: "Gemma 4 26B (Google, 262K ctx)" },
+  { value: "thinkingmachines/inkling-small", label: "Inkling Small (1M ctx)" },
+  { value: "inclusionai/ling-3.0-flash-fin", label: "Ling 3.0 Flash Fin (262K ctx)" },
+  { value: "inclusionai/ling-3.0-flash-sante", label: "Ling 3.0 Flash Sante (262K ctx)" },
+  { value: "poolside/laguna-s-2.1", label: "Laguna S 2.1 (262K ctx)" },
+  { value: "poolside/laguna-xs-2.1", label: "Laguna XS 2.1 (262K ctx)" },
+  { value: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning", label: "Nemotron 3 Nano 30B (256K ctx)" },
+  { value: "dots-studio/dots-3-note-preview", label: "Dots 3 Note (512K ctx)" },
+  { value: "liquid/lfm-2.5-2.6b", label: "Liquid LFM 2.5 (65K ctx)" },
 ];
 
 // ─── Model availability persistence ──────────────────────────────
@@ -1020,16 +1020,9 @@ export default function Dashboard() {
 
       for (const m of MODEL_OPTIONS) {
         if (m.value === "openrouter/free") continue;
-        // Check if the model exists in the list and is free
+        // Check if the model exists in OpenRouter's list
         const found = models.find((api) => api.id === m.value);
-        if (found && found.pricing?.prompt === "0") {
-          results[m.value] = "live";
-        } else if (found) {
-          // Exists but not free — mark as dead for free usage
-          results[m.value] = "dead";
-        } else {
-          results[m.value] = "dead";
-        }
+        results[m.value] = found ? "live" : "dead";
         setModelAvailability({ ...results });
       }
     } catch (err) {
@@ -1314,11 +1307,10 @@ export default function Dashboard() {
                     )}>
                       {pauseReason === "quota_exhausted" ? (
                         <>
-                          All your OpenRouter keys hit the daily free limit (50 req/key/day).<br />
-                          <strong>Resets at midnight UTC.</strong> Or add $10 credit at{' '}
-                          <a href="https://openrouter.ai/credits" target="_blank" rel="noopener" className="underline hover:text-orange-200">openrouter.ai/credits</a>{' '}
-                          for 1000 req/day.<br />
-                          Press Resume when quota is available.
+                          All your OpenRouter keys hit their rate limit. This can happen during heavy usage.<br />
+                          <strong>Wait a few minutes</strong> or check your usage at{' '}
+                          <a href="https://openrouter.ai/activity" target="_blank" rel="noopener" className="underline hover:text-orange-200">openrouter.ai/activity</a>.<br />
+                          Press Resume when ready.
                         </>
                       ) : (
                         <><strong>{fileName}</strong> — {completedCount} of {totalChunks} chunks done.</>
@@ -1520,7 +1512,7 @@ export default function Dashboard() {
                   <Zap className="h-3.5 w-3.5 text-amber-400 shrink-0" />
                   Now translating with{" "}
                   <span className="font-mono font-semibold text-amber-400">
-                    {activeModel.split("/").pop()?.replace(/:free$/, "")}
+                    {activeModel.split("/").pop()}
                   </span>
                   {selectedModel === "openrouter/free" ? " (Auto Free picked it)" : ""}
                 </p>
