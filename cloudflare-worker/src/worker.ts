@@ -634,8 +634,8 @@ async function handleCron(env: Env): Promise<void> {
             .bind(Date.now(), jobId)
             .run();
 
-          // Telegram: quota exhausted notification
-          if (telegramToken && telegramChatId && notifyOnError) {
+          // Telegram: quota exhausted notification (always send — pausing is critical)
+          if (telegramToken && telegramChatId) {
             await sendTelegram(
               telegramToken,
               telegramChatId,
@@ -696,22 +696,21 @@ async function handleCron(env: Env): Promise<void> {
         Date.now(),
         jobId,
       )
-      .run();
-
-    // If chunks failed this tick, pause the job and notify
-    // (skip if already paused by QUOTA_EXHAUSTED handler above)
-    const postJobStatus = await env.DB.prepare(`SELECT status FROM jobs WHERE id = ?`).bind(jobId).first();
-    if (failedDelta > 0 && postJobStatus?.status === "active" && telegramToken && telegramChatId && notifyOnError) {
-      await env.DB.prepare(`UPDATE jobs SET status = 'paused', updated_at = ? WHERE id = ? AND status = 'active'`)
-        .bind(Date.now(), jobId)
-        .run();
-      const failedNow = (counts?.failed as number) ?? 0;
-      await sendTelegram(
-        telegramToken,
-        telegramChatId,
-        `⚠️ <b>Translation paused — chunk failed</b>\n${(counts?.completed ?? 0)}/${counts?.total ?? 0} done, ${failedNow} failed\nOpen the app and press Resume to retry the failed chunk.`,
-      ).catch(() => undefined);
-    }
+      .run();      // If chunks failed this tick, pause the job and notify
+      // (skip if already paused by QUOTA_EXHAUSTED handler above)
+      // Always send pause notification — pausing is critical to know about.
+      const postJobStatus = await env.DB.prepare(`SELECT status FROM jobs WHERE id = ?`).bind(jobId).first();
+      if (failedDelta > 0 && postJobStatus?.status === "active" && telegramToken && telegramChatId) {
+        await env.DB.prepare(`UPDATE jobs SET status = 'paused', updated_at = ? WHERE id = ? AND status = 'active'`)
+          .bind(Date.now(), jobId)
+          .run();
+        const failedNow = (counts?.failed as number) ?? 0;
+        await sendTelegram(
+          telegramToken,
+          telegramChatId,
+          `⚠️ <b>Translation paused — chunk failed</b>\n${(counts?.completed ?? 0)}/${counts?.total ?? 0} done, ${failedNow} failed\nOpen the app and press Resume to retry the failed chunk.`,
+        ).catch(() => undefined);
+      }
 
     // Telegram progress milestone
     if (telegramToken && telegramChatId && notifyOnProgress && counts) {

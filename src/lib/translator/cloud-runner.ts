@@ -251,7 +251,7 @@ export class CloudRunner {
     runner.setPlan(plan);
     runner.totalChunks = input.chunks.length;
     runner.startTime = Date.now();
-    runner.refreshFailureMap();
+    await runner.refreshFailureMap();
     runner.startPolling();
     return runner;
   }
@@ -261,24 +261,23 @@ export class CloudRunner {
   }
 
   /** Map worker-unit failures back to original chunk ids via the upload plan. */
-  private refreshFailureMap(): void {
+  private async refreshFailureMap(): Promise<void> {
     this.failedUnits.clear();
     if (this.unitToOriginal.length === 0) return;
-    void getCloudDebug(this.jobId)
-      .then((rows) => {
-        for (const row of rows) {
-          if (row.status !== "failed") continue;
-          const originalId = this.unitToOriginal[row.seq] ?? row.seq;
-          const existing = this.failedUnits.get(originalId);
-          const msg = row.error ?? "Unknown error";
-          if (!existing || msg.length < existing.length) {
-            this.failedUnits.set(originalId, msg);
-          }
+    try {
+      const rows = await getCloudDebug(this.jobId);
+      for (const row of rows) {
+        if (row.status !== "failed") continue;
+        const originalId = this.unitToOriginal[row.seq] ?? row.seq;
+        const existing = this.failedUnits.get(originalId);
+        const msg = row.error ?? "Unknown error";
+        if (!existing || msg.length < existing.length) {
+          this.failedUnits.set(originalId, msg);
         }
-      })
-      .catch(() => {
-        /* debug endpoint unavailable on older workers — non-fatal */
-      });
+      }
+    } catch {
+      /* debug endpoint unavailable on older workers — non-fatal */
+    }
   }
 
   /** Latest original-chunk-id -> error map (empty when nothing has failed). */
@@ -293,7 +292,7 @@ export class CloudRunner {
   async attach(): Promise<void> {
     this.startTime = 0;
     this.stopped = false;
-    this.refreshFailureMap();
+    await this.refreshFailureMap();
     this.startPolling();
   }
 
@@ -342,7 +341,7 @@ export class CloudRunner {
         // Pick up chunks that failed since the last tick so the UI shows
         // WHICH section failed and WHY while the job is still running.
         if (status.failedChunks > 0) {
-          this.refreshFailureMap();
+          await this.refreshFailureMap();
         }
 
         // Use createdAt from the server for accurate elapsed time across reloads

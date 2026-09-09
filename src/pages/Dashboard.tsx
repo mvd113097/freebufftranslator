@@ -1033,6 +1033,15 @@ export default function Dashboard() {
           setIsPaused(false);
           setPauseReason(null);
           runningRef.current = true;
+          // Telegram: confirm resume with remaining count
+          const resumePrefs = telegramPrefsRef.current;
+          if (resumePrefs.onStart && resumePrefs.botToken && resumePrefs.chatId) {
+            void sendTelegramDirect(
+              resumePrefs.botToken,
+              resumePrefs.chatId,
+              `🔄 <b>Cloud translation resumed</b>\n📚 ${fileName || "novel.txt"}\n📦 ${pending.length} chunks remaining`,
+            );
+          }
         } catch (err) {
           console.error("Cloud resume failed:", err);
           alert(
