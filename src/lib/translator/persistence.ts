@@ -34,7 +34,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   keys: [],
   model: "openrouter/free",
   chunkSize: 4000,
-  concurrency: 5,
+  concurrency: 1,
   telegramBotToken: "",
   telegramChatId: "",
   telegramNotifyOnStart: true,
@@ -52,7 +52,23 @@ export function loadSettings(): AppSettings {
     const raw = localStorage.getItem(SETTINGS_KEY);
     if (!raw) return DEFAULT_SETTINGS;
     const parsed = JSON.parse(raw);
-    return { ...DEFAULT_SETTINGS, ...parsed };
+    const settings = { ...DEFAULT_SETTINGS, ...parsed } as AppSettings;
+
+    // Migration: older versions saved paid model slugs (no ":free" suffix).
+    // Paid models fail with HTTP 402 on free-tier OpenRouter accounts, so map
+    // any known paid slug to its free variant.
+    if (settings.model && !settings.model.endsWith(":free") && settings.model !== "openrouter/free") {
+      const mapped = `${settings.model}:free`;
+      console.log(`[Settings] Migrated model "${settings.model}" → "${mapped}"`);
+      settings.model = mapped;
+      try {
+        localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+      } catch {
+        /* ignore */
+      }
+    }
+
+    return settings;
   } catch {
     return DEFAULT_SETTINGS;
   }

@@ -60,22 +60,25 @@ import {
 import { CloudSettings } from "@/components/translator/CloudSettings";
 
 // Quality-ranked: best models first. "Auto Free" cascades through these on failure.
+// IMPORTANT: all slugs are real OpenRouter :free variants — paid slugs (no :free)
+// are rejected with HTTP 402 on free-tier OpenRouter accounts.
 const MODEL_OPTIONS = [
   { value: "openrouter/free", label: "Auto (best available)" },
-  { value: "nvidia/nemotron-3-ultra-550b-a55b", label: "Nemotron 3 Ultra 550B (1M ctx)" },
-  { value: "nvidia/nemotron-3-super-120b-a12b", label: "Nemotron 3 Super 120B (262K ctx)" },
-  { value: "thinkingmachines/inkling", label: "Inkling (1M ctx)" },
-  { value: "nvidia/nemotron-3.5-lightning", label: "Nemotron 3.5 Lightning (1M ctx)" },
-  { value: "google/gemma-4-31b-it", label: "Gemma 4 31B (Google, 262K ctx)" },
-  { value: "google/gemma-4-26b-a4b-it", label: "Gemma 4 26B (Google, 262K ctx)" },
-  { value: "thinkingmachines/inkling-small", label: "Inkling Small (1M ctx)" },
-  { value: "inclusionai/ling-3.0-flash-fin", label: "Ling 3.0 Flash Fin (262K ctx)" },
-  { value: "inclusionai/ling-3.0-flash-sante", label: "Ling 3.0 Flash Sante (262K ctx)" },
-  { value: "poolside/laguna-s-2.1", label: "Laguna S 2.1 (262K ctx)" },
-  { value: "poolside/laguna-xs-2.1", label: "Laguna XS 2.1 (262K ctx)" },
-  { value: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning", label: "Nemotron 3 Nano 30B (256K ctx)" },
-  { value: "dots-studio/dots-3-note-preview", label: "Dots 3 Note (512K ctx)" },
-  { value: "liquid/lfm-2.5-2.6b", label: "Liquid LFM 2.5 (65K ctx)" },
+  { value: "nvidia/nemotron-3-ultra-550b-a55b:free", label: "Nemotron 3 Ultra 550B (1M ctx, free)" },
+  { value: "thinkingmachines/inkling:free", label: "Inkling (1M ctx, free)" },
+  { value: "nvidia/nemotron-3.5-lightning:free", label: "Nemotron 3.5 Lightning (1M ctx, free)" },
+  { value: "thinkingmachines/inkling-small:free", label: "Inkling Small (1M ctx, free)" },
+  { value: "dots-studio/dots-3-note-preview:free", label: "Dots 3 Note (512K ctx, free)" },
+  { value: "nvidia/nemotron-3-super-120b-a12b:free", label: "Nemotron 3 Super 120B (262K ctx, free)" },
+  { value: "google/gemma-4-31b-it:free", label: "Gemma 4 31B (Google, 262K ctx, free)" },
+  { value: "google/gemma-4-26b-a4b-it:free", label: "Gemma 4 26B (Google, 262K ctx, free)" },
+  { value: "inclusionai/ling-3.0-flash-fin:free", label: "Ling 3.0 Flash Fin (262K ctx, free)" },
+  { value: "inclusionai/ling-3.0-flash-sante:free", label: "Ling 3.0 Flash Sante (262K ctx, free)" },
+  { value: "poolside/laguna-s-2.1:free", label: "Laguna S 2.1 (262K ctx, free)" },
+  { value: "poolside/laguna-xs-2.1:free", label: "Laguna XS 2.1 (262K ctx, free)" },
+  { value: "nex-agi/nex-n2.5-pro:free", label: "Nex N2.5 Pro (262K ctx, free)" },
+  { value: "nex-agi/nex-n2.5-mini:free", label: "Nex N2.5 Mini (262K ctx, free)" },
+  { value: "liquid/lfm-2.5-2.6b:free", label: "Liquid LFM 2.5 (65K ctx, free)" },
 ];
 
 // ─── Model availability persistence ──────────────────────────────

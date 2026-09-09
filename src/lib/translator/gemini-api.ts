@@ -24,18 +24,34 @@ export const DEFAULT_MODEL = "openrouter/free";
 /**
  * Fallback chain for "Auto Free": ordered by quality/context for novel
  * translation. When a model is rate-limited/overloaded, the next one is tried.
+ *
+ * IMPORTANT: all slugs are the real OpenRouter :free variants (verified live
+ * against /api/v1/models on 2026-09). Paid slugs (no :free suffix) are rejected
+ * with HTTP 402 on free-tier accounts.
  */
 const FALLBACK_MODELS = [
-  "minimax/minimax-m3:free",
-  "qwen/qwen3.6-plus:free",
-  "z-ai/glm-5.2:free",
-  "qwen/qwen3-235b-a22b-07-25:free",
   "nvidia/nemotron-3-ultra-550b-a55b:free",
-  "nvidia/nemotron-3.5-lightning:free",
-  "inclusionai/ling-3.0-flash-fin:free",
-  "nvidia/nemotron-3-super-120b-a12b:free",
   "thinkingmachines/inkling:free",
+  "nvidia/nemotron-3.5-lightning:free",
+  "thinkingmachines/inkling-small:free",
+  "dots-studio/dots-3-note-preview:free",
+  "nvidia/nemotron-3-super-120b-a12b:free",
+  "inclusionai/ling-3.0-flash-fin:free",
+  "inclusionai/ling-3.0-flash-sante:free",
+  "google/gemma-4-31b-it:free",
+  "google/gemma-4-26b-a4b-it:free",
+  "poolside/laguna-s-2.1:free",
+  "nex-agi/nex-n2.5-pro:free",
+  "nex-agi/nex-n2.5-mini:free",
+  "liquid/lfm-2.5-2.6b:free",
 ];
+
+/**
+ * Cap on requested max_tokens. Free-tier OpenRouter accounts can only
+ * "afford" a small reservation on paid models (HTTP 402 otherwise); free
+ * models accept this fine.
+ */
+const MAX_TOKENS_LIMIT = 16000;
 
 /** "openrouter/free" is a UI-only selector — never a real API model id. */
 export function isAutoFreeSelector(model: string): boolean {
@@ -69,7 +85,7 @@ function buildPayload(text: string, model: string) {
     ],
     temperature: 0.7,
     top_p: 0.95,
-    max_tokens: 65536,
+    max_tokens: MAX_TOKENS_LIMIT,
     stream: true,
   };
 }
@@ -201,6 +217,10 @@ async function translateWithModel(
 
     if (response.status === 429) throw new Error("RATE_LIMITED");
 
+    // 402 = insufficient credits (paid model on a free-tier account).
+    // Treat like a model-level failure so Auto Free moves to the next model.
+    if (response.status === 402) throw new Error("INSUFFICIENT_CREDITS");
+
     if (response.status === 401 || response.status === 403) {
       const body = await response.text().catch(() => "");
       const realMsg = extractApiErrorMessage(body);
@@ -276,6 +296,7 @@ async function translateNonStreaming(
   });
 
   if (response.status === 429) throw new Error("RATE_LIMITED");
+  if (response.status === 402) throw new Error("INSUFFICIENT_CREDITS");
 
   if (response.status === 401 || response.status === 403) {
     const body = await response.text().catch(() => "");

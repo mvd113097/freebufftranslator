@@ -190,8 +190,11 @@ export class TranslationPipeline {
             progress.retries = attempt;
             progress.error = message;
             // Rate limit: wait 30s. Other errors: exponential backoff.
-            const isRateLimit = message.includes("RATE_LIMITED") || message.includes("429");
-            const backoffMs = isRateLimit
+            const isRetryableWait =
+              message.includes("RATE_LIMITED") ||
+              message.includes("429") ||
+              message.includes("INSUFFICIENT_CREDITS");
+            const backoffMs = isRetryableWait
               ? 30000
               : Math.min(3000 * Math.pow(2, attempt - 1), 15000);
             console.log(`[Pipeline] Retrying in ${backoffMs / 1000}s...`);
@@ -362,8 +365,11 @@ export class TranslationPipeline {
             attempt++;
             chunk.retries = attempt;
             chunk.error = message;
-            const isRateLimit = message.includes("RATE_LIMITED") || message.includes("429");
-            const backoffMs = isRateLimit
+            const isRetryableWait =
+              message.includes("RATE_LIMITED") ||
+              message.includes("429") ||
+              message.includes("INSUFFICIENT_CREDITS");
+            const backoffMs = isRetryableWait
               ? 30000
               : Math.min(3000 * Math.pow(2, attempt - 1), 15000);
             console.log(`[Pipeline] Retrying in ${backoffMs / 1000}s...`);
