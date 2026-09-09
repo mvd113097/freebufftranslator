@@ -64,8 +64,8 @@ export class RateLimiter {
         }
       }
 
-      // All keys are rate-limited, wait and retry
-      await new Promise((resolve) => setTimeout(resolve, 5000));
+      // All keys are rate-limited, wait longer before retrying
+      await new Promise((resolve) => setTimeout(resolve, 15000));
     }
   }
 

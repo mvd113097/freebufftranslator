@@ -564,9 +564,25 @@ export default function Dashboard() {
           maxRetries: 3,
           onChunkComplete: async (chunk) => {
             await persistChunk(chunk);
+            // Update the Dashboard's chunkProgress state so the word counter
+            // and progress panel update in real time.
+            setChunkProgress((prev) =>
+              prev.map((c) =>
+                c.id === chunk.id
+                  ? { ...c, status: chunk.status, translatedText: chunk.translatedText, tokensReceived: chunk.tokensReceived, retries: chunk.retries, error: chunk.error }
+                  : c,
+              ),
+            );
           },
           onModelUsed: (model) => setActiveModel(model),
           onChunkFailed: (chunk) => {
+            setChunkProgress((prev) =>
+              prev.map((c) =>
+                c.id === chunk.id
+                  ? { ...c, status: "failed" as const, error: chunk.error }
+                  : c,
+              ),
+            );
             const prefs = telegramPrefsRef.current;
             if (prefs.onError && prefs.botToken && prefs.chatId) {
               sendTelegramDirect(

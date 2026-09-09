@@ -54,8 +54,8 @@ export interface PipelineOptions {
 
 const DEFAULT_OPTIONS: PipelineOptions = {
   chunkSize: 4000,
-  concurrency: 5,
-  maxRetries: 3,
+  concurrency: 1,
+  maxRetries: 5,
   model: "openrouter/free",
 };
 
@@ -72,8 +72,8 @@ export class TranslationPipeline {
 
   constructor() {
     this.options = { ...DEFAULT_OPTIONS };
-    // OpenRouter free tier: ~20 RPM per key. Be conservative with 5 RPM.
-    this.rateLimiter = new RateLimiter(5, 3000);
+    // OpenRouter free tier: ~1-2 RPM per key. Be very conservative with 1 RPM.
+    this.rateLimiter = new RateLimiter(1, 8000);
   }
 
   setProgressCallback(cb: ProgressCallback) {
@@ -192,7 +192,7 @@ export class TranslationPipeline {
             // Rate limit: wait 30s. Other errors: exponential backoff.
             const isRateLimit = message.includes("RATE_LIMITED") || message.includes("429");
             const backoffMs = isRateLimit
-              ? 10000
+              ? 30000
               : Math.min(3000 * Math.pow(2, attempt - 1), 15000);
             console.log(`[Pipeline] Retrying in ${backoffMs / 1000}s...`);
             this.reportProgress();
@@ -364,7 +364,7 @@ export class TranslationPipeline {
             chunk.error = message;
             const isRateLimit = message.includes("RATE_LIMITED") || message.includes("429");
             const backoffMs = isRateLimit
-              ? 10000
+              ? 30000
               : Math.min(3000 * Math.pow(2, attempt - 1), 15000);
             console.log(`[Pipeline] Retrying in ${backoffMs / 1000}s...`);
             this.reportProgress();
