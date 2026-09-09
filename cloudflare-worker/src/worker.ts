@@ -41,25 +41,39 @@ Paragraph three text here.
 // ─── Auto-free model cascade (tried in order when a specific model isn't set) ──
 // Quality-ranked: best models first. Dead models are skipped automatically.
 const AUTO_FREE_MODELS = [
-  "nvidia/nemotron-3-ultra-550b-a55b",       // 550B params, 1M ctx — best
-  "nvidia/nemotron-3-super-120b-a12b",       // 120B params, 262K ctx
-  "thinkingmachines/inkling",                 // 1M ctx, strong reasoning
-  "nvidia/nemotron-3.5-lightning",            // 1M ctx, fast
-  "google/gemma-4-31b-it",                   // Google, 262K ctx
-  "google/gemma-4-26b-a4b-it",               // Google, 262K ctx
-  "thinkingmachines/inkling-small",           // 1M ctx, lighter
-  "inclusionai/ling-3.0-flash-fin",           // 262K ctx
-  "inclusionai/ling-3.0-flash-sante",         // 262K ctx
-  "poolside/laguna-s-2.1",                   // 262K ctx
-  "poolside/laguna-xs-2.1",                  // 262K ctx, lighter
-  "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning", // 30B, 256K ctx
-  "dots-studio/dots-3-note-preview",         // 512K ctx
-  "liquid/lfm-2.5-2.6b",                    // 65K ctx, smallest fallback
+  "inclusionai/ling-3.0-flash-fin:free",      // proven fast non-reasoning
+  "inclusionai/ling-3.0-flash-sante:free",    // proven fast non-reasoning
+  "google/gemma-4-31b-it:free",              // Google, 262K ctx
+  "google/gemma-4-26b-a4b-it:free",          // Google, 262K ctx
+  "poolside/laguna-s-2.1:free",              // 262K ctx
+  "poolside/laguna-xs-2.1:free",             // 262K ctx, lighter
+  "nex-agi/nex-n2.5-pro:free",               // 262K ctx
+  "nex-agi/nex-n2.5-mini:free",              // 262K ctx, lighter
+  "nvidia/nemotron-3-ultra-550b-a55b:free",  // 1M ctx — reasoning, slow
+  "thinkingmachines/inkling:free",            // 1M ctx — reasoning, slow
+  "nvidia/nemotron-3.5-lightning:free",       // 1M ctx — reasoning, slow
+  "thinkingmachines/inkling-small:free",      // 1M ctx, lighter
+  "dots-studio/dots-3-note-preview:free",     // 512K ctx
+  "nvidia/nemotron-3-super-120b-a12b:free",   // 262K ctx
+  "liquid/lfm-2.5-2.6b:free",                // 65K ctx, smallest fallback
 ];
 
 const BATCH_SIZE = 1; // chunks per cron tick — stay under 30s Worker CPU limit
 const MAX_RETRIES = 3;
 const STAGGER_MS = 4500;
+/**
+ * Cap on requested max_tokens: free-tier OpenRouter accounts can only reserve a
+ * small amount on paid models (HTTP 402 otherwise); free models accept this fine.
+ */
+const MAX_TOKENS = 16000;
+/**
+ * Upstream fetch timeout. A ~10k-char chunk takes 30-90s on free models, and
+ * reasoning models can stream silently even longer — 28s aborted mid-translation
+ * and (after 3 retries) failed whole chunks, pausing jobs while the user was away.
+ */
+const UPSTREAM_TIMEOUT_MS = 110000;
+/** HTTP status codes that mean "try the next model in the cascade" rather than "chunk failed". */
+const CASCADE_STATUSES = new Set([402, 404, 408, 429, 500, 502, 503, 504]);
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -172,11 +186,9 @@ async function sendTelegram(
   );
 }
 
-/** Resolve the OpenRouter model string. If "openrouter/free", tries models in order. */
-function resolveModel(requested: string): string {
-  if (requested !== "openrouter/free") return requested;
-  // Return a random one from the auto-free list for variety
-  return AUTO_FREE_MODELS[Math.floor(Math.random() * AUTO_FREE_MODELS.length)];
+/** Resolve the OpenRouter model string. If "openrouter/free", use the best ranked model. */
+function resolveModel(_requested: string): string {
+  return AUTO_FREE_MODELS[0];
 }
 
 // ─── Translation via OpenRouter ───────────────────────────────────────────────
@@ -185,7 +197,7 @@ async function callOpenRouter(
   text: string,
   key: string,
   model: string,
-  timeoutMs = 28000,
+  timeoutMs = UPSTREAM_TIMEOUT_MS,
 ): Promise<{ content: string; model: string }> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -204,13 +216,16 @@ async function callOpenRouter(
         { role: "system", content: SYSTEM_PROMPT },
         { role: "user", content: text },
       ],
-      max_tokens: 32000,
+      max_tokens: MAX_TOKENS,
       temperature: 0.3,
     }),
     signal: controller.signal,
   });
 
   if (res.status === 429) throw new Error("RATE_LIMITED");
+  if (CASCADE_STATUSES.has(res.status)) {
+    throw new Error(`Model ${model} unavailable (HTTP ${res.status})`);
+  }
 
   if (!res.ok) {
     const errBody = await res.text().catch(() => "");
@@ -234,13 +249,15 @@ async function translateChunk(
 ): Promise<{ translated: string; model: string }> {
   if (!keys.length) throw new Error("No API keys provided");
 
-  // Build the model list: try the requested model first, then cascade through auto-free
+  // Build the model list: try the requested model first, then cascade through
+  // the free list. A specific model with no backup is how single dead models
+  // (402/404/overloaded) used to fail whole chunks and pause entire jobs.
   // If liveModels is provided (from the frontend's Check Live), use that quality-ranked order
   const models = requestedModel === "openrouter/free"
     ? (liveModels && liveModels.length > 0
         ? liveModels
         : [resolveModel(requestedModel), ...AUTO_FREE_MODELS.filter((m) => m !== resolveModel(requestedModel))])
-    : [requestedModel];
+    : [requestedModel, ...AUTO_FREE_MODELS.filter((m) => m !== requestedModel)];
 
   let lastError: Error | null = null;
   let allRateLimited = true; // assume all rate-limited until we find a non-429 error or success
