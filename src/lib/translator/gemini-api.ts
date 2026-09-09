@@ -22,20 +22,15 @@ IMPORTANT: Output ONLY the translated English text. Do not include any explanati
 export const DEFAULT_MODEL = "openrouter/free";
 
 /**
- * Fallback chain for "Auto Free": ordered by quality/context for novel
- * translation. When a model is rate-limited/overloaded, the next one is tried.
+ * Fallback chain for "Auto Free": ordered for reliability first (fast,
+ * non-reasoning models before slow reasoning ones), then quality. When a model
+ * is rate-limited/overloaded, the next one is tried.
  *
  * IMPORTANT: all slugs are the real OpenRouter :free variants (verified live
  * against /api/v1/models on 2026-09). Paid slugs (no :free suffix) are rejected
  * with HTTP 402 on free-tier accounts.
  */
 const FALLBACK_MODELS = [
-  "nvidia/nemotron-3-ultra-550b-a55b:free",
-  "thinkingmachines/inkling:free",
-  "nvidia/nemotron-3.5-lightning:free",
-  "thinkingmachines/inkling-small:free",
-  "dots-studio/dots-3-note-preview:free",
-  "nvidia/nemotron-3-super-120b-a12b:free",
   "inclusionai/ling-3.0-flash-fin:free",
   "inclusionai/ling-3.0-flash-sante:free",
   "google/gemma-4-31b-it:free",
@@ -43,6 +38,12 @@ const FALLBACK_MODELS = [
   "poolside/laguna-s-2.1:free",
   "nex-agi/nex-n2.5-pro:free",
   "nex-agi/nex-n2.5-mini:free",
+  "nvidia/nemotron-3-ultra-550b-a55b:free",
+  "thinkingmachines/inkling:free",
+  "nvidia/nemotron-3.5-lightning:free",
+  "thinkingmachines/inkling-small:free",
+  "dots-studio/dots-3-note-preview:free",
+  "nvidia/nemotron-3-super-120b-a12b:free",
   "liquid/lfm-2.5-2.6b:free",
 ];
 
@@ -377,6 +378,15 @@ export async function translateChunk(
   throw lastError ?? new Error("All free models failed");
 }
 
+/** Transient upstream failures that should NOT fail a key-validity check. */
+function isTransientModelError(msg: string): boolean {
+  return (
+    msg.includes("MODEL_ERROR") ||
+    msg.includes("SERVER_ERROR") ||
+    /overload|temporar|503|502|timeout/i.test(msg)
+  );
+}
+
 /** Simple non-streaming translation for testing keys */
 export async function translateChunkSimple(
   text: string,
@@ -396,5 +406,21 @@ export async function translateChunkSimple(
     }
     throw new Error("All models rate-limited right now");
   }
-  return translateNonStreaming(text, apiKey, selected);
+
+  // Specific model: retry transient upstream errors ("Service temporarily
+  // overloaded" etc.) so a healthy key isn't reported as dead.
+  let lastErr: Error = new Error("Unknown error");
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      return await translateNonStreaming(text, apiKey, selected);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      lastErr = err instanceof Error ? err : new Error(msg);
+      if (msg.startsWith("KEY_REJECTED") || msg === "RATE_LIMITED") throw err;
+      if (!isTransientModelError(msg)) throw err;
+      // Transient — back off briefly and retry
+      await new Promise((r) => setTimeout(r, 4000 * (attempt + 1)));
+    }
+  }
+  throw lastErr;
 }

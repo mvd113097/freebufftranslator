@@ -9,6 +9,16 @@
  *   4. supports cancel (marks the job cancelled server-side).
  *
  * The browser can be closed any time — the worker keeps translating.
+ *
+ * ── Oversized-chunk splitting ─────────────────────────────────────
+ * Very large chunks (30k+ chars) make the worker's single upstream request
+ * stream for minutes until it dies with "The operation was aborted". To keep
+ * cloud jobs alive we split any chunk above MAX_UPLOAD_CHARS into ~10k-char
+ * parts at paragraph boundaries, upload each part as its own worker chunk,
+ * and merge the parts back together (in order) before reporting the chunk as
+ * completed. The original chunk ids are preserved end-to-end via an upload
+ * plan, which is persisted to localStorage so a page reload can re-attach
+ * with the correct mapping.
  */
 
 import {
@@ -19,6 +29,65 @@ import {
 } from "./cloud-client";
 import { prepareChunkForUpload } from "./compress";
 import type { PipelineProgress } from "./pipeline";
+
+/** Chunks larger than this are split before upload (worker fetch aborts on huge requests). */
+const MAX_UPLOAD_CHARS = 12000;
+/** Preferred part size when splitting. */
+const TARGET_SPLIT_CHARS = 10000;
+
+/** localStorage key holding the upload plan for the active cloud job. */
+const CLOUD_PLAN_KEY = "novel-translator-cloud-plan";
+
+/** One original chunk's entry in the upload plan. */
+export interface CloudPlanEntry {
+  id: number;
+  parts: number;
+}
+
+function storePlan(jobId: string, plan: CloudPlanEntry[]): void {
+  try {
+    localStorage.setItem(CLOUD_PLAN_KEY, JSON.stringify({ jobId, plan }));
+  } catch {
+    /* quota — non-fatal */
+  }
+}
+
+/** Load the stored upload plan for a job (null when missing/from another job). */
+export function loadStoredPlan(jobId: string): CloudPlanEntry[] | null {
+  try {
+    const raw = localStorage.getItem(CLOUD_PLAN_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { jobId: string; plan: CloudPlanEntry[] };
+    if (parsed?.jobId !== jobId || !Array.isArray(parsed.plan)) return null;
+    return parsed.plan;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Split text into parts of at most MAX_UPLOAD_CHARS, preferring paragraph
+ * boundaries. Returns a single-element array for text that needs no split.
+ */
+function splitForUpload(text: string): string[] {
+  if (text.length <= MAX_UPLOAD_CHARS) return [text];
+  const parts: string[] = [];
+  let start = 0;
+  while (start < text.length) {
+    let end = Math.min(start + TARGET_SPLIT_CHARS, text.length);
+    if (end < text.length) {
+      const window = text.slice(start, end);
+      const lastBreak = Math.max(window.lastIndexOf("\n\n"), window.lastIndexOf("\n"));
+      // Only use the break if it keeps the part at least half-full
+      if (lastBreak > TARGET_SPLIT_CHARS * 0.5) {
+        end = start + lastBreak + 1;
+      }
+    }
+    parts.push(text.slice(start, end));
+    start = end;
+  }
+  return parts;
+}
 
 export interface CloudRunnerCallbacks {
   onProgress: (progress: PipelineProgress) => void;
@@ -31,7 +100,18 @@ export class CloudRunner {
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private stopped = false;
   private totalChunks = 0;
-  private completedIds = new Set<number>();
+  /** Worker upload-unit ids already fetched from the worker. */
+  private completedUnitIds = new Set<number>();
+  /** Original chunk ids whose parts have all arrived and been emitted. */
+  private completedOriginalIds = new Set<number>();
+  /** originalId -> sparse array of received parts. */
+  private partsBuffer = new Map<number, (string | undefined)[]>();
+  /** Upload plan: one entry per ORIGINAL chunk. */
+  private plan: CloudPlanEntry[] = [];
+  /** Worker upload-unit position -> original chunk id. */
+  private unitToOriginal: number[] = [];
+  /** Worker upload-unit position -> part index within its original chunk. */
+  private unitToPartIndex: number[] = [];
   private startTime = 0;
   private totalCharsTranslated = 0;
   private lastChunkCompletedAt = 0;
@@ -44,6 +124,26 @@ export class CloudRunner {
     this.jobId = jobId;
     this.callbacks = callbacks;
     this.onChunkCompleted = callbacks.onChunkCompleted;
+    // Re-attach after reload: restore the upload plan stored at job start.
+    const stored = loadStoredPlan(jobId);
+    if (stored) {
+      this.setPlan(stored);
+      // Original chunk count comes from the plan (worker counts upload units)
+      this.totalChunks = stored.length;
+    }
+  }
+
+  /** Build the worker-position → (originalId, partIndex) maps from a plan. */
+  private setPlan(plan: CloudPlanEntry[]): void {
+    this.plan = plan;
+    this.unitToOriginal = [];
+    this.unitToPartIndex = [];
+    for (const entry of plan) {
+      for (let p = 0; p < Math.max(entry.parts, 1); p++) {
+        this.unitToOriginal.push(entry.id);
+        this.unitToPartIndex.push(p);
+      }
+    }
   }
 
   static async start(
@@ -62,11 +162,16 @@ export class CloudRunner {
     },
     callbacks: CloudRunnerCallbacks,
   ): Promise<CloudRunner> {
-    // Compress chunks for upload (falls back to plain text automatically)
-    const payload = [];
+    // Build the upload plan: split oversized chunks into safe parts.
+    const plan: CloudPlanEntry[] = [];
+    const payload: { text: string; gzip: boolean }[] = [];
     for (const chunk of input.chunks) {
-      const prepared = await prepareChunkForUpload(chunk.text);
-      payload.push({ text: prepared.text, gzip: prepared.gzip });
+      const parts = splitForUpload(chunk.text);
+      plan.push({ id: chunk.id, parts: parts.length });
+      for (const part of parts) {
+        const prepared = await prepareChunkForUpload(part);
+        payload.push({ text: prepared.text, gzip: prepared.gzip });
+      }
     }
 
     const { jobId } = await createCloudJob({
@@ -83,7 +188,10 @@ export class CloudRunner {
       telegramNotifyOnComplete: input.telegramNotifyOnComplete,
     });
 
+    storePlan(jobId, plan);
+
     const runner = new CloudRunner(jobId, callbacks);
+    runner.setPlan(plan);
     runner.totalChunks = input.chunks.length;
     runner.startTime = Date.now();
     runner.startPolling();
@@ -104,6 +212,41 @@ export class CloudRunner {
     this.startPolling();
   }
 
+  /**
+   * Handle one completed worker upload-unit: buffer it, and when every part
+   * of its original chunk has arrived, merge and emit the ORIGINAL chunk.
+   */
+  private async handleCompletedUnit(unitId: number, text: string): Promise<void> {
+    if (this.completedUnitIds.has(unitId)) return;
+    this.completedUnitIds.add(unitId);
+
+    const originalId = this.unitToOriginal[unitId] ?? unitId;
+    const partIndex = this.unitToPartIndex[unitId] ?? 0;
+    const expected =
+      this.plan.find((e) => e.id === originalId)?.parts ?? 1;
+
+    const parts = this.partsBuffer.get(originalId) ?? [];
+    parts[partIndex] = text;
+    this.partsBuffer.set(originalId, parts);
+
+    const received = parts.filter((p) => p !== undefined).length;
+    if (received < expected) return; // wait for the remaining parts
+
+    // Merge parts in order. Parts were split at paragraph boundaries, so a
+    // single newline join preserves the original paragraph structure.
+    const merged = Array.from({ length: expected }, (_, i) => parts[i] ?? "")
+      .join("\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+
+    this.partsBuffer.delete(originalId);
+    if (this.completedOriginalIds.has(originalId)) return;
+    this.completedOriginalIds.add(originalId);
+    this.totalCharsTranslated += merged.length;
+    this.lastChunkCompletedAt = Date.now();
+    await this.onChunkCompleted?.(originalId, merged);
+  }
+
   private startPolling() {
     const poll = async () => {
       if (this.stopped) return;
@@ -116,27 +259,23 @@ export class CloudRunner {
           this.startTime = status.createdAt;
         }
 
-        // Detect newly completed chunks for live persistence
-        if (status.completedChunks > this.completedIds.size) {
-          const chunks = await getCloudChunks(this.jobId);
-          for (const chunk of chunks) {
-            if (!this.completedIds.has(chunk.id)) {
-              this.completedIds.add(chunk.id);
-              this.totalCharsTranslated += chunk.text.length;
-              this.lastChunkCompletedAt = Date.now();
-              await this.onChunkCompleted?.(chunk.id, chunk.text);
-            }
+        // Fetch any newly completed worker units and merge/emit them
+        if (status.completedChunks > this.completedUnitIds.size) {
+          const units = await getCloudChunks(this.jobId);
+          for (const unit of units) {
+            await this.handleCompletedUnit(unit.id, unit.text);
           }
         }
 
-        const done = status.completedChunks + status.failedChunks;
-        const percent =
-          status.totalChunks > 0
-            ? Math.round((done / status.totalChunks) * 100)
-            : 0;
+        // Progress counts ORIGINAL chunks (parts are invisible to the user)
+        const completedOriginal = this.completedOriginalIds.size;
+        const failedOriginal = status.failedChunks;
+        const done = Math.min(completedOriginal + failedOriginal, this.totalChunks || completedOriginal + failedOriginal);
+        const total = this.totalChunks || status.totalChunks;
+        const percent = total > 0 ? Math.round((done / total) * 100) : 0;
         const elapsedMs = Date.now() - this.startTime;
         const avgPerChunk = done > 0 ? elapsedMs / done : 0;
-        const remaining = status.totalChunks - done;
+        const remaining = Math.max(total - done, 0);
         const charsPerMinute = elapsedMs > 0 && this.totalCharsTranslated > 0
           ? Math.round((this.totalCharsTranslated / elapsedMs) * 60000)
           : 0;
@@ -149,15 +288,15 @@ export class CloudRunner {
           : 0;
 
         this.callbacks.onProgress({
-          totalChunks: status.totalChunks || this.totalChunks,
-          completedChunks: status.completedChunks,
-          failedChunks: status.failedChunks,
+          totalChunks: total,
+          completedChunks: completedOriginal,
+          failedChunks: failedOriginal,
           activeChunks: 0,
           overallPercent: percent,
           currentChunk:
             status.status === "done"
               ? "Done!"
-              : `Chunk ${Math.min(done + 1, status.totalChunks)} of ${status.totalChunks} (cloud)`,
+              : `Chunk ${Math.min(done + 1, total)} of ${total} (cloud)`,
           elapsedMs,
           estimatedRemainingMs: remaining * avgPerChunk,
           activeModel: this.activeModel,
