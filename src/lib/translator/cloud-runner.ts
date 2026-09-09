@@ -66,6 +66,51 @@ export function loadStoredPlan(jobId: string): CloudPlanEntry[] | null {
 }
 
 /**
+ * Map raw worker upload-units back to ORIGINAL chunks using the upload plan
+ * (identity mapping when no plan exists — single-part chunks). Returns only
+ * fully-received originals with parts merged in order, sorted by id.
+ * Used when re-attaching after a reload so chunks finished while the tab was
+ * closed are restored into local state + IndexedDB.
+ */
+export function mapUnitsToOriginals(
+  units: { id: number; text: string }[],
+  plan: CloudPlanEntry[] | null,
+): { id: number; text: string }[] {
+  if (units.length === 0) return [];
+  if (!plan || plan.length === 0) {
+    return [...units].sort((a, b) => a.id - b.id);
+  }
+  const unitToOriginal: number[] = [];
+  const unitToPartIndex: number[] = [];
+  for (const entry of plan) {
+    for (let p = 0; p < Math.max(entry.parts, 1); p++) {
+      unitToOriginal.push(entry.id);
+      unitToPartIndex.push(p);
+    }
+  }
+  const partsBuffer = new Map<number, (string | undefined)[]>();
+  for (const unit of units) {
+    const originalId = unitToOriginal[unit.id] ?? unit.id;
+    const partIndex = unitToPartIndex[unit.id] ?? 0;
+    const parts = partsBuffer.get(originalId) ?? [];
+    parts[partIndex] = unit.text;
+    partsBuffer.set(originalId, parts);
+  }
+  const merged: { id: number; text: string }[] = [];
+  for (const [originalId, parts] of partsBuffer) {
+    const expected = plan.find((e) => e.id === originalId)?.parts ?? 1;
+    const received = parts.filter((p) => p !== undefined).length;
+    if (received < expected) continue; // still translating — skip
+    const text = Array.from({ length: expected }, (_, i) => parts[i] ?? "")
+      .join("\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+    merged.push({ id: originalId, text });
+  }
+  return merged.sort((a, b) => a.id - b.id);
+}
+
+/**
  * Split text into parts of at most MAX_UPLOAD_CHARS, preferring paragraph
  * boundaries. Returns a single-element array for text that needs no split.
  */
