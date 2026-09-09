@@ -32,6 +32,9 @@ export interface PipelineProgress {
   timeSinceLastChunkMs?: number;
   /** Milliseconds since the worker last sent a heartbeat (cloud mode). */
   workerHeartbeatMs?: number;
+  /** Per-chunk failure details (cloud mode): which original section failed
+   * and the worker's error message. Empty unless something failed. */
+  failures?: { id: number; error: string }[];
 }
 
 export type ProgressCallback = (progress: PipelineProgress) => void;

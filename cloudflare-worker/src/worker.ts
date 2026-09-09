@@ -316,6 +316,9 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
       keys: string[];
       chunks: { text: string; gzip?: boolean }[];
       liveModels?: string[];
+      /** Original (user-visible) section count — upload-units can be larger
+       * after oversized-chunk splitting. Prefer this for notifications. */
+      originalChunkCount?: number;
       telegramBotToken?: string;
       telegramChatId?: string;
       telegramNotifyOnStart?: boolean;
@@ -371,12 +374,13 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
       await env.DB.batch(stmts);
     }
 
-    // Send Telegram start notification
+    // Send Telegram start notification (count ORIGINAL sections, not upload-units)
     if (body.telegramBotToken && body.telegramChatId && body.telegramNotifyOnStart) {
+      const sectionCount = body.originalChunkCount ?? body.chunks.length;
       await sendTelegram(
         body.telegramBotToken,
         body.telegramChatId,
-        `🚀 <b>Cloud translation started</b>\n📚 ${body.fileName}\n📦 ${body.chunks.length} chunks`,
+        `🚀 <b>Cloud translation started</b>\n📚 ${body.fileName}\n📦 ${sectionCount} chunks`,
       ).catch(() => undefined);
     }
 

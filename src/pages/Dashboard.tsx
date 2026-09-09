@@ -399,6 +399,16 @@ export default function Dashboard() {
           setProgress(p);
           setActiveModel(p.activeModel);
           setElapsedMs(p.elapsedMs);
+          if (p.failures && p.failures.length > 0) {
+            setChunkProgress((prev) =>
+              prev.map((c) => {
+                const fail = p.failures!.find((f) => f.id === c.id);
+                return fail && c.status !== "completed"
+                  ? { ...c, status: "failed" as const, error: fail.error }
+                  : c;
+              }),
+            );
+          }
         },
         onChunkCompleted: async (chunkId, text) => {
           setChunkProgress((prev) =>
@@ -421,9 +431,20 @@ export default function Dashboard() {
         },
         onDone: (failedChunks, reason) => {
           setIsRunning(false);
-          setIsPaused(failedChunks > 0);
+          setIsPaused(failedChunks > 0 || reason === "quota_exhausted");
           setPauseReason(reason ?? null);
           cloudRunnerRef.current = null;
+          const prefs = telegramPrefsRef.current;
+          if ((failedChunks > 0 || reason === "quota_exhausted") && prefs.onPause && prefs.botToken && prefs.chatId) {
+            const p = progressRef.current;
+            void sendTelegramDirect(
+              prefs.botToken,
+              prefs.chatId,
+              reason === "quota_exhausted"
+                ? `⏸️ <b>Translation paused — daily quota exhausted</b>\nAll OpenRouter keys hit their daily free limit.\n📖 ${p?.completedChunks ?? 0}/${p?.totalChunks ?? 0} done\n⏱️ Resets at midnight UTC — press Resume later.`
+                : `⚠️ <b>Translation paused — chunk failed</b>\n📖 ${p?.completedChunks ?? 0}/${p?.totalChunks ?? 0} done\nOpen the app and press Resume to retry.`,
+            );
+          }
         },
         onError: (message) => console.error("[Cloud]", message),
       });
@@ -799,9 +820,13 @@ export default function Dashboard() {
               keys,
               chunks: chunks.map((c) => ({ id: c.id, text: c.text })),
               liveModels: getLiveModelOrder(),
+              originalChunkCount: chunks.length,
               telegramBotToken: telegramBotToken || undefined,
               telegramChatId: telegramChatId || undefined,
-              telegramNotifyOnStart: telegramNotifyOnStart,
+              // The worker counts upload-units (~5k-char parts), not book
+              // sections, so its start message shows a misleading number.
+              // Disable it and send the true section count from the app below.
+              telegramNotifyOnStart: false,
               telegramNotifyOnProgress: telegramNotifyOnProgress,
               telegramNotifyOnError: telegramNotifyOnError,
               telegramNotifyOnComplete: telegramNotifyOnComplete,
@@ -811,6 +836,18 @@ export default function Dashboard() {
                 setProgress(p);
                 setActiveModel(p.activeModel);
                 setElapsedMs(p.elapsedMs);
+                // Mirror worker-side failures into local chunk state so the
+                // FAILED card + failure list show WHICH section and WHY.
+                if (p.failures && p.failures.length > 0) {
+                  setChunkProgress((prev) =>
+                    prev.map((c) => {
+                      const fail = p.failures!.find((f) => f.id === c.id);
+                      return fail && c.status !== "completed"
+                        ? { ...c, status: "failed" as const, error: fail.error }
+                        : c;
+                    }),
+                  );
+                }
               },
               onChunkCompleted: async (chunkId, text) => {
                 setChunkProgress((prev) =>
@@ -833,10 +870,25 @@ export default function Dashboard() {
               },
               onDone: (failedChunks, reason) => {
                 setIsRunning(false);
-                setIsPaused(failedChunks > 0);
+                setIsPaused(failedChunks > 0 || reason === "quota_exhausted");
                 setPauseReason(reason ?? null);
                 setCloudJobId(runner.getJobId());
                 cloudRunnerRef.current = null;
+                // Browser-side pause alert (worker cron may only notify on
+                // failure; this covers quota-pause + failed-chunk pause too).
+                const prefs = telegramPrefsRef.current;
+                if (failedChunks > 0 || reason === "quota_exhausted") {
+                  if (prefs.onPause && prefs.botToken && prefs.chatId) {
+                    const p = progressRef.current;
+                    void sendTelegramDirect(
+                      prefs.botToken,
+                      prefs.chatId,
+                      reason === "quota_exhausted"
+                        ? `⏸️ <b>Translation paused — daily quota exhausted</b>\nAll OpenRouter keys hit their daily free limit.\n📖 ${p?.completedChunks ?? 0}/${p?.totalChunks ?? 0} done\n⏱️ Resets at midnight UTC — press Resume later.`
+                        : `⚠️ <b>Translation paused — chunk failed</b>\n📖 ${p?.completedChunks ?? 0}/${p?.totalChunks ?? 0} done\nOpen the app and press Resume to retry.`,
+                    );
+                  }
+                }
               },
               onError: (message) => {
                 console.error("[Cloud]", message);
@@ -853,6 +905,17 @@ export default function Dashboard() {
           setIsPaused(false);
           setPauseReason(null);
           runningRef.current = true;
+          // Telegram start notice with the TRUE section count (the worker
+          // counts upload-units, which is why it used to say 135 for a
+          // 20-section book).
+          const startPrefs = telegramPrefsRef.current;
+          if (startPrefs.onStart && startPrefs.botToken && startPrefs.chatId) {
+            void sendTelegramDirect(
+              startPrefs.botToken,
+              startPrefs.chatId,
+              `🚀 <b>Cloud translation started</b>\n📚 ${fileName || "novel.txt"}\n📦 ${chunks.length} chunks • ⚙️ ${selectedModel === "openrouter/free" ? "Auto Free" : selectedModel}`,
+            );
+          }
           return;
         } catch (err) {
           console.error("Cloud start failed:", err);
@@ -898,9 +961,10 @@ export default function Dashboard() {
               keys,
               chunks: pending.map((c) => ({ id: c.id, text: c.originalText })),
               liveModels: getLiveModelOrder(),
+              originalChunkCount: pending.length,
               telegramBotToken: telegramBotToken || undefined,
               telegramChatId: telegramChatId || undefined,
-              telegramNotifyOnStart: telegramNotifyOnStart,
+              telegramNotifyOnStart: false,
               telegramNotifyOnProgress: telegramNotifyOnProgress,
               telegramNotifyOnError: telegramNotifyOnError,
               telegramNotifyOnComplete: telegramNotifyOnComplete,
@@ -910,6 +974,16 @@ export default function Dashboard() {
                 setProgress(p);
                 setActiveModel(p.activeModel);
                 setElapsedMs(p.elapsedMs);
+                if (p.failures && p.failures.length > 0) {
+                  setChunkProgress((prev) =>
+                    prev.map((c) => {
+                      const fail = p.failures!.find((f) => f.id === c.id);
+                      return fail && c.status !== "completed"
+                        ? { ...c, status: "failed" as const, error: fail.error }
+                        : c;
+                    }),
+                  );
+                }
               },
               onChunkCompleted: async (chunkId, text) => {
                 setChunkProgress((prev) =>
@@ -932,9 +1006,20 @@ export default function Dashboard() {
               },
               onDone: (failedChunks, reason) => {
                 setIsRunning(false);
-                setIsPaused(failedChunks > 0);
+                setIsPaused(failedChunks > 0 || reason === "quota_exhausted");
                 setPauseReason(reason ?? null);
                 cloudRunnerRef.current = null;
+                const prefs = telegramPrefsRef.current;
+                if ((failedChunks > 0 || reason === "quota_exhausted") && prefs.onPause && prefs.botToken && prefs.chatId) {
+                  const p = progressRef.current;
+                  void sendTelegramDirect(
+                    prefs.botToken,
+                    prefs.chatId,
+                    reason === "quota_exhausted"
+                      ? `⏸️ <b>Translation paused — daily quota exhausted</b>\nAll OpenRouter keys hit their daily free limit.\n📖 ${p?.completedChunks ?? 0}/${p?.totalChunks ?? 0} done\n⏱️ Resets at midnight UTC — press Resume later.`
+                      : `⚠️ <b>Translation paused — chunk failed</b>\n📖 ${p?.completedChunks ?? 0}/${p?.totalChunks ?? 0} done\nOpen the app and press Resume to retry.`,
+                  );
+                }
               },
               onError: (message) => console.error("[Cloud]", message),
             },
@@ -1507,17 +1592,17 @@ export default function Dashboard() {
                         <><strong>{fileName}</strong> — {completedCount} of {totalChunks} chunks done.</>
                       )}
                       {translationMode === "cloud" && (
-                        <p className="mt-2 text-[11px] text-yellow-200/60 leading-snug">
+                        <span className="mt-2 block text-[11px] text-yellow-200/60 leading-snug">
                           Cloud jobs pause only when the worker runs out of working models/keys
                           (daily free-tier limits) — <strong>closing the browser does NOT pause it</strong>.
                           Your finished chunks are saved on the worker; Resume re-uploads the remaining
                           chunks as a fresh cloud job when a model has quota again.
-                        </p>
+                        </span>
                       )}
                       {translationMode === "cloud" && pauseReason && pauseReason !== "quota_exhausted" && (
-                        <p className="mt-1 text-[11px] text-yellow-200/50 break-words">
+                        <span className="mt-1 block text-[11px] text-yellow-200/50 break-words">
                           Worker reason: {pauseReason.slice(0, 200)}
-                        </p>
+                        </span>
                       )}
                     </p>
                   </div>

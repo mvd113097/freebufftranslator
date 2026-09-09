@@ -113,6 +113,10 @@ export interface CreateJobInput {
   chunks: { text: string }[];
   /** Quality-ranked live model slugs. Worker uses this for the auto-free cascade. */
   liveModels?: string[];
+  /** Original (user-visible) section count. The worker stores upload-units
+   * (oversized sections are split), which can exceed this — notifications and
+   * progress should talk in sections, not upload-units. */
+  originalChunkCount?: number;
   telegramBotToken?: string;
   telegramChatId?: string;
   telegramNotifyOnStart?: boolean;
@@ -141,6 +145,21 @@ export async function getCloudChunks(
   after = -1,
 ): Promise<{ id: number; text: string }[]> {
   const res = await request(`/api/jobs/${jobId}/chunks?after=${after}`);
+  const data = await res.json();
+  return data.chunks ?? [];
+}
+
+export interface CloudDebugChunk {
+  seq: number;
+  status: string;
+  error: string | null;
+  model_used: string | null;
+  attempts: number;
+}
+
+/** Per-upload-unit detail (status/error) — used to surface chunk failures in the UI. */
+export async function getCloudDebug(jobId: string): Promise<CloudDebugChunk[]> {
+  const res = await request(`/api/jobs/${jobId}/debug`);
   const data = await res.json();
   return data.chunks ?? [];
 }

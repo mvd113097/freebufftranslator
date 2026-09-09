@@ -25,6 +25,7 @@ import {
   createCloudJob,
   getCloudStatus,
   getCloudChunks,
+  getCloudDebug,
   cancelCloudJob,
 } from "./cloud-client";
 import { prepareChunkForUpload } from "./compress";
@@ -155,6 +156,8 @@ export class CloudRunner {
   private completedOriginalIds = new Set<number>();
   /** originalId -> sparse array of received parts. */
   private partsBuffer = new Map<number, (string | undefined)[]>();
+  /** Original chunk id -> error string for failed worker units (cleared on retry). */
+  private failedUnits = new Map<number, string>();
   /** Upload plan: one entry per ORIGINAL chunk. */
   private plan: CloudPlanEntry[] = [];
   /** Worker upload-unit position -> original chunk id. */
@@ -202,6 +205,10 @@ export class CloudRunner {
       keys: string[];
       chunks: { id: number; text: string }[];
       liveModels?: string[];
+      /** Original (user-visible) section count — the worker stores upload-units
+       * which can be larger after oversized-chunk splitting. Used for the
+       * Telegram start notification so it matches what the app shows. */
+      originalChunkCount?: number;
       telegramBotToken?: string;
       telegramChatId?: string;
       telegramNotifyOnStart?: boolean;
@@ -235,6 +242,7 @@ export class CloudRunner {
       telegramNotifyOnProgress: input.telegramNotifyOnProgress,
       telegramNotifyOnError: input.telegramNotifyOnError,
       telegramNotifyOnComplete: input.telegramNotifyOnComplete,
+      originalChunkCount: input.originalChunkCount,
     });
 
     storePlan(jobId, plan);
@@ -243,12 +251,39 @@ export class CloudRunner {
     runner.setPlan(plan);
     runner.totalChunks = input.chunks.length;
     runner.startTime = Date.now();
+    runner.refreshFailureMap();
     runner.startPolling();
     return runner;
   }
 
   getJobId(): string {
     return this.jobId;
+  }
+
+  /** Map worker-unit failures back to original chunk ids via the upload plan. */
+  private refreshFailureMap(): void {
+    this.failedUnits.clear();
+    if (this.unitToOriginal.length === 0) return;
+    void getCloudDebug(this.jobId)
+      .then((rows) => {
+        for (const row of rows) {
+          if (row.status !== "failed") continue;
+          const originalId = this.unitToOriginal[row.seq] ?? row.seq;
+          const existing = this.failedUnits.get(originalId);
+          const msg = row.error ?? "Unknown error";
+          if (!existing || msg.length < existing.length) {
+            this.failedUnits.set(originalId, msg);
+          }
+        }
+      })
+      .catch(() => {
+        /* debug endpoint unavailable on older workers — non-fatal */
+      });
+  }
+
+  /** Latest original-chunk-id -> error map (empty when nothing has failed). */
+  getFailures(): { id: number; error: string }[] {
+    return [...this.failedUnits.entries()].map(([id, error]) => ({ id, error }));
   }
 
   /**
@@ -258,6 +293,7 @@ export class CloudRunner {
   async attach(): Promise<void> {
     this.startTime = 0;
     this.stopped = false;
+    this.refreshFailureMap();
     this.startPolling();
   }
 
@@ -303,6 +339,12 @@ export class CloudRunner {
         const status = await getCloudStatus(this.jobId);
         this.activeModel = status.activeModel ?? undefined;
 
+        // Pick up chunks that failed since the last tick so the UI shows
+        // WHICH section failed and WHY while the job is still running.
+        if (status.failedChunks > 0) {
+          this.refreshFailureMap();
+        }
+
         // Use createdAt from the server for accurate elapsed time across reloads
         if (this.startTime === 0 && status.createdAt) {
           this.startTime = status.createdAt;
@@ -340,6 +382,9 @@ export class CloudRunner {
           totalChunks: total,
           completedChunks: completedOriginal,
           failedChunks: failedOriginal,
+          // Surface per-chunk failure detail so the UI shows WHICH section
+          // failed and WHY (worker failures were previously invisible here).
+          failures: this.getFailures(),
           activeChunks: 0,
           overallPercent: percent,
           currentChunk:
