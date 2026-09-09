@@ -86,46 +86,9 @@ const MODEL_OPTIONS = [
   { value: "liquid/lfm-2.5-2.6b:free", label: "Liquid LFM 2.5 (65K ctx, free)" },
 ];
 
-// ─── Model availability persistence ──────────────────────────────
-const MODEL_AVAIL_KEY = "novel-translator-model-availability";
 
-function loadModelAvailability(): Record<string, "live" | "dead"> {
-  try {
-    const raw = localStorage.getItem(MODEL_AVAIL_KEY);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw);
-    // Only accept "live" or "dead" values
-    const result: Record<string, "live" | "dead"> = {};
-    for (const [k, v] of Object.entries(parsed)) {
-      if (v === "live" || v === "dead") result[k] = v;
-    }
-    return result;
-  } catch {
-    return {};
-  }
-}
 
-function saveModelAvailability(data: Record<string, "live" | "dead">): void {
-  try {
-    localStorage.setItem(MODEL_AVAIL_KEY, JSON.stringify(data));
-  } catch {
-    /* ignore */
-  }
-}
 
-/** Returns the live models in quality order (first = best). Falls back to the static list. */
-function getLiveModelOrder(): string[] {
-  const avail = loadModelAvailability();
-  // Include both live and rate-limited models (rate-limited are alive but quota-exceeded)
-  const live = MODEL_OPTIONS
-    .filter((m) => m.value !== "openrouter/free" && (avail[m.value] === "live" || avail[m.value] === "dead"))
-    .map((m) => m.value);
-  // Prefer live-only if available, otherwise include all
-  const liveOnly = MODEL_OPTIONS
-    .filter((m) => m.value !== "openrouter/free" && avail[m.value] === "live")
-    .map((m) => m.value);
-  return liveOnly.length > 0 ? liveOnly : (live.length > 0 ? live : MODEL_OPTIONS.filter((m) => m.value !== "openrouter/free").map((m) => m.value));
-}
 
 // ─── Telegram direct-from-browser ──────────────────────────────────
 
@@ -159,13 +122,7 @@ export default function Dashboard() {
   const [fileName, setFileName] = useState("");
   const [chunkSize, setChunkSize] = useState(() => loadSettings().chunkSize);
   const [concurrency, setConcurrency] = useState(() => loadSettings().concurrency);
-  const [selectedModel, setSelectedModel] = useState(() => {
-    const saved = loadSettings().model;
-    // Validate against current MODEL_OPTIONS — stale models (removed from
-    // the list) would cause 404s on OpenRouter.
-    if (saved && !VALID_MODEL_VALUES.has(saved)) return "openrouter/free";
-    return saved;
-  });
+  const [selectedModel, setSelectedModel] = useState(() => loadSettings().model);
   const [telegramBotToken, setTelegramBotToken] = useState(() => loadSettings().telegramBotToken);
   const [telegramChatId, setTelegramChatId] = useState(() => loadSettings().telegramChatId);
   const [telegramNotifyOnStart, setTelegramNotifyOnStart] = useState(() => loadSettings().telegramNotifyOnStart);
@@ -177,14 +134,7 @@ export default function Dashboard() {
   const [showScanResults, setShowScanResults] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [telegramOpen, setTelegramOpen] = useState(false);
-  const [modelAvailability, setModelAvailability] = useState<Record<string, "live" | "dead" | "rate-limited" | "checking">>(() => {
-    const saved = loadModelAvailability();
-    // Convert saved {live|dead} to the UI state format
-    const init: Record<string, "live" | "dead" | "rate-limited" | "checking"> = {};
-    for (const [k, v] of Object.entries(saved)) init[k] = v;
-    return init;
-  });
-  const [checkingModels, setCheckingModels] = useState(false);
+
 
   // Cloud mode (translation continues on a Cloudflare worker with the browser closed)
   const [translationMode, setTranslationMode] = useState<"client" | "cloud">(
@@ -825,7 +775,7 @@ export default function Dashboard() {
               model: selectedModel,
               keys,
               chunks: chunks.map((c) => ({ id: c.id, text: c.text })),
-              liveModels: getLiveModelOrder(),
+              liveModels: MODEL_OPTIONS.filter((m) => m.value !== "openrouter/free").map((m) => m.value),
               originalChunkCount: chunks.length,
               telegramBotToken: telegramBotToken || undefined,
               telegramChatId: telegramChatId || undefined,
@@ -966,7 +916,7 @@ export default function Dashboard() {
               model: selectedModel,
               keys,
               chunks: pending.map((c) => ({ id: c.id, text: c.originalText })),
-              liveModels: getLiveModelOrder(),
+              liveModels: MODEL_OPTIONS.filter((m) => m.value !== "openrouter/free").map((m) => m.value),
               originalChunkCount: pending.length,
               telegramBotToken: telegramBotToken || undefined,
               telegramChatId: telegramChatId || undefined,
@@ -1207,15 +1157,7 @@ export default function Dashboard() {
     setCloudJobId("");
   }, [isRunning]);
 
-  // ─── Clear model cache ─────────────────────────────────────────
-  const clearModelCache = useCallback(() => {
-    try {
-      localStorage.removeItem(MODEL_AVAIL_KEY);
-      setModelAvailability({});
-    } catch {
-      /* ignore */
-    }
-  }, []);
+
 
   // ─── Test all keys ──────────────────────────────────────────────
   const testAllKeys = useCallback(async () => {
@@ -1240,48 +1182,7 @@ export default function Dashboard() {
     }
   }, [keys, selectedModel]);
 
-  // ─── Check which models are available (FREE — uses model list API, no quota) ──
-  const checkModels = useCallback(async () => {
-    setCheckingModels(true);
-    const results: Record<string, "live" | "dead" | "checking"> = {};
-    // Initialize all as checking
-    for (const m of MODEL_OPTIONS) {
-      if (m.value === "openrouter/free") continue;
-      results[m.value] = "checking";
-    }
-    setModelAvailability({ ...results });
 
-    try {
-      // Fetch the model list — this is a FREE endpoint, no quota used
-      const res = await fetch("https://openrouter.ai/api/v1/models");
-      const data = await res.json() as { data?: { id: string; pricing?: { prompt?: string } }[] };
-      const models = data.data ?? [];
-      const modelIds = new Set(models.map((m) => m.id));
-
-      for (const m of MODEL_OPTIONS) {
-        if (m.value === "openrouter/free") continue;
-        // Check if the model exists in OpenRouter's list
-        const found = models.find((api) => api.id === m.value);
-        results[m.value] = found ? "live" : "dead";
-        setModelAvailability({ ...results });
-      }
-    } catch (err) {
-      console.error("Failed to fetch model list:", err);
-      // On error, mark all as unknown
-      for (const m of MODEL_OPTIONS) {
-        if (m.value !== "openrouter/free") results[m.value] = "dead";
-      }
-    }
-
-    // Persist results to localStorage
-    const toSave: Record<string, "live" | "dead"> = {};
-    for (const [k, v] of Object.entries(results)) {
-      if (v === "live") toSave[k] = "live";
-      if (v === "dead") toSave[k] = "dead";
-    }
-    saveModelAvailability(toSave);
-    setCheckingModels(false);
-  }, []);
 
   // ─── Scan for Chinese characters in translated text ─────────────
   const scanResults = useMemo(() => {
@@ -1764,28 +1665,7 @@ export default function Dashboard() {
             <div className="rounded-2xl border border-stone-700/50 bg-stone-900/80 backdrop-blur-xl p-4 shadow-sm">
               <div className="flex items-center justify-between mb-2">
                 <label className="text-xs font-semibold text-stone-200">Model</label>
-                <div className="flex items-center gap-1.5">
-                  {Object.keys(modelAvailability).length > 0 && (
-                    <button
-                      onClick={clearModelCache}
-                      disabled={isRunning || isStarting}
-                      className="flex items-center gap-1 rounded-lg border border-stone-700 bg-stone-800/60 px-2 py-1 text-[10px] font-medium text-stone-500 hover:text-stone-300 hover:bg-stone-700 transition-all cursor-pointer disabled:opacity-40"
-                    >
-                      Clear
-                    </button>
-                  )}
-                  <button
-                    onClick={checkModels}
-                    disabled={checkingModels || keys.length === 0 || isRunning || isStarting}
-                    className="flex items-center gap-1 rounded-lg border border-stone-700 bg-stone-800/60 px-2 py-1 text-[10px] font-medium text-stone-400 hover:text-stone-200 hover:bg-stone-700 transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                  >
-                    {checkingModels ? (
-                      <><Loader2 className="h-3 w-3 animate-spin" /> Checking...</>
-                    ) : (
-                      "Check Live"
-                    )}
-                  </button>
-                </div>
+
               </div>
               <select
                 value={selectedModel}
@@ -1793,23 +1673,11 @@ export default function Dashboard() {
                 disabled={isRunning || isStarting}
                 className="w-full rounded-xl border border-stone-700 bg-stone-800 px-3 py-2 text-xs text-stone-200 focus:outline-none focus:ring-2 focus:ring-amber-400/30 disabled:opacity-50 cursor-pointer"
               >
-                {MODEL_OPTIONS.map((m) => {
-                  const status = modelAvailability[m.value];
-                  const indicator = status === "live"
-                    ? " [LIVE]"
-                    : status === "dead"
-                      ? " [DEAD]"
-                      : status === "rate-limited"
-                        ? " [LIMITED]"
-                        : status === "checking"
-                          ? " ..."
-                          : "";
-                  return (
-                    <option key={m.value} value={m.value}>
-                      {m.label}{indicator}
-                    </option>
-                  );
-                })}
+                {MODEL_OPTIONS.map((m) => (
+                  <option key={m.value} value={m.value}>
+                    {m.label}
+                  </option>
+                ))}
               </select>
               {activeModel && (
                 <p className="mt-2 text-[10px] text-stone-400 flex items-center gap-1">
@@ -1827,14 +1695,7 @@ export default function Dashboard() {
                   skips dead or rate-limited models, falling back to the next one.
                 </p>
               )}
-              {/* Rate limit warning */}
-              {Object.values(modelAvailability).includes("rate-limited") && (
-                <div className="mt-2.5 rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-3 py-2">
-                  <p className="text-[10px] text-yellow-300 leading-snug">
-                    <strong>Daily limit hit!</strong> OpenRouter free tier allows ~50 requests/day. Add $10 credit to unlock 1000 free requests/day. Models marked [RATE LIMITED] are alive but quota-exceeded.
-                  </p>
-                </div>
-              )}
+
             </div>
 
             {/* Collapsible Pipeline Settings */}
