@@ -86,6 +86,24 @@ const MODEL_OPTIONS = [
   { value: "liquid/lfm-2.5-2.6b:free", label: "Liquid LFM 2.5 (65K ctx, free)" },
 ];
 
+/** Verified-live models sent to the Cloudflare Worker.
+ * Only includes models confirmed working — the Worker's own auto-cascade
+ * may be stale, so we send a specific model + this list as fallback. */
+const LIVE_MODEL_SLUGS = MODEL_OPTIONS
+  .filter((m) => m.value !== "openrouter/free")
+  .map((m) => m.value);
+
+/** Resolve "Auto" to the first verified-working model slug.
+ * The Cloudflare Worker has a stale auto-cascade that still includes
+ * dead models (e.g. minimax). Sending a specific known-good model
+ * bypasses the Worker's broken auto-selection entirely. */
+function resolveAutoModel(model: string): string {
+  if (model === "openrouter/free" || model === "openrouter/auto" || model === "auto") {
+    return LIVE_MODEL_SLUGS[0] ?? model;
+  }
+  return model;
+}
+
 
 
 
@@ -758,10 +776,11 @@ export default function Dashboard() {
       // Telegram start notice (client mode only — the worker sends its own)
       const prefs = telegramPrefsRef.current;
       if (translationMode === "client" && prefs.onStart && prefs.botToken && prefs.chatId) {
+        const displayModel = selectedModel === "openrouter/free" ? "Auto Free (client-side cascade)" : selectedModel;
         sendTelegramDirect(
           prefs.botToken,
           prefs.chatId,
-          `🚀 <b>Translation started</b>\n📚 ${fileName || "novel"}\n📦 ${chunks.length} chunks • ${(rawText.length / 1000).toFixed(0)}k chars\n⚙️ Model: ${selectedModel === "openrouter/free" ? "Auto Free" : selectedModel}`,
+          `🚀 <b>Translation started</b>\n📚 ${fileName || "novel"}\n📦 ${chunks.length} chunks • ${(rawText.length / 1000).toFixed(0)}k chars\n⚙️ Model: ${displayModel}`,
         );
       }
 
@@ -769,13 +788,20 @@ export default function Dashboard() {
       if (translationMode === "cloud") {
         setUploadPhase("chunking"); // reuse phase label while uploading
         try {
+          // Resolve "Auto" to a specific verified model before sending to the
+          // Worker. The Worker has a stale auto-cascade with dead models
+          // (e.g. minimax/minimax-m3:free returns 404). Sending a known-good
+          // model slug makes the Worker use it directly. FALLBACK_MODELS in
+          // gemini-api.ts handles client-side auto-fallback; the Worker needs
+          // an explicit slug to avoid its broken cascade.
+          const cloudModel = resolveAutoModel(selectedModel);
           const runner = await CloudRunner.start(
             {
               fileName: fileName || "novel.txt",
-              model: selectedModel,
+              model: cloudModel,
               keys,
               chunks: chunks.map((c) => ({ id: c.id, text: c.text })),
-              liveModels: MODEL_OPTIONS.filter((m) => m.value !== "openrouter/free").map((m) => m.value),
+              liveModels: LIVE_MODEL_SLUGS,
               originalChunkCount: chunks.length,
               telegramBotToken: telegramBotToken || undefined,
               telegramChatId: telegramChatId || undefined,
@@ -861,15 +887,14 @@ export default function Dashboard() {
           setIsPaused(false);
           setPauseReason(null);
           runningRef.current = true;
-          // Telegram start notice with the TRUE section count (the worker
-          // counts upload-units, which is why it used to say 135 for a
-          // 20-section book).
+          // Telegram start notice with the TRUE section count and resolved
+          // model (so the user sees the actual model, not "Auto Free").
           const startPrefs = telegramPrefsRef.current;
           if (startPrefs.onStart && startPrefs.botToken && startPrefs.chatId) {
             void sendTelegramDirect(
               startPrefs.botToken,
               startPrefs.chatId,
-              `🚀 <b>Cloud translation started</b>\n📚 ${fileName || "novel.txt"}\n📦 ${chunks.length} chunks • ⚙️ ${selectedModel === "openrouter/free" ? "Auto Free" : selectedModel}`,
+              `🚀 <b>Cloud translation started</b>\n📚 ${fileName || "novel.txt"}\n📦 ${chunks.length} chunks • ⚙️ ${cloudModel.split("/").pop()?.replace(/:free$/, "") ?? cloudModel}`,
             );
           }
           return;
@@ -910,13 +935,15 @@ export default function Dashboard() {
           return;
         }
         try {
+          // Resolve auto model to first verified slug (same fix as startTranslation).
+          const cloudModel = resolveAutoModel(selectedModel);
           const runner = await CloudRunner.start(
             {
               fileName: fileName || "novel.txt",
-              model: selectedModel,
+              model: cloudModel,
               keys,
               chunks: pending.map((c) => ({ id: c.id, text: c.originalText })),
-              liveModels: MODEL_OPTIONS.filter((m) => m.value !== "openrouter/free").map((m) => m.value),
+              liveModels: LIVE_MODEL_SLUGS,
               originalChunkCount: pending.length,
               telegramBotToken: telegramBotToken || undefined,
               telegramChatId: telegramChatId || undefined,
