@@ -159,7 +159,13 @@ export default function Dashboard() {
   const [fileName, setFileName] = useState("");
   const [chunkSize, setChunkSize] = useState(() => loadSettings().chunkSize);
   const [concurrency, setConcurrency] = useState(() => loadSettings().concurrency);
-  const [selectedModel, setSelectedModel] = useState(() => loadSettings().model);
+  const [selectedModel, setSelectedModel] = useState(() => {
+    const saved = loadSettings().model;
+    // Validate against current MODEL_OPTIONS — stale models (removed from
+    // the list) would cause 404s on OpenRouter.
+    if (saved && !VALID_MODEL_VALUES.has(saved)) return "openrouter/free";
+    return saved;
+  });
   const [telegramBotToken, setTelegramBotToken] = useState(() => loadSettings().telegramBotToken);
   const [telegramChatId, setTelegramChatId] = useState(() => loadSettings().telegramChatId);
   const [telegramNotifyOnStart, setTelegramNotifyOnStart] = useState(() => loadSettings().telegramNotifyOnStart);
