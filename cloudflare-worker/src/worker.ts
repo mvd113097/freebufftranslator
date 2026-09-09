@@ -57,7 +57,7 @@ const AUTO_FREE_MODELS = [
   "liquid/lfm-2.5-2.6b:free",                    // 65K ctx, smallest fallback
 ];
 
-const BATCH_SIZE = 2; // chunks to translate per cron tick
+const BATCH_SIZE = 1; // chunks per cron tick — stay under 30s Worker CPU limit
 const MAX_RETRIES = 3;
 const STAGGER_MS = 4500;
 
@@ -185,7 +185,11 @@ async function callOpenRouter(
   text: string,
   key: string,
   model: string,
+  timeoutMs = 20000,
 ): Promise<{ content: string; model: string }> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
   const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -203,6 +207,7 @@ async function callOpenRouter(
       max_tokens: 32000,
       temperature: 0.3,
     }),
+    signal: controller.signal,
   });
 
   if (res.status === 429) throw new Error("RATE_LIMITED");
@@ -216,6 +221,9 @@ async function callOpenRouter(
   const content = data?.choices?.[0]?.message?.content;
   if (!content) throw new Error("Empty response from model");
   return { content: content.trim(), model };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function translateChunk(
@@ -235,8 +243,12 @@ async function translateChunk(
     : [requestedModel];
 
   let lastError: Error | null = null;
+  let modelsAttempted = 0;
+  const MAX_MODELS_TO_TRY = 1; // Stay under 30s Worker CPU limit — fail fast, retry next tick
 
   for (const model of models) {
+    if (modelsAttempted >= MAX_MODELS_TO_TRY) break;
+    modelsAttempted++;
     for (let ki = 0; ki < keys.length; ki++) {
       const key = keys[ki];
       try {
@@ -245,15 +257,13 @@ async function translateChunk(
       } catch (err) {
         lastError = err instanceof Error ? err : new Error(String(err));
         if (lastError.message === "RATE_LIMITED") {
-          await new Promise((r) => setTimeout(r, STAGGER_MS));
-          continue; // try next key
+          continue; // try next key immediately
         }
-        // 404/400 — model unavailable, try next model
-        if (lastError.message.includes("404") || lastError.message.includes("400")) {
-          break; // move to next model
+        // Dead/timeout — skip to next model immediately
+        if (lastError.message.includes("404") || lastError.message.includes("400") || lastError.message.includes("unavailable") || lastError.message.includes("abort")) {
+          break;
         }
-        // Other error — try next key with stagger
-        await new Promise((r) => setTimeout(r, STAGGER_MS));
+        await new Promise((r) => setTimeout(r, 500));
       }
     }
   }
