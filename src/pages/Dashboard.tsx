@@ -189,6 +189,7 @@ export default function Dashboard() {
   const [cloudJobId, setCloudJobId] = useState(() => loadSettings().cloudJobId);
   /** True when a saved cloud job exists but auto-reconnect failed (manual Reconnect shown). */
   const [cloudReconnectAvailable, setCloudReconnectAvailable] = useState(false);
+  const [isReconnecting, setIsReconnecting] = useState(false);
 
   // Auth gate (fully client-side)
   const [auth, setAuth] = useState<AuthState | null>(null);
@@ -1393,8 +1394,32 @@ export default function Dashboard() {
                     </h3>
                     <p className="text-xs text-sky-200/70 mt-1">
                       The worker may still be translating right now — nothing was lost. Check your
-                      connection, then press "Reconnect to Cloud Job" below to re-attach.
+                      connection, then press the button to re-attach.
                     </p>
+                    <button
+                      onClick={async () => {
+                        setIsReconnecting(true);
+                        try {
+                          await reattachCloudJob();
+                        } finally {
+                          setIsReconnecting(false);
+                        }
+                      }}
+                      disabled={isReconnecting}
+                      className="mt-3 inline-flex items-center gap-2 rounded-xl bg-sky-500 hover:bg-sky-400 disabled:opacity-60 px-4 py-2 text-sm font-semibold text-stone-950 transition-colors"
+                    >
+                      {isReconnecting ? (
+                        <>
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                          Reconnecting...
+                        </>
+                      ) : (
+                        <>
+                          <RotateCcw className="h-4 w-4" />
+                          Reconnect to Cloud Job
+                        </>
+                      )}
+                    </button>
                   </div>
                 </div>
               </div>
