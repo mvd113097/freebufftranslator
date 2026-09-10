@@ -1615,7 +1615,12 @@ export default function Dashboard() {
             transition={{ delay: 0.1 }}
             className="rounded-2xl border border-stone-700/50 bg-stone-900/80 backdrop-blur-xl p-4 shadow-sm"
           >
-                        <KeyManager\n              openrouterKeys={openrouterKeys}\n              onOpenrouterKeysChange={setOpenrouterKeys}\n              geminiKeys={geminiKeys}\n              onGeminiKeysChange={setGeminiKeys}\n            />
+                        <KeyManager
+              openrouterKeys={openrouterKeys}
+              onOpenrouterKeysChange={setOpenrouterKeys}
+              geminiKeys={geminiKeys}
+              onGeminiKeysChange={setGeminiKeys}
+            />
           </motion.div>
         </div>
 
@@ -1923,7 +1928,7 @@ export default function Dashboard() {
                 )}
                 {translationMode === "cloud" ? "Start Cloud Translation" : "Start Translation"}
               </button>
-              {keys.length > 0 && (
+              {(translationMode === "client" ? openrouterKeys : geminiKeys).length > 0 && (
                 <button
                   onClick={testAllKeys}
                   className="flex items-center gap-2 rounded-xl border border-stone-700 bg-stone-800 px-4 py-2.5 text-xs font-medium text-stone-300 hover:bg-stone-700 transition-all cursor-pointer"

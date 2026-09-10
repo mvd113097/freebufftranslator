@@ -57,6 +57,22 @@ export function loadSettings(): AppSettings {
     const parsed = JSON.parse(raw);
     const settings = { ...DEFAULT_SETTINGS, ...parsed } as AppSettings;
 
+    // Migration: older builds saved all keys in a single `keys` array. Move
+    // those into openrouterKeys so saved OpenRouter keys survive the split.
+    if (!Array.isArray(settings.openrouterKeys)) settings.openrouterKeys = [];
+    if (!Array.isArray(settings.geminiKeys)) settings.geminiKeys = [];
+    const legacyKeys = Array.isArray((parsed as { keys?: unknown }).keys)
+      ? ((parsed as { keys?: string[] }).keys ?? [])
+      : [];
+    if (legacyKeys.length > 0 && settings.openrouterKeys.length === 0) {
+      settings.openrouterKeys = legacyKeys;
+      try {
+        localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+      } catch {
+        /* ignore */
+      }
+    }
+
     // Migration: older versions saved paid model slugs (no ":free" suffix).
     // Paid models fail with HTTP 402 on free-tier OpenRouter accounts, so map
     // any known paid slug to its free variant.
