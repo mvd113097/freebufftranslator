@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo, useEffect, useRef } from "react";
+import { useState, useCallback, useMemo, useEffect, useRef, type ComponentType, type ReactNode } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useNavigate } from "react-router";
 import { getAuthState, setGuest, logout, type AuthState } from "@/lib/auth";
@@ -11,9 +11,10 @@ import {
   Zap,
   AlertCircle,
   AlertTriangle,
-  ChevronDown,
+  KeyRound,
   Settings2,
   Server,
+  SlidersHorizontal,
   Cloud,
   Loader2,
   Pause,
@@ -23,7 +24,6 @@ import {
   Wifi,
   WifiOff,
   Laptop,
-  UserRound,
   LogOut,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -117,8 +117,9 @@ export default function Dashboard() {
   const [telegramNotifyOnPause, setTelegramNotifyOnPause] = useState(() => loadSettings().telegramNotifyOnPause);
   const [telegramStatusInterval, setTelegramStatusInterval] = useState(() => loadSettings().telegramStatusInterval);
   const [showScanResults, setShowScanResults] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [telegramOpen, setTelegramOpen] = useState(false);
+  const [setupTab, setSetupTab] = useState<
+    "keys" | "run" | "pipeline" | "cloud" | "telegram"
+  >("keys");
 
 
   // Cloud mode (translation continues on a Cloudflare worker with the browser closed)
@@ -1287,6 +1288,105 @@ export default function Dashboard() {
   }
 
   // ─── Render ─────────────────────────────────────────────────────
+  // One contextual status strip — only the most relevant message shows at a time.
+  const statusBanner: {
+    tone: "amber" | "sky" | "blue" | "yellow" | "orange";
+    icon: ComponentType<{ className?: string }>;
+    title: string;
+    body?: string;
+    action?: ReactNode;
+  } | null = (() => {
+    if (isRunning) {
+      return translationMode === "client"
+        ? {
+            tone: "amber",
+            icon: Laptop,
+            title: "Translating in your browser",
+            body: "Keep this tab open — progress saves automatically, and you can Resume after a reload.",
+          }
+        : {
+            tone: "sky",
+            icon: Cloud,
+            title: "Translating in the cloud",
+            body: "You can close this tab. Reopen anytime to check progress or download the .epub.",
+          };
+    }
+    if (cloudReconnectAvailable) {
+      return {
+        tone: "sky",
+        icon: Cloud,
+        title: "Couldn't reconnect to your cloud job",
+        body: "The worker may still be translating — nothing was lost. Reconnect when your connection is back.",
+        action: (
+          <button
+            onClick={async () => {
+              setIsReconnecting(true);
+              try {
+                await reattachCloudJob();
+              } finally {
+                setIsReconnecting(false);
+              }
+            }}
+            disabled={isReconnecting}
+            className="shrink-0 inline-flex items-center gap-1.5 rounded-lg bg-sky-500 hover:bg-sky-400 disabled:opacity-60 px-3 py-1.5 text-[11px] font-semibold text-stone-950 transition-colors"
+          >
+            {isReconnecting ? (
+              <>
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                Reconnecting…
+              </>
+            ) : (
+              <>
+                <RotateCcw className="h-3.5 w-3.5" />
+                Reconnect
+              </>
+            )}
+          </button>
+        ),
+      };
+    }
+    if (isRestored && hasSession) {
+      return {
+        tone: "blue",
+        icon: CheckCircle2,
+        title: `Session restored — ${fileName || "saved novel"}`,
+        body: `${completedCount} of ${totalChunks} chunks translated${failedCount > 0 ? ` • ${failedCount} failed` : ""}.`,
+      };
+    }
+    if (isPaused && hasSession && !isComplete) {
+      return pauseReason === "quota_exhausted"
+        ? {
+            tone: "orange",
+            icon: AlertTriangle,
+            title: "Daily quota exhausted",
+            body: "All free-tier keys hit their rate limit. Wait a while, then press Resume to continue.",
+          }
+        : {
+            tone: "yellow",
+            icon: Pause,
+            title: "Translation paused",
+            body: `${fileName || "Novel"} — ${completedCount} of ${totalChunks} chunks done.`,
+          };
+    }
+    if (isComplete && failedCount > 0) {
+      return {
+        tone: "orange",
+        icon: AlertCircle,
+        title: `${failedCount} chunk${failedCount > 1 ? "s" : ""} failed to translate`,
+        body: `${completedCount} of ${totalChunks} succeeded — Resume retries just the failed chunks, or download what's done.`,
+      };
+    }
+    return null;
+  })();
+
+  const bannerTone = {
+    amber: { border: "border-amber-500/30", bg: "bg-amber-500/10", title: "text-amber-300", body: "text-amber-200/70" },
+    sky: { border: "border-sky-500/30", bg: "bg-sky-500/10", title: "text-sky-300", body: "text-sky-200/70" },
+    blue: { border: "border-blue-500/30", bg: "bg-blue-500/10", title: "text-blue-300", body: "text-blue-200/70" },
+    yellow: { border: "border-yellow-500/30", bg: "bg-yellow-500/10", title: "text-yellow-300", body: "text-yellow-200/70" },
+    orange: { border: "border-orange-500/30", bg: "bg-orange-500/10", title: "text-orange-300", body: "text-orange-200/70" },
+  } as const;
+
   return (
     <div className="min-h-screen bg-stone-950">
       {/* Header */}
@@ -1302,16 +1402,14 @@ export default function Dashboard() {
               </h1>
               <p className="text-[10px] text-stone-400 flex items-center gap-1">
                 {isOnline ? (
-                  <>
-                    <Wifi className="h-3 w-3 text-green-400" />{" "}
-                    {translationMode === "cloud"
-                      ? "Cloud mode • Cloudflare Worker"
-                      : "Client-side • Direct to OpenRouter"}
-                  </>
+                  <span className="inline-flex items-center gap-1">
+                    <Wifi className="h-3 w-3 text-green-400" />
+                    {translationMode === "cloud" ? "Cloud mode" : "Client mode"}
+                  </span>
                 ) : (
-                  <>
-                    <WifiOff className="h-3 w-3 text-red-400" /> Offline — translation paused
-                  </>
+                  <span className="inline-flex items-center gap-1">
+                    <WifiOff className="h-3 w-3 text-red-400" /> Offline
+                  </span>
                 )}
               </p>
             </div>
@@ -1320,572 +1418,313 @@ export default function Dashboard() {
             <div className="hidden sm:flex items-center gap-1.5 rounded-lg bg-stone-800 border border-stone-700 px-3 py-1.5 text-[10px] text-stone-400">
               {translationMode === "cloud" ? (
                 <>
-                  <Cloud className="h-3 w-3 text-sky-400" />
-                  Runs on your Cloudflare worker
+                  <Cloud className="h-3 w-3 text-sky-400" /> Cloudflare Worker
                 </>
               ) : (
                 <>
-                  <Laptop className="h-3 w-3" />
-                  Runs in your browser
+                  <Laptop className="h-3 w-3" /> Runs in your browser
                 </>
               )}
             </div>
-            {auth.mode === "user" && auth.email && (
-              <div className="hidden sm:flex items-center gap-1.5 rounded-lg bg-stone-800 border border-stone-700 px-3 py-1.5 text-[10px] text-stone-300">
-                <UserRound className="h-3 w-3 text-amber-400" />
-                {auth.email}
-              </div>
-            )}
-            {auth.mode === "guest" && (
-              <div className="hidden sm:flex items-center gap-1.5 rounded-lg bg-stone-800 border border-stone-700 px-3 py-1.5 text-[10px] text-stone-400">
-                <UserRound className="h-3 w-3" />
-                Guest
-              </div>
-            )}
             <button
               onClick={handleSignOut}
               title="Sign out"
-              className="flex items-center gap-1.5 rounded-lg border border-stone-700 bg-stone-800 px-2.5 py-1.5 text-[10px] font-medium text-stone-400 hover:text-stone-100 hover:bg-stone-700 transition-all cursor-pointer"
+              className="flex h-8 w-8 items-center justify-center rounded-lg border border-stone-700 bg-stone-800 text-stone-400 hover:text-stone-100 hover:bg-stone-700 transition-all cursor-pointer"
             >
-              <LogOut className="h-3 w-3" />
-              <span className="hidden sm:inline">Sign out</span>
+              <LogOut className="h-3.5 w-3.5" />
             </button>
-            {isRunning && (
-              <div className="flex items-center gap-1.5 rounded-lg bg-green-500/10 border border-green-500/20 px-3 py-1.5 text-[10px] text-green-400">
-                <Loader2 className="h-3 w-3 animate-spin" />
-                Translating
-              </div>
-            )}
-            {isPaused && !isRunning && hasSession && (
-              <div className="flex items-center gap-1.5 rounded-lg bg-yellow-500/10 border border-yellow-500/20 px-3 py-1.5 text-[10px] text-yellow-400">
-                <Pause className="h-3 w-3" />
-                Paused
-              </div>
-            )}
           </div>
         </div>
       </header>
 
       <main className="mx-auto max-w-7xl px-4 sm:px-6 py-6 space-y-6">
-        {/* Keep-tab-open banner while running (client mode) or cloud note (cloud mode) */}
+{/* Contextual status strip — one message at a time */}
         <AnimatePresence>
-          {isRunning && translationMode === "client" && (
+          {statusBanner && (
             <motion.div
-              initial={{ opacity: 0, y: -12, height: 0 }}
-              animate={{ opacity: 1, y: 0, height: "auto" }}
-              exit={{ opacity: 0, y: -12, height: 0 }}
-              className="overflow-hidden"
+              initial={{ opacity: 0, y: -8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -8 }}
             >
-              <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 backdrop-blur-xl p-4 shadow-sm">
-                <div className="flex items-start gap-3">
-                  <Laptop className="h-5 w-5 text-amber-400 mt-0.5 shrink-0" />
-                  <div className="flex-1">
-                    <h3 className="text-sm font-semibold text-amber-300">
-                      Keep this tab open — translation runs in your browser
-                    </h3>
-                    <p className="text-xs text-amber-200/70 mt-1">
-                      Every finished chunk is saved automatically. If the browser closes, just reopen
-                      the app and press Resume — it continues exactly where it left off.
+              <div
+                className={cn(
+                  "rounded-xl border backdrop-blur-xl px-4 py-3 shadow-sm flex items-start gap-2",
+                  bannerTone[statusBanner.tone].border,
+                  bannerTone[statusBanner.tone].bg,
+                )}
+              >
+                <statusBanner.icon
+                  className={cn("h-4 w-4 mt-0.5 shrink-0", bannerTone[statusBanner.tone].title)}
+                />
+                <div className="flex-1 min-w-0">
+                  <p className={cn("text-xs font-semibold", bannerTone[statusBanner.tone].title)}>
+                    {statusBanner.title}
+                  </p>
+                  {statusBanner.body && (
+                    <p className={cn("text-[11px] mt-0.5 leading-snug", bannerTone[statusBanner.tone].body)}>
+                      {statusBanner.body}
                     </p>
-                  </div>
-                </div>
-              </div>
-            </motion.div>
-          )}
-          {isRunning && translationMode === "cloud" && (
-            <motion.div
-              initial={{ opacity: 0, y: -12, height: 0 }}
-              animate={{ opacity: 1, y: 0, height: "auto" }}
-              exit={{ opacity: 0, y: -12, height: 0 }}
-              className="overflow-hidden"
-            >
-              <div className="rounded-2xl border border-sky-500/30 bg-sky-500/10 backdrop-blur-xl p-4 shadow-sm">
-                <div className="flex items-start gap-3">
-                  <Cloud className="h-5 w-5 text-sky-400 mt-0.5 shrink-0" />
-                  <div className="flex-1">
-                    <h3 className="text-sm font-semibold text-sky-300">
-                      Translating in the cloud — you can close this tab
-                    </h3>
-                    <p className="text-xs text-sky-200/70 mt-1">
-                      Your Cloudflare worker is translating this book in the background. Reopen the
-                      app anytime to check progress or download the finished .epub. Telegram updates
-                      are sent by the worker too.
-                    </p>
-                  </div>
-                </div>
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
-
-        {/* Reconnect banner (cloud job exists but auto-reconnect failed) */}
-        <AnimatePresence>
-          {cloudReconnectAvailable && !isRunning && (
-            <motion.div
-              initial={{ opacity: 0, y: -12, height: 0 }}
-              animate={{ opacity: 1, y: 0, height: "auto" }}
-              exit={{ opacity: 0, y: -12, height: 0 }}
-              className="overflow-hidden"
-            >
-              <div className="rounded-2xl border border-sky-500/30 bg-sky-500/10 backdrop-blur-xl p-4 shadow-sm">
-                <div className="flex items-start gap-3">
-                  <Cloud className="h-5 w-5 text-sky-400 mt-0.5 shrink-0" />
-                  <div className="flex-1">
-                    <h3 className="text-sm font-semibold text-sky-300">
-                      Couldn't reconnect to your cloud job
-                    </h3>
-                    <p className="text-xs text-sky-200/70 mt-1">
-                      The worker may still be translating right now — nothing was lost. Check your
-                      connection, then press the button to re-attach.
-                    </p>
-                    <button
-                      onClick={async () => {
-                        setIsReconnecting(true);
-                        try {
-                          await reattachCloudJob();
-                        } finally {
-                          setIsReconnecting(false);
-                        }
-                      }}
-                      disabled={isReconnecting}
-                      className="mt-3 inline-flex items-center gap-2 rounded-xl bg-sky-500 hover:bg-sky-400 disabled:opacity-60 px-4 py-2 text-sm font-semibold text-stone-950 transition-colors"
-                    >
-                      {isReconnecting ? (
-                        <>
-                          <Loader2 className="h-4 w-4 animate-spin" />
-                          Reconnecting...
-                        </>
-                      ) : (
-                        <>
-                          <RotateCcw className="h-4 w-4" />
-                          Reconnect to Cloud Job
-                        </>
-                      )}
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
-
-        {/* Restored session banner */}
-        <AnimatePresence>
-          {isRestored && hasSession && !isRunning && (
-            <motion.div
-              initial={{ opacity: 0, y: -12, height: 0 }}
-              animate={{ opacity: 1, y: 0, height: "auto" }}
-              exit={{ opacity: 0, y: -12, height: 0 }}
-              className="overflow-hidden"
-            >
-              <div className="rounded-2xl border border-blue-500/30 bg-blue-500/10 backdrop-blur-xl p-4 shadow-sm">
-                <div className="flex items-start gap-3">
-                  <CheckCircle2 className="h-5 w-5 text-blue-400 mt-0.5 shrink-0" />
-                  <div className="flex-1">
-                    <h3 className="text-sm font-semibold text-blue-300">
-                      Session restored — {fileName || "saved novel"}
-                    </h3>
-                    <p className="text-xs text-blue-200/70 mt-1">
-                      {completedCount} of {totalChunks} chunks already translated
-                      {failedCount > 0 ? ` • ${failedCount} failed` : ""}. Resume to continue, or
-                      download what's done.
-                    </p>
-                  </div>
-                </div>
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
-
-        {/* Paused banner */}
-        <AnimatePresence>
-          {isPaused && hasSession && !isRunning && !isComplete && (
-            <motion.div
-              initial={{ opacity: 0, y: -12, height: 0 }}
-              animate={{ opacity: 1, y: 0, height: "auto" }}
-              exit={{ opacity: 0, y: -12, height: 0 }}
-              className="overflow-hidden"
-            >
-              <div className={cn(
-                "rounded-2xl border backdrop-blur-xl p-4 shadow-sm",
-                pauseReason === "quota_exhausted"
-                  ? "border-orange-500/30 bg-orange-500/10"
-                  : "border-yellow-500/30 bg-yellow-500/10"
-              )}>
-                <div className="flex items-start gap-3">
-                  {pauseReason === "quota_exhausted" ? (
-                    <AlertTriangle className="h-5 w-5 text-orange-400 mt-0.5 shrink-0" />
-                  ) : (
-                    <Pause className="h-5 w-5 text-yellow-400 mt-0.5 shrink-0" />
                   )}
-                  <div className="flex-1">
-                    <h3 className={cn(
-                      "text-sm font-semibold",
-                      pauseReason === "quota_exhausted" ? "text-orange-300" : "text-yellow-300"
-                    )}>
-                      {pauseReason === "quota_exhausted"
-                        ? "Daily quota exhausted"
-                        : "Translation paused"}
-                    </h3>
-                    <p className={cn(
-                      "text-xs mt-1",
-                      pauseReason === "quota_exhausted" ? "text-orange-200/70" : "text-yellow-200/70"
-                    )}>
-                      {pauseReason === "quota_exhausted" ? (
-                        <>
-                          All your OpenRouter keys hit their rate limit. This can happen during heavy usage.<br />
-                          <strong>Wait a few minutes</strong> or check your usage at{' '}
-                          <a href="https://openrouter.ai/activity" target="_blank" rel="noopener" className="underline hover:text-orange-200">openrouter.ai/activity</a>.<br />
-                          Press Resume when ready.
-                        </>
-                      ) : (
-                        <><strong>{fileName}</strong> — {completedCount} of {totalChunks} chunks done.</>
-                      )}
-                      {translationMode === "cloud" && (
-                        <span className="mt-2 block text-[11px] text-yellow-200/60 leading-snug">
-                          Cloud jobs pause only when the worker runs out of working models/keys
-                          (daily free-tier limits) — <strong>closing the browser does NOT pause it</strong>.
-                          Your finished chunks are saved on the worker; Resume re-uploads the remaining
-                          chunks as a fresh cloud job when a model has quota again.
-                        </span>
-                      )}
-                      {translationMode === "cloud" && pauseReason && pauseReason !== "quota_exhausted" && (
-                        <span className="mt-1 block text-[11px] text-yellow-200/50 break-words">
-                          Worker reason: {pauseReason.slice(0, 200)}
-                        </span>
-                      )}
-                    </p>
-                  </div>
                 </div>
+                {statusBanner.action}
               </div>
             </motion.div>
           )}
         </AnimatePresence>
 
-        {/* Failed chunks banner */}
-        <AnimatePresence>
-          {isComplete && failedCount > 0 && !isRunning && (
-            <motion.div
-              initial={{ opacity: 0, y: -12, height: 0 }}
-              animate={{ opacity: 1, y: 0, height: "auto" }}
-              exit={{ opacity: 0, y: -12, height: 0 }}
-              className="overflow-hidden"
-            >
-              <div className="rounded-2xl border border-orange-500/30 bg-orange-500/10 backdrop-blur-xl p-4 shadow-sm">
-                <div className="flex items-start gap-3">
-                  <AlertCircle className="h-5 w-5 text-orange-400 mt-0.5 shrink-0" />
-                  <div className="flex-1">
-                    <h3 className="text-sm font-semibold text-orange-300">
-                      {failedCount} chunk{failedCount > 1 ? "s" : ""} failed to translate
-                    </h3>
-                    <p className="text-xs text-orange-200/70 mt-1">
-                      {completedCount} of {totalChunks} succeeded. Press Resume to retry just the
-                      failed chunks, or download what's done.
-                    </p>
-                  </div>
-                </div>
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
-
-        {/* Top Row: Upload + Keys */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-          <motion.div
-            initial={{ opacity: 0, y: 12 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.05 }}
-            className="lg:col-span-2 space-y-3"
-          >
-            <FileUploader
-              onFileContent={handleFileContent}
-              disabled={isRunning || isStarting || hasSession}
-            />
+        {/* Upload */}
+        <motion.div
+          initial={{ opacity: 0, y: 12 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.05 }}
+          className="rounded-2xl border border-stone-700/50 bg-stone-900/80 backdrop-blur-xl p-4 shadow-sm"
+        >
+          <FileUploader
+            onFileContent={handleFileContent}
+            disabled={isRunning || isStarting || hasSession}
+          />
+          <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-stone-400 px-1">
             {rawText.length > 0 && !hasSession && (
-              <div className="flex items-center gap-4 text-[11px] text-stone-400 px-1">
+              <>
                 <span>📄 {rawText.length.toLocaleString()} characters</span>
                 <span>📦 ~{Math.ceil(rawText.length / chunkSize)} chunks</span>
-              </div>
+              </>
             )}
-          </motion.div>
+            {hasSession && (
+              <>
+                <span className="font-medium text-stone-300">{fileName || "saved novel"}</span>
+                <span>{completedCount}/{totalChunks} chunks done</span>
+                {failedCount > 0 && <span className="text-red-400">{failedCount} failed</span>}
+              </>
+            )}
+          </div>
+        </motion.div>
 
-          <motion.div
-            initial={{ opacity: 0, y: 12 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.1 }}
-            className="rounded-2xl border border-stone-700/50 bg-stone-900/80 backdrop-blur-xl p-4 shadow-sm"
-          >
-                        <KeyManager
-              openrouterKeys={openrouterKeys}
-              onOpenrouterKeysChange={setOpenrouterKeys}
-              geminiKeys={geminiKeys}
-              onGeminiKeysChange={setGeminiKeys}
-            />
-          </motion.div>
-        </div>
-
-        {/* Model + Settings + Progress */}
+        {/* Setup + Progress */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+          {/* Setup (tabs) */}
           <motion.div
             initial={{ opacity: 0, y: 12 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 0.15 }}
-            className="space-y-4"
+            className="rounded-2xl border border-stone-700/50 bg-stone-900/80 backdrop-blur-xl p-4 shadow-sm"
           >
-            {/* Translation Mode: Client vs Cloud */}
-            <div className="rounded-2xl border border-stone-700/50 bg-stone-900/80 backdrop-blur-xl p-4 shadow-sm">
-              <label className="text-xs font-semibold text-stone-200 block mb-2.5">
-                Where translation runs
-              </label>
-              <div className="grid grid-cols-2 gap-2">
-                <button
-                  onClick={() => setTranslationMode("client")}
-                  disabled={isRunning || isStarting || hasSession}
-                  className={cn(
-                    "flex flex-col items-start gap-1 rounded-xl border px-3 py-2.5 text-left transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed",
-                    translationMode === "client"
-                      ? "border-amber-500/50 bg-amber-500/10"
-                      : "border-stone-700 bg-stone-800/60 hover:bg-stone-800",
-                  )}
-                >
-                  <Laptop className={cn("h-4 w-4", translationMode === "client" ? "text-amber-400" : "text-stone-500")} />
-                  <span className={cn("text-xs font-semibold", translationMode === "client" ? "text-amber-300" : "text-stone-300")}>
-                    This Browser
-                  </span>
-                  <span className="text-[10px] text-stone-500 leading-tight">
-                    Zero data use. Tab must stay open.
-                  </span>
-                </button>
-                <button
-                  onClick={() => setTranslationMode("cloud")}
-                  disabled={isRunning || isStarting || hasSession}
-                  className={cn(
-                    "flex flex-col items-start gap-1 rounded-xl border px-3 py-2.5 text-left transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed",
-                    translationMode === "cloud"
-                      ? "border-sky-500/50 bg-sky-500/10"
-                      : "border-stone-700 bg-stone-800/60 hover:bg-stone-800",
-                  )}
-                >
-                  <Cloud className={cn("h-4 w-4", translationMode === "cloud" ? "text-sky-400" : "text-stone-500")} />
-                  <span className={cn("text-xs font-semibold", translationMode === "cloud" ? "text-sky-300" : "text-stone-300")}>
-                    Cloud (Cloudflare)
-                  </span>
-                  <span className="text-[10px] text-stone-500 leading-tight">
-                    Browser can close. Uses ~2-4 MB data.
-                  </span>
-                </button>
-              </div>
-              {translationMode === "cloud" && workerUrl.trim() === "" && (
-                <p className="mt-2.5 flex items-center gap-1.5 text-[10px] text-orange-300">
-                  <AlertCircle className="h-3.5 w-3.5 shrink-0" />
-                  Add your worker URL below to start cloud jobs.
-                </p>
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="text-sm font-semibold text-stone-100 flex items-center gap-2">
+                <Settings2 className="h-4 w-4 text-amber-400" />
+                Setup
+              </h2>
+              {setupTab === "keys" && openrouterKeys.length + geminiKeys.length > 0 && (
+                <span className="text-[10px] text-stone-500">
+                  {openrouterKeys.length + geminiKeys.length} key{openrouterKeys.length + geminiKeys.length > 1 ? "s" : ""}
+                </span>
               )}
             </div>
 
-            {/* Cloud worker settings (only in cloud mode) */}
-            {translationMode === "cloud" && (
-              <div className="rounded-2xl border border-stone-700/50 bg-stone-900/80 backdrop-blur-xl p-4 shadow-sm">
-                <div className="flex items-center gap-2 mb-3">
-                  <Cloud className="h-4 w-4 text-sky-400" />
-                  <span className="text-sm font-semibold text-stone-200">Cloud Worker</span>
-                </div>
-                <CloudSettings
-                  workerUrl={workerUrl}
-                  workerSecret={workerSecret}
-                  onWorkerUrlChange={handleWorkerUrlChange}
-                  onWorkerSecretChange={handleWorkerSecretChange}
-                  disabled={isRunning || isStarting}
-                />
-              </div>
-            )}
-
-            {/* Model Selector */}
-            <div className="rounded-2xl border border-stone-700/50 bg-stone-900/80 backdrop-blur-xl p-4 shadow-sm">
-              <div className="flex items-center justify-between mb-2">
-                <label className="text-xs font-semibold text-stone-200">Model</label>
-
-              </div>
-              <select
-                value={selectedModel}
-                onChange={(e) => setSelectedModel(e.target.value)}
-                disabled={isRunning || isStarting}
-                className="w-full rounded-xl border border-stone-700 bg-stone-800 px-3 py-2 text-xs text-stone-200 focus:outline-none focus:ring-2 focus:ring-amber-400/30 disabled:opacity-50 cursor-pointer"
-              >
-                {MODEL_OPTIONS.map((m) => (
-                  <option key={m.value} value={m.value}>
-                    {m.label}
-                  </option>
-                ))}
-              </select>
-              {activeModel && (
-                <p className="mt-2 text-[10px] text-stone-400 flex items-center gap-1">
-                  <Zap className="h-3.5 w-3.5 text-amber-400 shrink-0" />
-                  Now translating with{" "}
-                  <span className="font-mono font-semibold text-amber-400">
-                    {activeModel.split("/").pop()}
-                  </span>
-                  {selectedModel === "openrouter/free" ? " (Auto Free picked it)" : ""}
-                </p>
-              )}
-              {selectedModel === "openrouter/free" && !activeModel && (
-                <p className="mt-2 text-[10px] text-stone-500 leading-snug">
-                  Auto Free tries the best available model per chunk and automatically
-                  skips dead or rate-limited models, falling back to the next one.
-                </p>
-              )}
-
+            <div className="flex gap-1 overflow-x-auto -mx-1 px-1 pb-2 mb-4 border-b border-stone-700/50">
+              {(
+                [
+                  { id: "keys", label: "Keys", icon: KeyRound },
+                  { id: "run", label: "Run", icon: Zap },
+                  { id: "pipeline", label: "Pipeline", icon: SlidersHorizontal },
+                  { id: "cloud", label: "Cloud", icon: Cloud },
+                  { id: "telegram", label: "Telegram", icon: Send },
+                ] as const
+              ).map((tab) => (
+                <button
+                  key={tab.id}
+                  onClick={() => setSetupTab(tab.id)}
+                  className={cn(
+                    "inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[11px] font-medium whitespace-nowrap border transition-all cursor-pointer",
+                    setupTab === tab.id
+                      ? "bg-amber-500/15 text-amber-300 border-amber-500/30"
+                      : "text-stone-400 border-transparent hover:text-stone-200 hover:bg-stone-800",
+                  )}
+                >
+                  <tab.icon className="h-3 w-3" />
+                  {tab.label}
+                </button>
+              ))}
             </div>
 
-            {/* Collapsible Pipeline Settings */}
-            <div className="rounded-2xl border border-stone-700/50 bg-stone-900/80 backdrop-blur-xl shadow-sm overflow-hidden">
-              <button
-                onClick={() => setSettingsOpen(!settingsOpen)}
-                className="w-full flex items-center justify-between p-4 text-left cursor-pointer"
-              >
-                <div className="flex items-center gap-2">
-                  <Settings2 className="h-4 w-4 text-amber-400" />
-                  <span className="text-sm font-semibold text-stone-200">Pipeline Settings</span>
-                </div>
-                <ChevronDown
-                  className={cn(
-                    "h-4 w-4 text-stone-400 transition-transform duration-200",
-                    settingsOpen && "rotate-180",
-                  )}
+            <div>
+              {setupTab === "keys" && (
+                <KeyManager
+                  openrouterKeys={openrouterKeys}
+                  onOpenrouterKeysChange={setOpenrouterKeys}
+                  geminiKeys={geminiKeys}
+                  onGeminiKeysChange={setGeminiKeys}
                 />
-              </button>
-              <AnimatePresence initial={false}>
-                {settingsOpen && (
-                  <motion.div
-                    initial={{ height: 0, opacity: 0 }}
-                    animate={{ height: "auto", opacity: 1 }}
-                    exit={{ height: 0, opacity: 0 }}
-                    transition={{ duration: 0.2, ease: "easeInOut" }}
-                    className="overflow-hidden"
-                  >
-                    <div className="px-4 pb-4 pt-0">
-                      <SettingsPanel
-                        chunkSize={chunkSize}
-                        onChunkSizeChange={setChunkSize}
-                        concurrency={concurrency}
-                        onConcurrencyChange={setConcurrency}
-                        chunkSizeDisabled={isRunning || isStarting || hasSession}
-                      />
+              )}
+
+              {setupTab === "run" && (
+                <div className="space-y-5">
+                  <div>
+                    <label className="text-xs font-semibold text-stone-300 block mb-2">Where translation runs</label>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        onClick={() => setTranslationMode("client")}
+                        disabled={isRunning || isStarting || hasSession}
+                        className={cn(
+                          "flex flex-col items-start gap-1 rounded-xl border px-3 py-2.5 text-left transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed",
+                          translationMode === "client"
+                            ? "border-amber-500/50 bg-amber-500/10"
+                            : "border-stone-700 bg-stone-800/60 hover:bg-stone-800",
+                        )}
+                      >
+                        <Laptop className={cn("h-4 w-4", translationMode === "client" ? "text-amber-400" : "text-stone-500")} />
+                        <span className={cn("text-xs font-semibold", translationMode === "client" ? "text-amber-300" : "text-stone-300")}>This Browser</span>
+                        <span className="text-[10px] text-stone-500 leading-tight">Tab must stay open</span>
+                      </button>
+                      <button
+                        onClick={() => setTranslationMode("cloud")}
+                        disabled={isRunning || isStarting || hasSession}
+                        className={cn(
+                          "flex flex-col items-start gap-1 rounded-xl border px-3 py-2.5 text-left transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed",
+                          translationMode === "cloud"
+                            ? "border-sky-500/50 bg-sky-500/10"
+                            : "border-stone-700 bg-stone-800/60 hover:bg-stone-800",
+                        )}
+                      >
+                        <Cloud className={cn("h-4 w-4", translationMode === "cloud" ? "text-sky-400" : "text-stone-500")} />
+                        <span className={cn("text-xs font-semibold", translationMode === "cloud" ? "text-sky-300" : "text-stone-300")}>Cloud (Cloudflare)</span>
+                        <span className="text-[10px] text-stone-500 leading-tight">Browser can close</span>
+                      </button>
                     </div>
-                  </motion.div>
-                )}
-              </AnimatePresence>
-            </div>
+                  </div>
 
-            {/* Telegram Notifications */}
-            <div className="rounded-2xl border border-stone-700/50 bg-stone-900/80 backdrop-blur-xl shadow-sm overflow-hidden">
-              <button
-                onClick={() => setTelegramOpen((v) => !v)}
-                className="w-full flex items-center justify-between p-4 text-left cursor-pointer"
-              >
-                <div className="flex items-center gap-2">
-                  <Send className="h-4 w-4 text-blue-400" />
-                  <span className="text-sm font-semibold text-stone-200">Telegram Notifications</span>
-                  {telegramBotToken && telegramChatId && (
-                    <span className="inline-flex items-center rounded-full bg-green-500/15 px-2 py-0.5 text-[10px] font-medium text-green-400">
-                      Active
-                    </span>
-                  )}
-                </div>
-                <ChevronDown
-                  className={cn(
-                    "h-4 w-4 text-stone-400 transition-transform duration-200",
-                    telegramOpen && "rotate-180",
-                  )}
-                />
-              </button>
-              <AnimatePresence initial={false}>
-                {telegramOpen && (
-                  <motion.div
-                    initial={{ height: 0, opacity: 0 }}
-                    animate={{ height: "auto", opacity: 1 }}
-                    exit={{ height: 0, opacity: 0 }}
-                    transition={{ duration: 0.2, ease: "easeInOut" }}
-                    className="overflow-hidden"
-                  >
-                    <div className="px-4 pb-4 pt-0 space-y-3">
-                      <p className="text-[11px] text-stone-500">
-                        Sent directly from your browser while the tab is open. Optional.
+                  <div>
+                    <label className="text-xs font-semibold text-stone-300 block mb-2">Model</label>
+                    <select
+                      value={selectedModel}
+                      onChange={(e) => setSelectedModel(e.target.value)}
+                      disabled={isRunning || isStarting}
+                      className="w-full rounded-xl border border-stone-700 bg-stone-800 px-3 py-2 text-xs text-stone-200 focus:outline-none focus:ring-2 focus:ring-amber-400/30 disabled:opacity-50 cursor-pointer"
+                    >
+                      {MODEL_OPTIONS.map((m) => (
+                        <option key={m.value} value={m.value}>{m.label}</option>
+                      ))}
+                    </select>
+                    {activeModel && (
+                      <p className="mt-2 text-[10px] text-stone-400 flex items-center gap-1">
+                        <Zap className="h-3.5 w-3.5 text-amber-400 shrink-0" />
+                        Translating with{" "}
+                        <span className="font-mono font-semibold text-amber-400">{activeModel.split("/").pop()}</span>
+                        {selectedModel === "openrouter/free" ? " (Auto Free)" : ""}
                       </p>
-                      <div className="space-y-2">
-                        <label className="text-xs font-medium text-stone-400">Bot Token</label>
-                        <input
-                          type="password"
-                          value={telegramBotToken}
-                          onChange={(e) => setTelegramBotToken(e.target.value)}
-                          placeholder="1234567890:ABCdefGHIjklMNOpqrsTUVwxyz"
-                          className="w-full rounded-xl border border-stone-700 bg-stone-800 px-3 py-2 text-xs font-mono text-stone-200 placeholder:text-stone-500 focus:outline-none focus:ring-2 focus:ring-blue-400/30"
-                        />
-                      </div>
-                      <div className="space-y-2">
-                        <label className="text-xs font-medium text-stone-400">Chat ID</label>
-                        <input
-                          type="text"
-                          value={telegramChatId}
-                          onChange={(e) => setTelegramChatId(e.target.value)}
-                          placeholder="123456789"
-                          className="w-full rounded-xl border border-stone-700 bg-stone-800 px-3 py-2 text-xs font-mono text-stone-200 placeholder:text-stone-500 focus:outline-none focus:ring-2 focus:ring-blue-400/30"
-                        />
-                        <p className="text-[10px] text-stone-600">
-                          Message @userinfobot to find your Chat ID. Separate multiple IDs with commas.
-                        </p>
-                      </div>
-                      <div className="space-y-2">
-                        <label className="text-xs font-medium text-stone-400">Status update every</label>
-                        <select
-                          value={telegramStatusInterval}
-                          onChange={(e) => setTelegramStatusInterval(Number(e.target.value))}
-                          disabled={isRunning}
-                          className="w-full rounded-xl border border-stone-700 bg-stone-800 px-3 py-2 text-xs text-stone-200 focus:outline-none focus:ring-2 focus:ring-blue-400/30 disabled:opacity-50 cursor-pointer"
-                        >
-                          <option value={0}>Off — milestones only (25% steps)</option>
-                          <option value={1}>Every 1 minute</option>
-                          <option value={5}>Every 5 minutes</option>
-                          <option value={10}>Every 10 minutes</option>
-                          <option value={15}>Every 15 minutes</option>
-                          <option value={30}>Every 30 minutes</option>
-                        </select>
-                        <p className="text-[10px] text-stone-600">
-                          Periodic progress snapshots while translating. Pause or finish the run to change it.
-                        </p>
-                      </div>
-                      <div className="space-y-2">
-                        <label className="text-xs font-medium text-stone-400">Notify me when...</label>
-                        <div className="space-y-1.5">
-                          {(
-                            [
-                              { label: "Translation starts", checked: telegramNotifyOnStart, set: setTelegramNotifyOnStart },
-                              { label: "Progress milestones (every 25%)", checked: telegramNotifyOnProgress, set: setTelegramNotifyOnProgress },
-                              { label: "A chunk fails (error)", checked: telegramNotifyOnError, set: setTelegramNotifyOnError },
-                              { label: "Translation completes", checked: telegramNotifyOnComplete, set: setTelegramNotifyOnComplete },
-                              { label: "Paused or stopped", checked: telegramNotifyOnPause, set: setTelegramNotifyOnPause },
-                            ] as const
-                          ).map(({ label, checked, set }) => (
-                            <label key={label} className="flex items-center gap-2 cursor-pointer group">
-                              <input
-                                type="checkbox"
-                                checked={checked}
-                                onChange={(e) => set(e.target.checked)}
-                                className="h-3.5 w-3.5 rounded border-stone-600 bg-stone-700 text-blue-400 focus:ring-blue-400/30 cursor-pointer"
-                              />
-                              <span className="text-[11px] text-stone-300 group-hover:text-stone-200 transition-colors">{label}</span>
-                            </label>
-                          ))}
-                        </div>
-                      </div>
-                    </div>
-                  </motion.div>
-                )}
-              </AnimatePresence>
-            </div>
-          </motion.div>
+                    )}
+                    {selectedModel === "openrouter/free" && !activeModel && (
+                      <p className="mt-2 text-[10px] text-stone-500 leading-snug">
+                        Auto Free tries the best available model per chunk and automatically skips dead or rate-limited models.
+                      </p>
+                    )}
+                  </div>
+                </div>
+              )}
 
-          <motion.div
+              {setupTab === "pipeline" && (
+                <SettingsPanel
+                  chunkSize={chunkSize}
+                  onChunkSizeChange={setChunkSize}
+                  concurrency={concurrency}
+                  onConcurrencyChange={setConcurrency}
+                  chunkSizeDisabled={isRunning || isStarting || hasSession}
+                />
+              )}
+
+              {setupTab === "cloud" && (
+                <div className="space-y-3">
+                  <p className="text-[11px] text-stone-500 leading-snug">
+                    Cloud mode runs on your Cloudflare worker, so the browser can close. Uses Gemini AQ. keys.
+                  </p>
+                  <CloudSettings
+                    workerUrl={workerUrl}
+                    workerSecret={workerSecret}
+                    onWorkerUrlChange={handleWorkerUrlChange}
+                    onWorkerSecretChange={handleWorkerSecretChange}
+                    disabled={isRunning || isStarting}
+                  />
+                  {translationMode === "cloud" && workerUrl.trim() === "" && (
+                    <p className="flex items-center gap-1.5 text-[10px] text-orange-300">
+                      <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+                      Add your worker URL above to start cloud jobs.
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {setupTab === "telegram" && (
+                <div className="space-y-3">
+                  <p className="text-[11px] text-stone-500">
+                    Sent directly from your browser while the tab is open. Optional.
+                  </p>
+                  <div className="space-y-2">
+                    <label className="text-xs font-medium text-stone-400">Bot Token</label>
+                    <input
+                      type="password"
+                      value={telegramBotToken}
+                      onChange={(e) => setTelegramBotToken(e.target.value)}
+                      placeholder="1234567890:ABCdefGHIjklMNOpqrsTUVwxyz"
+                      className="w-full rounded-xl border border-stone-700 bg-stone-800 px-3 py-2 text-xs font-mono text-stone-200 placeholder:text-stone-500 focus:outline-none focus:ring-2 focus:ring-blue-400/30"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-xs font-medium text-stone-400">Chat ID</label>
+                    <input
+                      type="text"
+                      value={telegramChatId}
+                      onChange={(e) => setTelegramChatId(e.target.value)}
+                      placeholder="123456789"
+                      className="w-full rounded-xl border border-stone-700 bg-stone-800 px-3 py-2 text-xs font-mono text-stone-200 placeholder:text-stone-500 focus:outline-none focus:ring-2 focus:ring-blue-400/30"
+                    />
+                    <p className="text-[10px] text-stone-600">
+                      Message @userinfobot to find your Chat ID. Separate multiple IDs with commas.
+                    </p>
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-xs font-medium text-stone-400">Status update every</label>
+                    <select
+                      value={telegramStatusInterval}
+                      onChange={(e) => setTelegramStatusInterval(Number(e.target.value))}
+                      disabled={isRunning}
+                      className="w-full rounded-xl border border-stone-700 bg-stone-800 px-3 py-2 text-xs text-stone-200 focus:outline-none focus:ring-2 focus:ring-blue-400/30 disabled:opacity-50 cursor-pointer"
+                    >
+                      <option value={0}>Off — milestones only (25% steps)</option>
+                      <option value={1}>Every 1 minute</option>
+                      <option value={5}>Every 5 minutes</option>
+                      <option value={10}>Every 10 minutes</option>
+                      <option value={15}>Every 15 minutes</option>
+                      <option value={30}>Every 30 minutes</option>
+                    </select>
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-xs font-medium text-stone-400">Notify me when...</label>
+                    <div className="space-y-1.5">
+                      {(
+                        [
+                          { label: "Translation starts", checked: telegramNotifyOnStart, set: setTelegramNotifyOnStart },
+                          { label: "Progress milestones (every 25%)", checked: telegramNotifyOnProgress, set: setTelegramNotifyOnProgress },
+                          { label: "A chunk fails (error)", checked: telegramNotifyOnError, set: setTelegramNotifyOnError },
+                          { label: "Translation completes", checked: telegramNotifyOnComplete, set: setTelegramNotifyOnComplete },
+                          { label: "Paused or stopped", checked: telegramNotifyOnPause, set: setTelegramNotifyOnPause },
+                        ] as const
+                      ).map(({ label, checked, set }) => (
+                        <label key={label} className="flex items-center gap-2 cursor-pointer group">
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={(e) => set(e.target.checked)}
+                            className="h-3.5 w-3.5 rounded border-stone-600 bg-stone-700 text-blue-400 focus:ring-blue-400/30 cursor-pointer"
+                          />
+                          <span className="text-[11px] text-stone-300 group-hover:text-stone-200 transition-colors">{label}</span>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          </motion.div>          <motion.div
             initial={{ opacity: 0, y: 12 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 0.2 }}
@@ -1931,7 +1770,7 @@ export default function Dashboard() {
               {(translationMode === "client" ? openrouterKeys : geminiKeys).length > 0 && (
                 <button
                   onClick={testAllKeys}
-                  className="flex items-center gap-2 rounded-xl border border-stone-700 bg-stone-800 px-4 py-2.5 text-xs font-medium text-stone-300 hover:bg-stone-700 transition-all cursor-pointer"
+                  className="flex items-center gap-1.5 rounded-lg border border-stone-700 bg-stone-800 px-3 py-2 text-xs font-medium text-stone-300 hover:bg-stone-700 transition-all cursor-pointer"
                 >
                   <Zap className="h-3.5 w-3.5" />
                   Test All Keys
@@ -1987,7 +1826,7 @@ export default function Dashboard() {
           {hasSession && hasTranslatedChunks && (
             <button
               onClick={handleDownloadProgress}
-              className="flex items-center gap-2 rounded-xl border border-green-500/30 bg-green-500/10 backdrop-blur-md px-4 py-2.5 text-sm font-medium text-green-300 hover:bg-green-500/20 active:bg-green-500/30 transition-all cursor-pointer"
+              className="flex items-center gap-1.5 rounded-lg border border-green-500/30 bg-green-500/10 backdrop-blur-md px-3 py-2 text-xs font-medium text-green-300 hover:bg-green-500/20 active:bg-green-500/30 transition-all cursor-pointer"
               style={{ WebkitTapHighlightColor: "transparent", touchAction: "manipulation" }}
             >
               <Download className="h-4 w-4" />
@@ -1999,7 +1838,7 @@ export default function Dashboard() {
           {isDoneClean && hasTranslatedChunks && (
             <button
               onClick={handleExport}
-              className="flex items-center gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 backdrop-blur-md px-5 py-2.5 text-sm font-medium text-amber-300 hover:bg-amber-500/20 active:bg-amber-500/30 transition-all cursor-pointer"
+              className="flex items-center gap-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 backdrop-blur-md px-4 py-2 text-xs font-medium text-amber-300 hover:bg-amber-500/20 active:bg-amber-500/30 transition-all cursor-pointer"
               style={{ WebkitTapHighlightColor: "transparent", touchAction: "manipulation" }}
             >
               <Download className="h-4 w-4" />
@@ -2011,7 +1850,7 @@ export default function Dashboard() {
           {hasSession && hasTranslatedChunks && (
             <button
               onClick={() => setShowScanResults(!showScanResults)}
-              className="flex items-center gap-2 rounded-xl border border-purple-500/30 bg-purple-500/10 backdrop-blur-md px-4 py-2.5 text-sm font-medium text-purple-300 hover:bg-purple-500/20 active:bg-purple-500/30 transition-all cursor-pointer"
+              className="flex items-center gap-1.5 rounded-lg border border-stone-700 bg-stone-800 px-3 py-2 text-xs font-medium text-stone-300 hover:bg-stone-700 transition-all cursor-pointer"
               style={{ WebkitTapHighlightColor: "transparent", touchAction: "manipulation" }}
             >
               {showScanResults ? "Hide" : "Scan for Chinese"}
@@ -2022,7 +1861,7 @@ export default function Dashboard() {
           {hasSession && !isRunning && (
             <button
               onClick={handleReset}
-              className="flex items-center gap-2 rounded-xl border border-stone-700 bg-stone-800 px-4 py-2.5 text-sm font-medium text-stone-300 hover:bg-stone-700 transition-all cursor-pointer"
+              className="flex items-center gap-1.5 rounded-lg border border-stone-700 bg-stone-800 px-3 py-2 text-xs font-medium text-stone-300 hover:bg-stone-700 transition-all cursor-pointer"
             >
               <RotateCcw className="h-3.5 w-3.5" />
               Reset
