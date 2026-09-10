@@ -15,7 +15,7 @@ const OPENROUTER_BASE = "https://openrouter.ai/api/v1/chat/completions";
 
 // ─── Gemini (native Google endpoint) ──────────────────────────────────
 
-const GEMINI_BASE = "https://googleapis.com/v1beta/models";
+const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
 
 import { LIVE_MODEL_SLUGS, GEMINI_MODEL_SLUGS } from "./models";
 
