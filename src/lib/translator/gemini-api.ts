@@ -244,16 +244,29 @@ async function translateWithModel(
       const body = await response.text().catch(() => "");
       const realMsg = extractApiErrorMessage(body);
       const low = body.toLowerCase();
-      const looksLikeKeyProblem =
+      
+      // Check if this is a model restriction error (not a bad key)
+      // Model restrictions like "only available on agentic harnesses" should NOT
+      // be treated as key problems - they should allow fallback to continue
+      const isModelRestriction = /only available on|agentic harness|not available for this|request type|not supported|model restriction|model is not available/i.test(low);
+      
+      // Only treat as key problem if it's NOT a model restriction
+      // and explicitly mentions key/credential issues
+      const isBadKey =
         response.status === 401 ||
-        /api[ _-]?key|invalid|expired|unauthorized|credential|permission|forbidden|denied|authentication|access denied|no access/.test(
-          low,
-        );
-      if (looksLikeKeyProblem) {
+        /api[ _-]?key|invalid.*key|key.*invalid|expired|unauthorized|credential.*invalid/i.test(low);
+      
+      if (isModelRestriction) {
+        // Model restriction - should NOT stop fallback chain
+        throw new Error(`MODEL_RESTRICTED (key …${apiKey.slice(-4)}): ${realMsg || "Model not available for this request"}`);
+      }
+      
+      if (isBadKey) {
         throw new Error(
           `KEY_REJECTED (key …${apiKey.slice(-4)}): ${realMsg || "Invalid or expired API key"}`,
         );
       }
+      
       throw new Error(`AUTH_ERROR_${response.status}: ${realMsg || "Request rejected"}`);
     }
 
@@ -391,6 +404,15 @@ export async function translateChunk(
       ) {
         throw err;
       }
+      
+      // MODEL_RESTRICTED should NOT stop the fallback chain - try next model
+      if (msg.startsWith("MODEL_RESTRICTED")) {
+        console.log(
+          `[Translator] ${candidate} restricted for this request — trying next model`,
+        );
+        continue;
+      }
+      
       console.log(
         `[Translator] Auto Free: ${candidate} failed (${msg.slice(0, 80)}) — trying next model`,
       );
