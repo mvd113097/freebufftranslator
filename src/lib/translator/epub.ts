@@ -41,13 +41,29 @@ export async function generateEpub(
     const chapterHref = `${chapterId}.xhtml`;
     const chapterTitle = `Chapter ${i + 1}`;
 
-    // Convert text to XHTML with proper paragraph spacing
+    // Convert text to XHTML with proper paragraph spacing.
+    // Single newlines inside a paragraph are treated as line-break markers
+    // (some models emit soft-wrapped lines) so dialogue keeps its own lines.
     const paragraphs = chunk.text
       .split(/\n\s*\n/)
       .filter((p) => p.trim().length > 0);
 
     const content = paragraphs
-      .map((p) => `      <p>${escapeXml(p.trim())}</p>`)
+      .map((p, pi) => {
+        const lines = p
+          .trim()
+          .split(/\n/)
+          .map((l) => l.trim())
+          .filter((l) => l.length > 0);
+        const body =
+          lines.length > 1
+            ? lines.map((l) => escapeXml(l)).join("<br/>")
+            : escapeXml(lines[0] ?? "");
+        // First paragraph of a chapter is flush left; the rest are indented
+        // (classic book layout).
+        const cls = pi === 0 ? " class=\"no-indent\"" : "";
+        return `      <p${cls}>${body}</p>`;
+      })
       .join("\n");
 
     zip.file(
@@ -59,7 +75,8 @@ export async function generateEpub(
     <title>${chapterTitle}</title>
     <style>
       body { font-family: Georgia, serif; line-height: 1.6; margin: 2em; }
-      p { margin: 0 0 1em 0; text-indent: 0; }
+      p { margin: 0; text-indent: 1.5em; text-align: justify; }
+      p.no-indent { text-indent: 0; }
     </style>
   </head>
   <body>
