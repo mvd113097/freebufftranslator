@@ -41,10 +41,13 @@ const OPENROUTER_MODELS: ModelOption[] = [
 ];
 
 // ─── Gemini free-tier models (native Google endpoint, AQ. keys) ───────
-// Using Gemini 3.x models which are confirmed stable and available
+// These are the model IDs from Google's official Gemini API docs (2026-09)
+// Endpoint: https://googleapis.com/v1beta/models/{model}:streamGenerateContent
 
 const GEMINI_MODELS: ModelOption[] = [
-  { value: "gemini-3.6-flash", label: "Gemini 3.6 Flash (free tier) ★", provider: "gemini" },
+  { value: "gemini-3.8-flash", label: "Gemini 3.8 Flash (free tier) ★", provider: "gemini" },
+  { value: "gemini-3.7-flash", label: "Gemini 3.7 Flash (free tier)", provider: "gemini" },
+  { value: "gemini-3.6-flash", label: "Gemini 3.6 Flash (free tier)", provider: "gemini" },
   { value: "gemini-3.5-flash", label: "Gemini 3.5 Flash (free tier)", provider: "gemini" },
   { value: "gemini-3.5-flash-lite", label: "Gemini 3.5 Flash Lite (free tier)", provider: "gemini" },
   { value: "gemini-3.1-flash-lite", label: "Gemini 3.1 Flash Lite (free tier)", provider: "gemini" },

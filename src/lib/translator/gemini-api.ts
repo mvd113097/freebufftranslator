@@ -32,9 +32,9 @@ IMPORTANT: Output ONLY the translated English text. Do not include any explanati
 /** Default model — free or very cheap on OpenRouter */
 export const DEFAULT_MODEL = "openrouter/free";
 
-/** When provided a Gemini key, default to the first Gemini model (3.6 Flash). */
+/** When provided a Gemini key, default to the first Gemini model (3.8 Flash - newest). */
 export function defaultModelForProvider(provider: "openrouter" | "gemini"): string {
-  return provider === "gemini" ? "gemini-3.6-flash" : "openrouter/free";
+  return provider === "gemini" ? "gemini-3.8-flash" : "openrouter/free";
 }
 /**
  * Fallback chain for OpenRouter "Auto": ordered for reliability first (fast,
