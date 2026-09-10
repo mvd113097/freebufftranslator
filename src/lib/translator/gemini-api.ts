@@ -612,11 +612,41 @@ async function translateGeminiDirect(
 }
 
 /**
- * Parse Gemini's JSON-per-line stream (NOT SSE).
+ * Concatenate every text part of one Gemini stream chunk.
+ */
+function extractGeminiChunkText(parsed: unknown): string {
+  const p = parsed as {
+    candidates?: { content?: { parts?: { text?: unknown }[] } }[];
+    error?: unknown;
+  };
+  let out = "";
+  const parts = p?.candidates?.[0]?.content?.parts;
+  if (Array.isArray(parts)) {
+    for (const part of parts) {
+      if (typeof part?.text === "string") out += part.text;
+    }
+  }
+  return out;
+}
+
+/**
+ * Parse Gemini's streaming response (NOT SSE).
  *
- * Each line is a standalone JSON object. We extract
- *   candidates[0].content.parts[*].text
- * and concatenate.
+ * The :streamGenerateContent endpoint (without ?alt=sse) returns a JSON ARRAY
+ * of chunk objects streamed incrementally, with objects spanning multiple
+ * lines:
+ *
+ *   [{
+ *     "candidates": [{ "content": { "parts": [{ "text": "..." }] } }]
+ *   }
+ *   ,{ ... }]
+ *
+ * Some deployments instead emit newline-delimited JSON objects, and some wrap
+ * chunks in SSE "data: " framing. A line-based parser breaks on multi-line
+ * objects, so we scan the buffer for balanced top-level `{ ... }` blocks
+ * (string-aware, brace-depth counting) and parse each one as it completes.
+ * Everything between objects — "[", "]", commas, "data:" prefixes, whitespace
+ * — is ignored by construction.
  */
 function parseGeminiStream(
   reader: ReadableStreamDefaultReader<Uint8Array>,
@@ -630,6 +660,84 @@ function parseGeminiStream(
   return new Promise<string>((resolve, reject) => {
     const run = async () => {
       try {
+        /** Parse one complete object's JSON; returns false when unparseable. */
+        const handleObject = (json: string): boolean => {
+          let parsed: {
+            error?: { code?: number; message?: string; status?: string };
+          };
+          try {
+            parsed = JSON.parse(json);
+          } catch {
+            return false; // truncated / malformed — skip
+          }
+
+          // Top-level error object (e.g. 429 RESOURCE_EXHAUSTED mid-stream)
+          if (parsed?.error) {
+            const code = parsed.error.code;
+            const status = parsed.error.status ?? "";
+            if (code === 429 || status === "RESOURCE_EXHAUSTED") {
+              throw new Error("RATE_LIMITED");
+            }
+            const errMsg =
+              typeof parsed.error === "string"
+                ? (parsed.error as unknown as string)
+                : parsed.error.message || JSON.stringify(parsed.error);
+            throw new Error(`MODEL_ERROR: ${errMsg.slice(0, 200)}`);
+          }
+
+          const text = extractGeminiChunkText(parsed);
+          if (text) {
+            fullText += text;
+            onToken(text);
+          }
+          return true;
+        };
+
+        /**
+ * Pull the next complete top-level {...} block out of `buf`.
+ * Returns null when no balanced object is available yet.
+ */
+        const nextObject = (
+          buf: string,
+        ): { obj: string; rest: string } | null => {
+          let depth = 0;
+          let inString = false;
+          let escaped = false;
+          let start = -1;
+          for (let i = 0; i < buf.length; i++) {
+            const ch = buf[i];
+            if (inString) {
+              if (escaped) escaped = false;
+              else if (ch === "\\") escaped = true;
+              else if (ch === '"') inString = false;
+              continue;
+            }
+            if (ch === '"') {
+              inString = true;
+            } else if (ch === "{") {
+              if (depth === 0) start = i;
+              depth++;
+            } else if (ch === "}") {
+              depth--;
+              if (depth === 0 && start >= 0) {
+                return { obj: buf.slice(start, i + 1), rest: buf.slice(i + 1) };
+              }
+            }
+            // All other characters ([ ] , whitespace, "data:" prefixes)
+            // are framing — skipped until the next { or }.
+          }
+          return null;
+        };
+
+        const drainBuffer = () => {
+          for (;;) {
+            const next = nextObject(buffer);
+            if (!next) break;
+            buffer = next.rest;
+            handleObject(next.obj); // may throw RATE_LIMITED / MODEL_ERROR
+          }
+        };
+
         // eslint-disable-next-line no-constant-condition
         while (true) {
           if (abortSignal?.aborted) {
@@ -640,57 +748,11 @@ function parseGeminiStream(
           if (done) break;
 
           buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split("\n");
-          buffer = lines.pop() || "";
-
-          for (let line of lines) {
-            line = line.trim();
-            if (!line) continue;
-            // Gemini streams raw JSON objects line-by-line (not "data: ...")
-            if (!line.startsWith("{")) continue;
-
-            try {
-              const parsed = JSON.parse(line);
-
-              // Top-level error
-              if (parsed.error) {
-                const errMsg =
-                  typeof parsed.error === "string"
-                    ? parsed.error
-                    : parsed.error.message || JSON.stringify(parsed.error);
-                reject(new Error(`MODEL_ERROR: ${errMsg.slice(0, 200)}`));
-                return;
-              }
-
-              const content =
-                parsed?.candidates?.[0]?.content?.parts?.[0]?.text;
-              if (typeof content === "string" && content) {
-                fullText += content;
-                onToken(content);
-              }
-            } catch {
-              /* skip malformed lines */
-            }
-          }
+          drainBuffer();
         }
 
-        // Handle any remaining line in the buffer
-        if (buffer.trim()) {
-          const line = buffer.trim();
-          if (line.startsWith("{")) {
-            try {
-              const parsed = JSON.parse(line);
-              const content =
-                parsed?.candidates?.[0]?.content?.parts?.[0]?.text;
-              if (typeof content === "string" && content) {
-                fullText += content;
-                onToken(content);
-              }
-            } catch {
-              /* skip */
-            }
-          }
-        }
+        // Stream ended — flush any final complete object still in the buffer
+        drainBuffer();
 
         resolve(fullText);
       } catch (err) {
@@ -719,14 +781,15 @@ async function translateGeminiNonStreaming(
 
 /**
  * Direct Gemini non-streaming call (no worker). Used when no worker URL is configured.
- * Calls streamGenerateContent without streaming — returns the full response at once.
+ * Uses :generateContent — the proper non-streaming endpoint, which returns a
+ * single JSON object (NOT the array that :streamGenerateContent returns).
  */
 async function translateGeminiDirectNonStreaming(
   text: string,
   apiKey: string,
   model: string,
 ): Promise<string> {
-  const endpoint = `${GEMINI_BASE}/${model}:streamGenerateContent`;
+  const endpoint = `${GEMINI_BASE}/${model}:generateContent`;
 
   const payload = {
     contents: [
@@ -782,10 +845,23 @@ async function translateGeminiDirectNonStreaming(
 
   const data = await response.json();
 
-  // Gemini non-stream response wraps the text under candidates[0].content.parts[0].text
-  const content =
-    data?.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (typeof content !== "string" || !content) {
+  // :generateContent returns a single object. Defensively accept the array
+  // shape too, in case the model only supports the streaming endpoint.
+  const body = (Array.isArray(data) ? data[0] : data) as {
+    error?: { message?: string };
+    candidates?: { content?: { parts?: { text?: unknown }[] } }[];
+  };
+  if (body?.error?.message) {
+    throw new Error(`MODEL_ERROR: ${body.error.message.slice(0, 200)}`);
+  }
+  let content = "";
+  const parts = body?.candidates?.[0]?.content?.parts;
+  if (Array.isArray(parts)) {
+    for (const part of parts) {
+      if (typeof part?.text === "string") content += part.text;
+    }
+  }
+  if (!content) {
     throw new Error("No translation content in response");
   }
   return normalizeParagraphs(content);
@@ -966,7 +1042,11 @@ export async function translateChunkSimple(
       provider === "gemini" ? GEMINI_FALLBACK_MODELS.slice(0, 2) : OPENROUTER_FALLBACK_MODELS.slice(0, 2);
     for (const candidate of chain) {
       try {
-        return await translateNonStreaming(text, apiKey, candidate);
+        // Route each candidate through ITS provider's backend — Gemini keys
+        // must never be sent to the OpenRouter endpoint (and vice versa).
+        return await (provider === "gemini"
+          ? translateGeminiNonStreaming(text, apiKey, candidate)
+          : translateNonStreaming(text, apiKey, candidate));
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         if (msg === "RATE_LIMITED" || msg.startsWith("KEY_REJECTED")) throw err;
