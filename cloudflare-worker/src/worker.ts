@@ -202,43 +202,125 @@ async function callOpenRouter(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-  const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${key}`,
-      "Content-Type": "application/json",
-      "HTTP-Referer": "https://novel-translator.app",
-      "X-Title": "Novel Translator",
-    },
-    body: JSON.stringify({
-      model,
-      messages: [
-        { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content: text },
-      ],
-      max_tokens: MAX_TOKENS,
-      temperature: 0.3,
-    }),
-    signal: controller.signal,
-  });
+    const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${key}`,
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://novel-translator.app",
+        "X-Title": "Novel Translator",
+      },
+      body: JSON.stringify({
+        model,
+        messages: [
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user", content: text },
+        ],
+        max_tokens: MAX_TOKENS,
+        temperature: 0.3,
+      }),
+      signal: controller.signal,
+    });
 
-  if (res.status === 429) throw new Error("RATE_LIMITED");
-  if (CASCADE_STATUSES.has(res.status)) {
-    throw new Error(`Model ${model} unavailable (HTTP ${res.status})`);
-  }
+    if (res.status === 429) throw new Error("RATE_LIMITED");
+    if (CASCADE_STATUSES.has(res.status)) {
+      throw new Error(`Model ${model} unavailable (HTTP ${res.status})`);
+    }
 
-  if (!res.ok) {
-    const errBody = await res.text().catch(() => "");
-    throw new Error(`HTTP ${res.status}: ${errBody.slice(0, 300)}`);
-  }
+    if (!res.ok) {
+      const errBody = await res.text().catch(() => "");
+      throw new Error(`HTTP ${res.status}: ${errBody.slice(0, 300)}`);
+    }
 
-  const data = (await res.json()) as { choices?: { message?: { content?: string } }[] };
-  const content = data?.choices?.[0]?.message?.content;
-  if (!content) throw new Error("Empty response from model");
-  return { content: content.trim(), model };
+    const data = (await res.json()) as { choices?: { message?: { content?: string } }[] };
+    const content = data?.choices?.[0]?.message?.content;
+    if (!content) throw new Error("Empty response from model");
+    return { content: content.trim(), model };
   } finally {
     clearTimeout(timer);
   }
+}
+
+// ─── Translation via Gemini (native Google endpoint, AQ. keys) ─────────────────
+
+const GEMINI_BASE = "https://googleapis.com/v1beta/models";
+
+async function callGemini(
+  text: string,
+  key: string,
+  model: string,
+  timeoutMs = UPSTREAM_TIMEOUT_MS,
+): Promise<{ content: string; model: string }> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(
+      `${GEMINI_BASE}/${model}:generateContent`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          // AQ. keys MUST go in the header — query-param auth is forbidden.
+          "x-goog-api-key": key,
+        },
+        body: JSON.stringify({
+          contents: [
+            { role: "user", parts: [{ text }] },
+          ],
+          generationConfig: {
+            temperature: 0.3,
+            maxOutputTokens: MAX_TOKENS,
+          },
+          systemInstruction: {
+            parts: [{ text: SYSTEM_PROMPT }],
+          },
+        }),
+        signal: controller.signal,
+      },
+    );
+
+    if (res.status === 429) throw new Error("RATE_LIMITED");
+    if (CASCADE_STATUSES.has(res.status)) {
+      throw new Error(`Model ${model} unavailable (HTTP ${res.status})`);
+    }
+
+    if (!res.ok) {
+      const errBody = await res.text().catch(() => "");
+      // Distinguish key problems (401/403) from model errors
+      const low = errBody.toLowerCase();
+      if (
+        res.status === 401 ||
+        res.status === 403 ||
+        /api[ _-]?key|invalid|expired|unauthorized|credential|permission|forbidden|denied|authentication|access denied|no access/i.test(low)
+      ) {
+        throw new Error(
+          `KEY_REJECTED (key …${key.slice(-4)}): ${errBody.slice(0, 200) || "Invalid or expired API key"}`,
+        );
+      }
+      throw new Error(`HTTP ${res.status}: ${errBody.slice(0, 300)}`);
+    }
+
+    const data = (await res.json()) as {
+      candidates?: { content?: { parts?: { text?: string }[] } }[];
+      error?: { message?: string };
+    };
+
+    if (data.error) {
+      throw new Error(`MODEL_ERROR: ${data.error.message?.slice(0, 200) || "unknown"}`);
+    }
+
+    const content =
+      data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+    if (!content) throw new Error("Empty response from model");
+    return { content, model };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** True when `model` is a Gemini model (hits the Google endpoint). */
+function isGeminiModel(model: string): boolean {
+  return model.startsWith("gemini-");
 }
 
 async function translateChunk(
@@ -249,24 +331,40 @@ async function translateChunk(
 ): Promise<{ translated: string; model: string }> {
   if (!keys.length) throw new Error("No API keys provided");
 
+  // Determine the provider from the requested model so we stay within it.
+  const gemini = isGeminiModel(requestedModel);
+
   // Build the model list: try the requested model first, then cascade through
   // the free list. A specific model with no backup is how single dead models
   // (402/404/overloaded) used to fail whole chunks and pause entire jobs.
-  // If liveModels is provided (from the frontend's Check Live), use that quality-ranked order
-  const models = requestedModel === "openrouter/free"
-    ? (liveModels && liveModels.length > 0
+  // If liveModels is provided (from the frontend's Check Live), use that quality-ranked order.
+  // Auto "openrouter/free" resolves to the best OpenRouter model; for Gemini Auto we
+  // fall back to no cascade (the frontend resolves gemini/free to a specific model).
+  let models: string[];
+  if (gemini) {
+    models = [requestedModel];
+  } else if (requestedModel === "openrouter/free") {
+    models =
+      liveModels && liveModels.length > 0
         ? liveModels
-        : [resolveModel(requestedModel), ...AUTO_FREE_MODELS.filter((m) => m !== resolveModel(requestedModel))])
-    : [requestedModel, ...AUTO_FREE_MODELS.filter((m) => m !== requestedModel)];
+        : [
+            resolveModel(requestedModel),
+            ...AUTO_FREE_MODELS.filter((m) => m !== resolveModel(requestedModel)),
+          ];
+  } else {
+    models = [requestedModel, ...AUTO_FREE_MODELS.filter((m) => m !== requestedModel)];
+  }
 
   let lastError: Error | null = null;
   let allRateLimited = true; // assume all rate-limited until we find a non-429 error or success
 
   for (const model of models) {
+    // Pick the right backend for this model
+    const backend = isGeminiModel(model) ? callGemini : callOpenRouter;
     for (let ki = 0; ki < keys.length; ki++) {
       const key = keys[ki];
       try {
-        const result = await callOpenRouter(text, key, model);
+        const result = await backend(text, key, model);
         return { translated: result.content, model: result.model };
       } catch (err) {
         lastError = err instanceof Error ? err : new Error(String(err));
@@ -377,10 +475,13 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
     // Send Telegram start notification (count ORIGINAL sections, not upload-units)
     if (body.telegramBotToken && body.telegramChatId && body.telegramNotifyOnStart) {
       const sectionCount = body.originalChunkCount ?? body.chunks.length;
+      const modelLabel = isGeminiModel(body.model)
+        ? body.model
+        : body.model.split("/").pop()?.replace(/:free$/, "") ?? body.model;
       await sendTelegram(
         body.telegramBotToken,
         body.telegramChatId,
-        `🚀 <b>Cloud translation started</b>\n📚 ${body.fileName}\n📦 ${sectionCount} chunks`,
+        `🚀 <b>Cloud translation started</b>\n📚 ${body.fileName}\n📦 ${sectionCount} chunks • ⚙️ ${modelLabel}`,
       ).catch(() => undefined);
     }
 
