@@ -61,7 +61,7 @@ import {
 import { CloudSettings } from "@/components/translator/CloudSettings";
 // Canonical model list (shared with persistence.ts so saved settings are
 // sanitized against the same source of truth).
-import { MODEL_OPTIONS, LIVE_MODEL_SLUGS, resolveAutoModel } from "@/lib/translator/models";
+import { MODEL_OPTIONS, LIVE_MODEL_SLUGS, resolveAutoModel, modelProvider } from "@/lib/translator/models";
 import {
   setGeminiWorkerUrl,
   setGeminiWorkerSecret,
@@ -186,10 +186,14 @@ export default function Dashboard() {
   const hasSession = totalChunks > 0;
   const isComplete = hasSession && completedCount + failedCount === totalChunks;
   const isDoneClean = isComplete && failedCount === 0;
+  // Provider-aware key pool: the SELECTED MODEL decides which keys are used
+  // (Gemini model → Gemini keys, OpenRouter model → OpenRouter keys), while
+  // the run mode only decides WHERE the work happens (browser vs worker).
+  const activeProvider = modelProvider(selectedModel) ?? "openrouter";
+  const activeKeys = activeProvider === "gemini" ? geminiKeys : openrouterKeys;
   const canStart =
     rawText.length > 0 &&
-    ((translationMode === "client" && openrouterKeys.length > 0) ||
-      (translationMode === "cloud" && geminiKeys.length > 0)) &&
+    activeKeys.length > 0 &&
     !hasSession &&
     !isStarting &&
     (translationMode === "client" || workerUrl.trim().length > 0);
@@ -569,13 +573,12 @@ export default function Dashboard() {
   // ─── Core runner: shared by Start and Resume ────────────────────
   const runPipeline = useCallback(
     async (existingChunks: ChunkProgress[]) => {
-      const keysSnapshot =
-        translationMode === "client" ? openrouterKeys : geminiKeys;
+      const keysSnapshot = activeKeys;
       if (keysSnapshot.length === 0) {
         alert(
-          translationMode === "client"
-            ? "Add at least one OpenRouter API key first."
-            : "Add at least one Gemini API key first.",
+          activeProvider === "gemini"
+            ? "Add at least one Gemini API key first."
+            : "Add at least one OpenRouter API key first.",
         );
         return;
       }
@@ -786,7 +789,7 @@ export default function Dashboard() {
             {
               fileName: fileName || "novel.txt",
               model: cloudModel,
-              keys: geminiKeys,
+              keys: activeKeys,
               chunks: chunks.map((c) => ({ id: c.id, text: c.text })),
               liveModels: LIVE_MODEL_SLUGS,
               originalChunkCount: chunks.length,
@@ -935,7 +938,7 @@ export default function Dashboard() {
             {
               fileName: fileName || "novel.txt",
               model: cloudModel,
-              keys: geminiKeys,
+              keys: activeKeys,
               chunks: pending.map((c) => ({ id: c.id, text: c.originalText })),
               liveModels: LIVE_MODEL_SLUGS,
               originalChunkCount: pending.length,
@@ -1183,11 +1186,18 @@ export default function Dashboard() {
   // ─── Test all keys (both sources) ────────────────────────────────────────
   const testAllKeys = useCallback(async () => {
     const lines: string[] = [];
+    // Test each key pool against a model from ITS OWN provider, so a
+    // provider mismatch never produces a misleading ❌ (e.g. an OpenRouter
+    // key tested against a Gemini model would always "fail").
+    const isGeminiSelected =
+      selectedModel.startsWith("gemini") || selectedModel === "gemini/free";
+    const orTestModel = isGeminiSelected ? "openrouter/free" : selectedModel;
+    const gemTestModel = isGeminiSelected ? selectedModel : "gemini-3.5-flash-lite";
     if (openrouterKeys.length > 0) {
       for (let i = 0; i < openrouterKeys.length; i++) {
         const key = openrouterKeys[i];
         try {
-          await translateChunkSimple("你好世界 Hello World", key, selectedModel);
+          await translateChunkSimple("你好世界 Hello World", key, orTestModel);
           lines.push(`OpenRouter Key ${i + 1} (…${key.slice(-4)}): ✅ works`);
         } catch (err2) {
           const msg = err2 instanceof Error ? err2.message : String(err2);
@@ -1199,7 +1209,7 @@ export default function Dashboard() {
       for (let i = 0; i < geminiKeys.length; i++) {
         const key = geminiKeys[i];
         try {
-          await translateChunkSimple("你好世界 Hello World", key, selectedModel);
+          await translateChunkSimple("你好世界 Hello World", key, gemTestModel);
           lines.push(`Gemini Key ${i + 1} (…${key.slice(-4)}): ✅ works`);
         } catch (err2) {
           const msg = err2 instanceof Error ? err2.message : String(err2);
@@ -1767,7 +1777,7 @@ export default function Dashboard() {
                 )}
                 {translationMode === "cloud" ? "Start Cloud Translation" : "Start Translation"}
               </button>
-              {(translationMode === "client" ? openrouterKeys : geminiKeys).length > 0 && (
+              {activeKeys.length > 0 && (
                 <button
                   onClick={testAllKeys}
                   className="flex items-center gap-1.5 rounded-lg border border-stone-700 bg-stone-800 px-3 py-2 text-xs font-medium text-stone-300 hover:bg-stone-700 transition-all cursor-pointer"

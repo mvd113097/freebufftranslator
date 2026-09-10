@@ -284,11 +284,18 @@ export class TranslationPipeline {
       this.options = { ...DEFAULT_OPTIONS, ...options };
     }
 
-    // Use the appropriate key set based on translation mode
-    const keyList =
-      this.options.translationMode === "cloud" && this.options.geminiKeys
+    // Use the appropriate key set based on the SELECTED MODEL's provider:
+    // a Gemini model uses the Gemini key pool, an OpenRouter model uses the
+    // OpenRouter pool — regardless of where the work runs (browser vs worker).
+    const model = this.options.model;
+    const isGemini = model?.startsWith("gemini") || model === "gemini/free";
+    const keyList = isGemini
+      ? this.options.geminiKeys && this.options.geminiKeys.length > 0
         ? this.options.geminiKeys
-        : this.options.openrouterKeys ?? keys;
+        : keys
+      : this.options.openrouterKeys && this.options.openrouterKeys.length > 0
+        ? this.options.openrouterKeys
+        : keys;
 
     this.keys = keyList.filter((k) => k.trim().length > 0);
     if (this.keys.length === 0) {
