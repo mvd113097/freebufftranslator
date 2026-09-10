@@ -1,14 +1,23 @@
 /**
- * OpenRouter API client for novel translation.
+ * Dual-provider API client for novel translation.
  *
- * Uses the standard OpenAI-compatible chat completions endpoint.
- * Works with any model available on OpenRouter (free or paid).
+ * Supports two backends:
+ *  1. OpenRouter  — OpenAI-compatible chat completions (Bearer sk-or-v1-...).
+ *  2. Google Gemini — native Gemini stream endpoint with x-goog-api-key header
+ *     (AQ. keys forbid query-param auth; DO NOT append ?key= to the URL).
+ *
  * All requests are made directly from the browser — no backend involved.
  */
 
+// ─── OpenRouter ───────────────────────────────────────────────────────
+
 const OPENROUTER_BASE = "https://openrouter.ai/api/v1/chat/completions";
 
-import { LIVE_MODEL_SLUGS } from "./models";
+// ─── Gemini (native Google endpoint) ──────────────────────────────────
+
+const GEMINI_BASE = "https://googleapis.com/v1beta/models";
+
+import { LIVE_MODEL_SLUGS, GEMINI_MODEL_SLUGS } from "./models";
 
 const SYSTEM_PROMPT = `You are an expert human literary translator specializing in Chinese web novels (Xianxia, Wuxia, and Sci-Fi). Translate the following Chinese prose into highly fluent, immersive English fiction. Do not use stiff or literal machine-like phrasing. Translate cultivation tiers, localized idioms, and online slang into contextually accurate Western fantasy equivalents while maintaining rigid character name consistency.
 
@@ -23,8 +32,12 @@ IMPORTANT: Output ONLY the translated English text. Do not include any explanati
 /** Default model — free or very cheap on OpenRouter */
 export const DEFAULT_MODEL = "openrouter/free";
 
+/** When provided a Gemini key, default to the first Gemini model. */
+export function defaultModelForProvider(provider: "openrouter" | "gemini"): string {
+  return provider === "gemini" ? "gemini/free" : "openrouter/free";
+}
 /**
- * Fallback chain for "Auto Free": ordered for reliability first (fast,
+ * Fallback chain for OpenRouter "Auto": ordered for reliability first (fast,
  * non-reasoning models before slow reasoning ones), then quality. When a model
  * is rate-limited/overloaded, the next one is tried.
  *
@@ -32,7 +45,13 @@ export const DEFAULT_MODEL = "openrouter/free";
  * against /api/v1/models on 2026-09). Paid slugs (no :free suffix) are rejected
  * with HTTP 402 on free-tier accounts.
  */
-const FALLBACK_MODELS = LIVE_MODEL_SLUGS;
+const OPENROUTER_FALLBACK_MODELS = LIVE_MODEL_SLUGS;
+
+/**
+ * Fallback chain for Gemini "Auto": ordered for speed + free-tier reliability.
+ * When a model returns 429 / overloaded, the next one is tried.
+ */
+const GEMINI_FALLBACK_MODELS = GEMINI_MODEL_SLUGS;
 
 /**
  * Cap on requested max_tokens. Free-tier OpenRouter accounts can only
@@ -41,13 +60,24 @@ const FALLBACK_MODELS = LIVE_MODEL_SLUGS;
  */
 const MAX_TOKENS_LIMIT = 16000;
 
-/** "openrouter/free" is a UI-only selector — never a real API model id. */
-export function isAutoFreeSelector(model: string): boolean {
+/** Sentinel values that mean "Auto for the current provider". */
+export function isAutoSelector(model: string): boolean {
   return (
     model === "openrouter/free" ||
     model === "openrouter/auto" ||
-    model === "auto"
+    model === "auto" ||
+    model === "gemini/free"
   );
+}
+
+/** True when `model` is an OpenRouter Auto sentinel. */
+export function isOpenRouterAuto(model: string): boolean {
+  return model === "openrouter/free" || model === "openrouter/auto" || model === "auto";
+}
+
+/** True when `model` is a Gemini Auto sentinel. */
+export function isGeminiAuto(model: string): boolean {
+  return model === "gemini/free";
 }
 
 /** Post-process translated text to guarantee blank-line paragraph spacing. */
@@ -329,25 +359,29 @@ export async function translateChunk(
 ): Promise<string> {
   const selected = model || DEFAULT_MODEL;
 
-  if (!isAutoFreeSelector(selected)) {
+  // Determine the provider so Auto stays within its own backend.
+  const provider =
+    selected.startsWith("gemini") || selected === "gemini/free"
+      ? "gemini"
+      : "openrouter";
+
+  if (!isAutoSelector(selected)) {
     onModelUsed?.(selected);
-    return translateWithModel(text, apiKey, selected, onToken, abortSignal);
+    return provider === "gemini"
+      ? translateGeminiChunk(text, apiKey, selected, onToken, abortSignal)
+      : translateOpenRouterChunk(text, apiKey, selected, onToken, abortSignal);
   }
 
-  // Auto Free: walk the fallback chain. RATE_LIMITED and SERVER_ERROR move to
-  // the next model; KEY_REJECTED and aborts bubble up immediately.
+  // Auto: walk the per-provider fallback chain. RATE_LIMITED / 429 move to the
+  // next model; KEY_REJECTED and aborts bubble up immediately.
+  const chain = provider === "gemini" ? GEMINI_FALLBACK_MODELS : OPENROUTER_FALLBACK_MODELS;
   let lastError: Error | null = null;
-  for (const candidate of FALLBACK_MODELS) {
-    if (abortSignal?.aborted) throw new Error("Translation aborted");
-    try {
+  for (const candidate of chain) {
+    if (abortSignal?.aborted) throw new Error("Translation aborted");      try {
       onModelUsed?.(candidate);
-      return await translateWithModel(
-        text,
-        apiKey,
-        candidate,
-        onToken,
-        abortSignal,
-      );
+      return provider === "gemini"
+        ? await translateGeminiChunk(text, apiKey, candidate, onToken, abortSignal)
+        : await translateOpenRouterChunk(text, apiKey, candidate, onToken, abortSignal);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (
@@ -365,6 +399,308 @@ export async function translateChunk(
   throw lastError ?? new Error("All free models failed");
 }
 
+/**
+ * Gemini-native streaming translation.
+ *
+ * Hits the native Google endpoint directly from the browser with an AQ. key
+ * passed via the `x-goog-api-key` header (AQ. keys forbid query-param auth,
+ * so ?key= is NEVER appended to the URL).
+ *
+ * Response format: a stream of JSON objects separated by newlines (NOT SSE
+ * "data: " lines). Each line is parsed as JSON; candidate.content candidates
+ * are concatenated.
+ */
+async function translateGeminiChunk(
+  text: string,
+  apiKey: string,
+  model: string,
+  onToken: (token: string) => void,
+  abortSignal?: AbortSignal,
+): Promise<string> {
+  const endpoint = `${GEMINI_BASE}/${model}:streamGenerateContent`;
+
+  const payload = {
+    contents: [
+      {
+        role: "user",
+        parts: [{ text }],
+      },
+    ],
+    generationConfig: {
+      temperature: 0.7,
+      topP: 0.95,
+      maxOutputTokens: 16000,
+    },
+    systemInstruction: {
+      parts: [
+        {
+          text: `You are an expert human literary translator specializing in Chinese web novels (Xianxia, Wuxia, and Sci-Fi). Translate the following Chinese prose into highly fluent, immersive English fiction. Do not use stiff or literal machine-like phrasing. Translate cultivation tiers, localized idioms, and online slang into contextually accurate Western fantasy equivalents while maintaining rigid character name consistency.
+
+CRITICAL FORMATTING RULES:
+- Preserve ALL paragraph breaks from the original text. Separate every paragraph with a blank line (double newline). The output must have clear visual spacing between paragraphs, matching the input's paragraph structure.
+- If the input has a line break between paragraphs, your output MUST have a blank line between those same paragraphs.
+- Preserve dialogue formatting and paragraph indentation style.
+- Do NOT merge paragraphs together. Each paragraph in the input becomes its own paragraph in the output.
+
+IMPORTANT: Output ONLY the translated English text. Do not include any explanations, notes, commentary, or metadata. Do not wrap your output in quotes or markdown. Just return the raw translated English prose with proper paragraph spacing.`,
+        },
+      ],
+    },
+  };
+
+  // Try streaming first
+  try {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        // AQ. keys MUST go in the header — query-param auth is forbidden.
+        "x-goog-api-key": apiKey,
+      },
+      body: JSON.stringify(payload),
+      signal: abortSignal,
+    });
+
+    if (response.status === 429) throw new Error("RATE_LIMITED");
+
+    if (response.status === 401 || response.status === 403) {
+      const body = await response.text().catch(() => "");
+      const low = body.toLowerCase();
+      const looksLikeKeyProblem =
+        /api[ _-]?key|invalid|expired|unauthorized|credential|permission|forbidden|denied|authentication|access denied|no access/i.test(
+          low,
+        );
+      if (looksLikeKeyProblem) {
+        throw new Error(
+          `KEY_REJECTED (key …${apiKey.slice(-4)}): ${body.slice(0, 200) || "Invalid or expired API key"}`,
+        );
+      }
+      throw new Error(`AUTH_ERROR_${response.status}: ${body.slice(0, 200) || "Request rejected"}`);
+    }
+
+    if (!response.ok) {
+      const body = await response.text().catch(() => "");
+      if (body.includes("overloaded") || body.includes("503") || body.includes("502")) {
+        throw new Error(`SERVER_ERROR_${response.status}: Model overloaded`);
+      }
+      throw new Error(`API error ${response.status}: ${body.slice(0, 200)}`);
+    }
+
+    if (!response.body) throw new Error("Response body is null");
+
+    const reader = response.body.getReader();
+    const result = await parseGeminiStream(reader, onToken, abortSignal);
+    if (!result.trim()) {
+      throw new Error("Model returned empty translation");
+    }
+    return normalizeParagraphs(result);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg === "RATE_LIMITED" || msg === "Translation aborted" || msg.startsWith("KEY_REJECTED")) throw err;
+
+    // Streaming failed — try non-streaming fallback with the same model
+    console.log(
+      "[Translator] Gemini streaming failed:",
+      msg,
+      "— falling back to non-streaming",
+    );
+    const result = await translateGeminiNonStreaming(text, apiKey, model);
+    // Simulate token-by-token delivery for progress tracking
+    const words = result.split(/\s+/);
+    for (const word of words) {
+      if (abortSignal?.aborted) throw new Error("Translation aborted");
+      onToken(word + " ");
+    }
+    return result;
+  }
+}
+
+/**
+ * Parse Gemini's JSON-per-line stream (NOT SSE).
+ *
+ * Each line is a standalone JSON object. We extract
+ *   candidates[0].content.parts[*].text
+ * and concatenate.
+ */
+function parseGeminiStream(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  onToken: (token: string) => void,
+  abortSignal?: AbortSignal,
+): Promise<string> {
+  const decoder = new TextDecoder();
+  let fullText = "";
+  let buffer = "";
+
+  return new Promise<string>((resolve, reject) => {
+    const run = async () => {
+      try {
+        // eslint-disable-next-line no-constant-condition
+        while (true) {
+          if (abortSignal?.aborted) {
+            reject(new Error("Translation aborted"));
+            return;
+          }
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop() || "";
+
+          for (let line of lines) {
+            line = line.trim();
+            if (!line) continue;
+            // Gemini streams raw JSON objects line-by-line (not "data: ...")
+            if (!line.startsWith("{")) continue;
+
+            try {
+              const parsed = JSON.parse(line);
+
+              // Top-level error
+              if (parsed.error) {
+                const errMsg =
+                  typeof parsed.error === "string"
+                    ? parsed.error
+                    : parsed.error.message || JSON.stringify(parsed.error);
+                reject(new Error(`MODEL_ERROR: ${errMsg.slice(0, 200)}`));
+                return;
+              }
+
+              const content =
+                parsed?.candidates?.[0]?.content?.parts?.[0]?.text;
+              if (typeof content === "string" && content) {
+                fullText += content;
+                onToken(content);
+              }
+            } catch {
+              /* skip malformed lines */
+            }
+          }
+        }
+
+        // Handle any remaining line in the buffer
+        if (buffer.trim()) {
+          const line = buffer.trim();
+          if (line.startsWith("{")) {
+            try {
+              const parsed = JSON.parse(line);
+              const content =
+                parsed?.candidates?.[0]?.content?.parts?.[0]?.text;
+              if (typeof content === "string" && content) {
+                fullText += content;
+                onToken(content);
+              }
+            } catch {
+              /* skip */
+            }
+          }
+        }
+
+        resolve(fullText);
+      } catch (err) {
+        reject(err);
+      }
+    };
+    run();
+  });
+}
+
+/**
+ * Gemini non-streaming fallback (streamGenerateContent with no stream param
+ * produces the full response at once).
+ */
+async function translateGeminiNonStreaming(
+  text: string,
+  apiKey: string,
+  model: string,
+): Promise<string> {
+  const endpoint = `${GEMINI_BASE}/${model}:streamGenerateContent`;
+
+  const payload = {
+    contents: [
+      {
+        role: "user",
+        parts: [{ text }],
+      },
+    ],
+    generationConfig: {
+      temperature: 0.7,
+      topP: 0.95,
+      maxOutputTokens: 16000,
+    },
+    systemInstruction: {
+      parts: [
+        {
+          text: `You are an expert human literary translator specializing in Chinese web novels (Xianxia, Wuxia, and Sci-Fi). Translate the following Chinese prose into highly fluent, immersive English fiction. Do not use stiff or literal machine-like phrasing. Translate cultivation tiers, localized idioms, and online slang into contextually accurate Western fantasy equivalents while maintaining rigid character name consistency.
+
+CRITICAL FORMATTING RULES:
+- Preserve ALL paragraph breaks from the original text. Separate every paragraph with a blank line (double newline). The output must have clear visual spacing between paragraphs, matching the input's paragraph structure.
+- If the input has a line break between paragraphs, your output MUST have a blank line between those same paragraphs.
+- Preserve dialogue formatting and paragraph indentation style.
+- Do NOT merge paragraphs together. Each paragraph in the input becomes its own paragraph in the output.
+
+IMPORTANT: Output ONLY the translated English text. Do not include any explanations, notes, commentary, or metadata. Do not wrap your output in quotes or markdown. Just return the raw translated English prose with proper paragraph spacing.`,
+        },
+      ],
+    },
+  };
+
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-goog-api-key": apiKey,
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (response.status === 429) throw new Error("RATE_LIMITED");
+
+  if (response.status === 401 || response.status === 403) {
+    const body = await response.text().catch(() => "");
+    const low = body.toLowerCase();
+    const looksLikeKeyProblem =
+      /api[ _-]?key|invalid|expired|unauthorized|credential|permission|forbidden|denied|authentication|access denied|no access/i.test(
+        low,
+      );
+    if (looksLikeKeyProblem) {
+      throw new Error(
+        `KEY_REJECTED (key …${apiKey.slice(-4)}): ${body.slice(0, 200) || "Invalid or expired API key"}`,
+      );
+    }
+    throw new Error(`AUTH_ERROR_${response.status}: ${body.slice(0, 200) || "Request rejected"}`);
+  }
+
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    throw new Error(`API error ${response.status}: ${body.slice(0, 200)}`);
+  }
+
+  const data = await response.json();
+
+  // Gemini non-stream response wraps the text under candidates[0].content.parts[0].text
+  const content =
+    data?.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (typeof content !== "string" || !content) {
+    throw new Error("No translation content in response");
+  }
+  return normalizeParagraphs(content);
+}
+
+/**
+ * OpenRouter wrapper — keeps the original translateWithModel name so existing
+ * call sites that think in terms of "one model at a time" still read clearly.
+ */
+async function translateOpenRouterChunk(
+  text: string,
+  apiKey: string,
+  model: string,
+  onToken: (token: string) => void,
+  abortSignal?: AbortSignal,
+): Promise<string> {
+  return translateWithModel(text, apiKey, model, onToken, abortSignal);
+}
+
 /** Transient upstream failures that should NOT fail a key-validity check. */
 function isTransientModelError(msg: string): boolean {
   return (
@@ -374,16 +710,23 @@ function isTransientModelError(msg: string): boolean {
   );
 }
 
-/** Simple non-streaming translation for testing keys */
+/** Simple non-streaming translation for testing keys (both providers). */
 export async function translateChunkSimple(
   text: string,
   apiKey: string,
   model?: string,
 ): Promise<string> {
   const selected = model || DEFAULT_MODEL;
-  if (isAutoFreeSelector(selected)) {
-    // Try the first two models in the chain for a quick key validity check
-    for (const candidate of FALLBACK_MODELS.slice(0, 2)) {
+
+  // Auto: pick the first model of whichever provider the sentinel belongs to.
+  if (isAutoSelector(selected)) {
+    const provider =
+      selected.startsWith("gemini") || selected === "gemini/free"
+        ? "gemini"
+        : "openrouter";
+    const chain =
+      provider === "gemini" ? GEMINI_FALLBACK_MODELS.slice(0, 2) : OPENROUTER_FALLBACK_MODELS.slice(0, 2);
+    for (const candidate of chain) {
       try {
         return await translateNonStreaming(text, apiKey, candidate);
       } catch (err) {
@@ -394,8 +737,30 @@ export async function translateChunkSimple(
     throw new Error("All models rate-limited right now");
   }
 
-  // Specific model: retry transient upstream errors ("Service temporarily
-  // overloaded" etc.) so a healthy key isn't reported as dead.
+  // Specific model — route to the right backend.
+  const provider =
+    selected.startsWith("gemini") || selected === "gemini/free"
+      ? "gemini"
+      : "openrouter";
+
+  if (provider === "gemini") {
+    // Gemini: non-streaming is the simplest key check.
+    let lastErr: Error = new Error("Unknown error");
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        return await translateGeminiNonStreaming(text, apiKey, selected);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        lastErr = err instanceof Error ? err : new Error(msg);
+        if (msg.startsWith("KEY_REJECTED") || msg === "RATE_LIMITED") throw err;
+        if (!isTransientModelError(msg)) throw err;
+        await new Promise((r) => setTimeout(r, 4000 * (attempt + 1)));
+      }
+    }
+    throw lastErr;
+  }
+
+  // OpenRouter
   let lastErr: Error = new Error("Unknown error");
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
@@ -405,7 +770,6 @@ export async function translateChunkSimple(
       lastErr = err instanceof Error ? err : new Error(msg);
       if (msg.startsWith("KEY_REJECTED") || msg === "RATE_LIMITED") throw err;
       if (!isTransientModelError(msg)) throw err;
-      // Transient — back off briefly and retry
       await new Promise((r) => setTimeout(r, 4000 * (attempt + 1)));
     }
   }

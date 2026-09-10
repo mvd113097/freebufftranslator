@@ -30,7 +30,7 @@ export function SettingsPanel({
         <input
           type="range"
           min={1000}
-          max={50000}
+          max={100000}
           step={1000}
           value={chunkSize}
           onChange={(e) => onChunkSizeChange(Number(e.target.value))}
@@ -42,7 +42,7 @@ export function SettingsPanel({
         />
         <div className="flex justify-between text-[10px] text-stone-500">
           <span>1k (finer)</span>
-          <span>50k (coarser)</span>
+          <span>100k (coarser)</span>
         </div>
       </div>
 
