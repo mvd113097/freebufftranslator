@@ -400,15 +400,12 @@ export async function translateChunk(
 }
 
 /**
- * Gemini-native streaming translation.
+ * Gemini translation — routes through the Cloudflare Worker when one is
+ * configured (avoids browser CORS on googleapis.com), otherwise hits the
+ * native Google endpoint directly.
  *
- * Hits the native Google endpoint directly from the browser with an AQ. key
- * passed via the `x-goog-api-key` header (AQ. keys forbid query-param auth,
- * so ?key= is NEVER appended to the URL).
- *
- * Response format: a stream of JSON objects separated by newlines (NOT SSE
- * "data: " lines). Each line is parsed as JSON; candidate.content candidates
- * are concatenated.
+ * Response format from the worker: JSON { translated, model } (non-streaming).
+ * Response format from direct googleapis.com: JSON-per-line stream (NOT SSE).
  */
 async function translateGeminiChunk(
   text: string,
@@ -417,102 +414,17 @@ async function translateGeminiChunk(
   onToken: (token: string) => void,
   abortSignal?: AbortSignal,
 ): Promise<string> {
-  const endpoint = `${GEMINI_BASE}/${model}:streamGenerateContent`;
+  const workerUrl = getGeminiWorkerUrl();
 
-  const payload = {
-    contents: [
-      {
-        role: "user",
-        parts: [{ text }],
-      },
-    ],
-    generationConfig: {
-      temperature: 0.7,
-      topP: 0.95,
-      maxOutputTokens: 16000,
-    },
-    systemInstruction: {
-      parts: [
-        {
-          text: `You are an expert human literary translator specializing in Chinese web novels (Xianxia, Wuxia, and Sci-Fi). Translate the following Chinese prose into highly fluent, immersive English fiction. Do not use stiff or literal machine-like phrasing. Translate cultivation tiers, localized idioms, and online slang into contextually accurate Western fantasy equivalents while maintaining rigid character name consistency.
-
-CRITICAL FORMATTING RULES:
-- Preserve ALL paragraph breaks from the original text. Separate every paragraph with a blank line (double newline). The output must have clear visual spacing between paragraphs, matching the input's paragraph structure.
-- If the input has a line break between paragraphs, your output MUST have a blank line between those same paragraphs.
-- Preserve dialogue formatting and paragraph indentation style.
-- Do NOT merge paragraphs together. Each paragraph in the input becomes its own paragraph in the output.
-
-IMPORTANT: Output ONLY the translated English text. Do not include any explanations, notes, commentary, or metadata. Do not wrap your output in quotes or markdown. Just return the raw translated English prose with proper paragraph spacing.`,
-        },
-      ],
-    },
-  };
-
-  // Try streaming first
-  try {
-    const response = await fetch(endpoint, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        // AQ. keys MUST go in the header — query-param auth is forbidden.
-        "x-goog-api-key": apiKey,
-      },
-      body: JSON.stringify(payload),
-      signal: abortSignal,
-    });
-
-    if (response.status === 429) throw new Error("RATE_LIMITED");
-
-    if (response.status === 401 || response.status === 403) {
-      const body = await response.text().catch(() => "");
-      const low = body.toLowerCase();
-      const looksLikeKeyProblem =
-        /api[ _-]?key|invalid|expired|unauthorized|credential|permission|forbidden|denied|authentication|access denied|no access/i.test(
-          low,
-        );
-      if (looksLikeKeyProblem) {
-        throw new Error(
-          `KEY_REJECTED (key …${apiKey.slice(-4)}): ${body.slice(0, 200) || "Invalid or expired API key"}`,
-        );
-      }
-      throw new Error(`AUTH_ERROR_${response.status}: ${body.slice(0, 200) || "Request rejected"}`);
-    }
-
-    if (!response.ok) {
-      const body = await response.text().catch(() => "");
-      if (body.includes("overloaded") || body.includes("503") || body.includes("502")) {
-        throw new Error(`SERVER_ERROR_${response.status}: Model overloaded`);
-      }
-      throw new Error(`API error ${response.status}: ${body.slice(0, 200)}`);
-    }
-
-    if (!response.body) throw new Error("Response body is null");
-
-    const reader = response.body.getReader();
-    const result = await parseGeminiStream(reader, onToken, abortSignal);
-    if (!result.trim()) {
-      throw new Error("Model returned empty translation");
-    }
-    return normalizeParagraphs(result);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    if (msg === "RATE_LIMITED" || msg === "Translation aborted" || msg.startsWith("KEY_REJECTED")) throw err;
-
-    // Streaming failed — try non-streaming fallback with the same model
-    console.log(
-      "[Translator] Gemini streaming failed:",
-      msg,
-      "— falling back to non-streaming",
-    );
-    const result = await translateGeminiNonStreaming(text, apiKey, model);
-    // Simulate token-by-token delivery for progress tracking
-    const words = result.split(/\s+/);
-    for (const word of words) {
-      if (abortSignal?.aborted) throw new Error("Translation aborted");
-      onToken(word + " ");
-    }
-    return result;
+  if (workerUrl) {
+    // Route through the worker — browser never touches googleapis.com directly,
+    // so there's no CORS issue. The worker calls Gemini server-side.
+    return translateGeminiViaWorker(text, apiKey, model, onToken, abortSignal);
   }
+
+  // No worker configured — hit the native endpoint directly (may fail with CORS
+  // in some browsers, which is why the worker path is preferred).
+  return translateGeminiDirect(text, apiKey, model, onToken, abortSignal);
 }
 
 /**
@@ -606,85 +518,151 @@ function parseGeminiStream(
 }
 
 /**
- * Gemini non-streaming fallback (streamGenerateContent with no stream param
- * produces the full response at once).
+ * Gemini non-streaming fallback. Routes through the worker when configured,
+ * otherwise hits the native endpoint directly.
  */
 async function translateGeminiNonStreaming(
   text: string,
   apiKey: string,
   model: string,
 ): Promise<string> {
-  const endpoint = `${GEMINI_BASE}/${model}:streamGenerateContent`;
+  const workerUrl = getGeminiWorkerUrl();
+  if (workerUrl) {
+    return translateGeminiViaWorker(text, apiKey, model, undefined as any, undefined).then((t) => t);
+  }
+  return translateGeminiDirectNonStreaming(text, apiKey, model);
+}
+
+// ─── Worker-mediated Gemini path ──────────────────────────────────────────────
+
+const WORKER_GEMINI_URL_KEY = "novel-translator-gemini-worker-url";
+
+function getGeminiWorkerUrl(): string {
+  if (typeof localStorage === "undefined") return "";
+  try {
+    return localStorage.getItem(WORKER_GEMINI_URL_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function setGeminiWorkerUrl(url: string): void {
+  if (typeof localStorage === "undefined") return;
+  try {
+    localStorage.setItem(WORKER_GEMINI_URL_KEY, url.trim().replace(/\/+$/, ""));
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
+ * Call the worker's /api/translate endpoint. The worker calls Gemini server-side
+ * and returns { translated, model }. We simulate token-by-token delivery by
+ * splitting the result on whitespace so the progress UI still updates word-by-word.
+ */
+async function translateGeminiViaWorker(
+  text: string,
+  apiKey: string,
+  model: string,
+  onToken: (token: string) => void,
+  abortSignal?: AbortSignal,
+): Promise<string> {
+  const workerUrl = getGeminiWorkerUrl();
+  if (!workerUrl) throw new Error("Gemini worker URL not configured");
+
+  const secret = getGeminiWorkerSecret();
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+  if (secret) headers["x-job-secret"] = secret;
 
   const payload = {
-    contents: [
-      {
-        role: "user",
-        parts: [{ text }],
-      },
-    ],
-    generationConfig: {
-      temperature: 0.7,
-      topP: 0.95,
-      maxOutputTokens: 16000,
-    },
-    systemInstruction: {
-      parts: [
-        {
-          text: `You are an expert human literary translator specializing in Chinese web novels (Xianxia, Wuxia, and Sci-Fi). Translate the following Chinese prose into highly fluent, immersive English fiction. Do not use stiff or literal machine-like phrasing. Translate cultivation tiers, localized idioms, and online slang into contextually accurate Western fantasy equivalents while maintaining rigid character name consistency.
-
-CRITICAL FORMATTING RULES:
-- Preserve ALL paragraph breaks from the original text. Separate every paragraph with a blank line (double newline). The output must have clear visual spacing between paragraphs, matching the input's paragraph structure.
-- If the input has a line break between paragraphs, your output MUST have a blank line between those same paragraphs.
-- Preserve dialogue formatting and paragraph indentation style.
-- Do NOT merge paragraphs together. Each paragraph in the input becomes its own paragraph in the output.
-
-IMPORTANT: Output ONLY the translated English text. Do not include any explanations, notes, commentary, or metadata. Do not wrap your output in quotes or markdown. Just return the raw translated English prose with proper paragraph spacing.`,
-        },
-      ],
-    },
+    text,
+    model,
+    keys: [apiKey],
   };
 
-  const response = await fetch(endpoint, {
+  const response = await fetch(`${workerUrl}/api/translate`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-goog-api-key": apiKey,
-    },
+    headers,
     body: JSON.stringify(payload),
+    signal: abortSignal,
   });
 
   if (response.status === 429) throw new Error("RATE_LIMITED");
 
   if (response.status === 401 || response.status === 403) {
     const body = await response.text().catch(() => "");
-    const low = body.toLowerCase();
-    const looksLikeKeyProblem =
-      /api[ _-]?key|invalid|expired|unauthorized|credential|permission|forbidden|denied|authentication|access denied|no access/i.test(
-        low,
-      );
-    if (looksLikeKeyProblem) {
-      throw new Error(
-        `KEY_REJECTED (key …${apiKey.slice(-4)}): ${body.slice(0, 200) || "Invalid or expired API key"}`,
-      );
-    }
-    throw new Error(`AUTH_ERROR_${response.status}: ${body.slice(0, 200) || "Request rejected"}`);
+    throw new Error(
+      `KEY_REJECTED (key …${apiKey.slice(-4)}): ${body.slice(0, 200) || "Invalid or expired API key"}`,
+    );
   }
 
   if (!response.ok) {
     const body = await response.text().catch(() => "");
-    throw new Error(`API error ${response.status}: ${body.slice(0, 200)}`);
+    let msg = body;
+    try {
+      const parsed = JSON.parse(body);
+      if (parsed?.error) msg = parsed.error;
+    } catch {
+      /* ignore */
+    }
+    if (msg.includes("overloaded") || msg.includes("503") || msg.includes("502")) {
+      throw new Error(`SERVER_ERROR: Model overloaded`);
+    }
+    throw new Error(`API error ${response.status}: ${msg.slice(0, 200)}`);
   }
 
-  const data = await response.json();
-
-  // Gemini non-stream response wraps the text under candidates[0].content.parts[0].text
-  const content =
-    data?.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (typeof content !== "string" || !content) {
-    throw new Error("No translation content in response");
+  const data = await response.json() as { translated?: string; model?: string; error?: string };
+  if (data.error) {
+    throw new Error(`MODEL_ERROR: ${data.error.slice(0, 200)}`);
   }
-  return normalizeParagraphs(content);
+  const translated = data.translated;
+  if (typeof translated !== "string" || !translated) {
+    throw new Error("Model returned empty translation");
+  }
+
+  // Simulate token-by-token delivery for progress tracking
+  if (onToken) {
+    const words = translated.split(/\s+/);
+    for (const word of words) {
+      if (abortSignal?.aborted) throw new Error("Translation aborted");
+      onToken(word + " ");
+    }
+  }
+
+  return normalizeParagraphs(translated);
+}
+
+/** Set the Gemini worker URL (called from the dashboard when cloud mode is on). */
+export function setGeminiWorkerUrl(url: string): void {
+  setGeminiWorkerUrl(url);
+}
+
+/** Set the Gemini worker secret. */
+export function setGeminiWorkerSecret(secret: string): void {
+  try {
+    localStorage.setItem("novel-translator-gemini-worker-secret", secret.trim());
+  } catch {
+    /* ignore */
+  }
+}
+
+function getGeminiWorkerSecret(): string {
+  try {
+    return localStorage.getItem("novel-translator-gemini-worker-secret") ?? "";
+  } catch {
+    return "";
+  }
+}
+
+export function clearGeminiWorkerConfig(): void {
+  try {
+    localStorage.removeItem(WORKER_GEMINI_URL_KEY);
+    localStorage.removeItem("novel-translator-gemini-worker-secret");
+  } catch {
+    /* ignore */
+  }
 }
 
 /**

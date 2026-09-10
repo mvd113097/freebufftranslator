@@ -62,6 +62,11 @@ import { CloudSettings } from "@/components/translator/CloudSettings";
 // Canonical model list (shared with persistence.ts so saved settings are
 // sanitized against the same source of truth).
 import { MODEL_OPTIONS, LIVE_MODEL_SLUGS, resolveAutoModel } from "@/lib/translator/models";
+import {
+  setGeminiWorkerUrl,
+  setGeminiWorkerSecret,
+  clearGeminiWorkerConfig,
+} from "@/lib/translator/gemini-api";
 
 // ─── Telegram direct-from-browser ──────────────────────────────────
 
@@ -747,6 +752,15 @@ export default function Dashboard() {
 
       // ── Cloud mode: upload to the worker and poll — browser can close ──
       if (translationMode === "cloud") {
+        // When cloud mode is on and a worker URL is configured, route Gemini
+        // calls through the worker too (avoids browser CORS on googleapis.com).
+        // The worker's /api/translate endpoint is CORS-enabled and calls Gemini
+        // server-side. Clear any previous config first so switching modes is clean.
+        clearGeminiWorkerConfig();
+        if (workerUrl.trim()) {
+          setGeminiWorkerUrl(workerUrl);
+          setGeminiWorkerSecret(workerSecret);
+        }
         setUploadPhase("chunking"); // reuse phase label while uploading
         try {
           // Resolve "Auto" to a specific verified model before sending to the
@@ -880,7 +894,14 @@ export default function Dashboard() {
       setIsStarting(false);
       setUploadPhase(null);
     }
-  }, [canStart, rawText, fileName, chunkSize, keys, selectedModel, runPipeline, acquireWakeLock, translationMode, telegramBotToken, telegramChatId, telegramNotifyOnStart, telegramNotifyOnProgress, telegramNotifyOnError, telegramNotifyOnComplete]);
+  }, [canStart, rawText, fileName, chunkSize, keys, selectedModel, runPipeline, acquireWakeLock, translationMode, telegramBotToken, telegramChatId, telegramNotifyOnStart, telegramNotifyOnProgress, telegramNotifyOnError, telegramNotifyOnComplete, workerUrl, workerSecret]);
+
+  // ─── Clear Gemini worker routing when leaving cloud mode ──────────────
+  useEffect(() => {
+    if (translationMode !== "cloud") {
+      clearGeminiWorkerConfig();
+    }
+  }, [translationMode]);
 
   // ─── Resume after pause/reload ──────────────────────────────────
   const resumeTranslation = useCallback(async () => {

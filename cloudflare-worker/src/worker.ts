@@ -574,6 +574,34 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
     });
   }
 
+  // ── On-demand single-chunk translation (client-side Gemini/OpenRouter via worker) ──
+  // Exists so the browser can translate via Gemini without hitting CORS on
+  // googleapis.com directly. The worker calls Gemini (or OpenRouter) server-side
+  // and returns the result. Uses the same backend selection as the cron path.
+  if (path === "/api/translate" && method === "POST") {
+    if (!verifySecret(request, env)) return json({ error: "Invalid secret" }, 403);
+    try {
+      const body = (await request.json()) as {
+        text: string;
+        model: string;
+        keys: string[];
+        liveModels?: string[];
+      };
+      if (!body.text) return json({ error: "Missing text" }, 400);
+      if (!body.keys?.length) return json({ error: "No API keys" }, 400);
+      const { translated, model } = await translateChunk(
+        body.text,
+        body.keys,
+        body.model,
+        body.liveModels ?? null,
+      );
+      return json({ translated, model });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return json({ error: msg }, 500);
+    }
+  }
+
   // ── Manual cron trigger (for testing) ─────────────────────────
   if (path === "/api/run-cron" && method === "POST") {
     if (!verifySecret(request, env)) return json({ error: "Invalid secret" }, 403);
