@@ -32,14 +32,13 @@ import { prepareChunkForUpload } from "./compress";
 import { sanitizeModel, resolveAutoModel } from "./models";
 import type { PipelineProgress } from "./pipeline";
 
-/** Chunks larger than this are split before upload. The currently-deployed
- * worker aborts upstream OpenRouter requests after 28s, so parts must be small
- * enough to translate well within that window (~6k chars is safe; the fixed
- * worker source in cloudflare-worker/ raises the timeout and this can be
- * reverted to 12000 once it is redeployed). */
-const MAX_UPLOAD_CHARS = 6000;
+/** Chunks larger than this are split before upload. The deployed worker
+ * (workers/worker.js) accepts up to 100k chars per request with a 110s
+ * upstream timeout, so a default 35k pipeline chunk uploads as ONE request;
+ * only oversized 100k-slider chunks are split, into ~30k parts. */
+const MAX_UPLOAD_CHARS = 40000;
 /** Preferred part size when splitting. */
-const TARGET_SPLIT_CHARS = 5000;
+const TARGET_SPLIT_CHARS = 30000;
 
 /** localStorage key holding the upload plan for the active cloud job. */
 const CLOUD_PLAN_KEY = "novel-translator-cloud-plan";

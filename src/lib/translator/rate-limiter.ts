@@ -10,6 +10,8 @@ interface KeyBucket {
 
 export class RateLimiter {
   private buckets: Map<string, KeyBucket> = new Map();
+  /** key -> timestamp until which the key is skipped (set after a 429). */
+  private cooldowns: Map<string, number> = new Map();
   private maxRPM: number;
   private staggerMs: number;
 
@@ -23,7 +25,14 @@ export class RateLimiter {
     bucket.timestamps = bucket.timestamps.filter((t) => now - t < 60_000);
   }
 
+  /** Temporarily disable a key after a rate-limit / rejection failure. */
+  markCooldown(key: string, ms: number): void {
+    this.cooldowns.set(key, Date.now() + ms);
+  }
+
   canUseKey(key: string): boolean {
+    const cd = this.cooldowns.get(key);
+    if (cd !== undefined && Date.now() < cd) return false;
     let bucket = this.buckets.get(key);
     if (!bucket) {
       bucket = { timestamps: [], lastUsed: 0 };
@@ -64,12 +73,25 @@ export class RateLimiter {
         }
       }
 
-      // All keys are rate-limited, wait longer before retrying
-      await new Promise((resolve) => setTimeout(resolve, 15000));
+      // All keys are rate-limited or in cooldown. Wait until the earliest
+      // cooldown expires (or a fixed window for pure RPM limits), capped so
+      // an abort / pipeline change stays responsive.
+      const now = Date.now();
+      let earliest = Infinity;
+      for (const key of validKeys) {
+        const cd = this.cooldowns.get(key);
+        if (cd !== undefined) earliest = Math.min(earliest, cd);
+      }
+      const waitMs =
+        earliest !== Infinity
+          ? Math.min(Math.max(earliest - now, 0), 30_000)
+          : 15_000;
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
     }
   }
 
   reset(): void {
     this.buckets.clear();
+    this.cooldowns.clear();
   }
 }

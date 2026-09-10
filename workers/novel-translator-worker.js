@@ -71,6 +71,22 @@ const CASCADE_STATUSES = new Set([402, 404, 408, 429, 500, 502, 503, 504]);
 const MAX_CHARS_PER_REQUEST = 100000; // Allow up to 100k chars per request
 const MIN_CHARS_PER_REQUEST = 10000; // minimum if splitting is absolutely needed
 
+// Quota-aware key pool: per-job rotation cursor + per-key cooldowns.
+// After a key returns 429 (or is rejected), it is skipped for KEY_COOLDOWN_MS
+// so the load spreads across every key instead of hammering the first one.
+const KEY_COOLDOWN_MS = 60000;
+const KEY_ROTATION = new Map(); // jobId -> { cursor, cooldowns: Map<key, untilMs> }
+
+function getRotationState(jobId) {
+  const id = jobId || "direct";
+  let state = KEY_ROTATION.get(id);
+  if (!state) {
+    state = { cursor: 0, cooldowns: new Map() };
+    KEY_ROTATION.set(id, state);
+  }
+  return state;
+}
+
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
@@ -308,7 +324,7 @@ function isGeminiModel(model) {
   return model.startsWith("gemini-");
 }
 
-async function translateChunk(text, keys, requestedModel, liveModels) {
+async function translateChunk(text, keys, requestedModel, liveModels, jobId) {
   if (!keys.length) throw new Error("No API keys provided");
   
   const gemini = isGeminiModel(requestedModel);
@@ -327,6 +343,9 @@ async function translateChunk(text, keys, requestedModel, liveModels) {
   // Split text into API-sized chunks if needed (respects user's pipeline chunk size)
   const apiChunks = splitIntoApiChunks(text);
   
+  const state = getRotationState(jobId);
+  const now = Date.now();
+  
   let lastError = null;
   let allRateLimited = true;
   let allTranslated = [];
@@ -338,20 +357,35 @@ async function translateChunk(text, keys, requestedModel, liveModels) {
     for (const model of models) {
       const backend = isGeminiModel(model) ? callGemini : callOpenRouter;
       
-      for (let ki = 0; ki < keys.length; ki++) {
-        const key = keys[ki];
+      // Round-robin key order starting at the job's cursor, skipping any keys
+      // currently in cooldown (recent 429 or rejection) so the load spreads
+      // evenly across all keys. If every key is cooling down, try them all
+      // anyway — they are the only option.
+      const orderedKeys = [];
+      for (let i = 0; i < keys.length; i++) {
+        const key = keys[(state.cursor + i) % keys.length];
+        const cd = state.cooldowns.get(key);
+        if (cd && cd > now) continue;
+        orderedKeys.push(key);
+      }
+      const tryKeys = orderedKeys.length > 0 ? orderedKeys : keys;
+      
+      for (const key of tryKeys) {
         try {
           const result = await backend(chunkText, key, model);
           allTranslated.push(result.content);
           chunkTranslated = true;
           
-          // Update active model for tracking
-          // (model tracking would go here if needed)
+          // Advance the rotation cursor past the key that just succeeded so
+          // the next chunk starts from a different key.
+          state.cursor = (keys.indexOf(key) + 1) % keys.length;
           break;
         } catch (err) {
           lastError = err instanceof Error ? err : new Error(String(err));
           
           if (lastError.message === "RATE_LIMITED") {
+            // Temporarily cool this key down (it 429'd), then try the next key.
+            state.cooldowns.set(key, Date.now() + KEY_COOLDOWN_MS);
             continue;
           }
           
@@ -369,7 +403,9 @@ async function translateChunk(text, keys, requestedModel, liveModels) {
           }
           
           if (lastError.message.includes("unavailable") || lastError.message.includes("KEY_REJECTED")) {
-            // Only break if it's a genuine bad key, not a model restriction
+            // Genuinely bad key — cool it down so we don't keep wasting
+            // requests on it, then try the next key.
+            state.cooldowns.set(key, Date.now() + KEY_COOLDOWN_MS);
             if (!isModelRestriction) {
               break;
             }
@@ -674,7 +710,7 @@ async function handleCron(env) {
       }
       
       try {
-        const { translated, model: usedModel } = await translateChunk(text, keys, model, liveModels);
+        const { translated, model: usedModel } = await translateChunk(text, keys, model, liveModels, jobId);
         await env.DB.prepare(
           `UPDATE chunks SET status = 'completed', translated_text = ?, model_used = ?, attempts = attempts + 1, updated_at = ? WHERE id = ?`
         ).bind(translated, usedModel, Date.now(), chunkId).run();

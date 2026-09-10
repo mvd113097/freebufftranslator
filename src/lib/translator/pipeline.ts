@@ -145,6 +145,7 @@ export class TranslationPipeline {
       let attempt = 0;
 
       while (attempt <= this.options.maxRetries) {
+        let currentKey: string | undefined;
         try {
           if (this.abortController?.signal.aborted) {
             progress.status = "failed";
@@ -153,7 +154,7 @@ export class TranslationPipeline {
           }
 
           // Wait for an available key (handles per-key rate limiting)
-          const currentKey = await this.rateLimiter.waitForAvailableKey(this.keys);
+          currentKey = await this.rateLimiter.waitForAvailableKey(this.keys);
 
           // Brief delay to avoid burst
           const timeSinceLastRequest = Date.now() - this.lastRequestTime;
@@ -187,6 +188,15 @@ export class TranslationPipeline {
         } catch (err: unknown) {
           const message = err instanceof Error ? err.message : String(err);
           console.error(`[Pipeline] Chunk ${chunk.id + 1} attempt ${attempt + 1} failed:`, message);
+
+          // A 429 means this key is temporarily exhausted — cool it down so
+          // the other keys take over instead of hammering the same key.
+          if (
+            currentKey &&
+            (message.includes("RATE_LIMITED") || message.includes("429"))
+          ) {
+            this.rateLimiter.markCooldown(currentKey, 60_000);
+          }
 
           if (message === "Translation aborted") {
             progress.status = "failed";
@@ -325,6 +335,7 @@ export class TranslationPipeline {
       let attempt = 0;
 
       while (attempt <= this.options.maxRetries) {
+        let currentKey: string | undefined;
         try {
           if (this.abortController?.signal.aborted) {
             // Paused — keep as pending so Resume picks it up cleanly
@@ -332,7 +343,7 @@ export class TranslationPipeline {
             return;
           }
 
-          const currentKey = await this.rateLimiter.waitForAvailableKey(this.keys);
+          currentKey = await this.rateLimiter.waitForAvailableKey(this.keys);
 
           const timeSinceLastRequest = Date.now() - this.lastRequestTime;
           if (timeSinceLastRequest < 500) {
@@ -380,6 +391,15 @@ export class TranslationPipeline {
         } catch (err: unknown) {
           const message = err instanceof Error ? err.message : String(err);
           console.error(`[Pipeline] Chunk ${chunk.id + 1} attempt ${attempt + 1} failed:`, message);
+
+          // A 429 means this key is temporarily exhausted — cool it down so
+          // the other keys take over instead of hammering the same key.
+          if (
+            currentKey &&
+            (message.includes("RATE_LIMITED") || message.includes("429"))
+          ) {
+            this.rateLimiter.markCooldown(currentKey, 60_000);
+          }
 
           if (message === "Translation aborted") {
             // User paused — leave pending for resume, keep any partial text
