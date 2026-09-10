@@ -45,7 +45,6 @@ const OPENROUTER_MODELS: ModelOption[] = [
 const GEMINI_MODELS: ModelOption[] = [
   { value: "gemini-2.5-flash", label: "Gemini 2.5 Flash (free tier) ★", provider: "gemini" },
   { value: "gemini-2.5-flash-lite", label: "Gemini 2.5 Flash Lite (free tier)", provider: "gemini" },
-  { value: "gemini-2.5-pro", label: "Gemini 2.5 Pro (free tier)", provider: "gemini" },
 ];
 
 // Master list: OpenRouter first, then Gemini.

@@ -50,6 +50,7 @@ const OPENROUTER_FALLBACK_MODELS = LIVE_MODEL_SLUGS;
 /**
  * Fallback chain for Gemini "Auto": ordered for speed + free-tier reliability.
  * When a model returns 429 / overloaded, the next one is tried.
+ * Only includes models confirmed to work with free-tier AQ keys.
  */
 const GEMINI_FALLBACK_MODELS = GEMINI_MODEL_SLUGS;
 
