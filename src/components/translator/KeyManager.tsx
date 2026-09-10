@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { KeyRound, Plus, Trash2, Eye, EyeOff, AlertCircle } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -12,6 +12,7 @@ interface KeyManagerProps {
 export function KeyManager({ keys, onKeysChange }: KeyManagerProps) {
   const [showKeys, setShowKeys] = useState(false);
   const [inputValue, setInputValue] = useState("");
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   // Load from localStorage on mount
   useEffect(() => {
@@ -48,6 +49,14 @@ export function KeyManager({ keys, onKeysChange }: KeyManagerProps) {
     const newKeys = [...new Set([...keys, ...lines])];
     onKeysChange(newKeys);
     setInputValue("");
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // Ctrl/Cmd + Enter to quickly add keys without clicking the button
+    if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+      e.preventDefault();
+      addKeys();
+    }
   };
 
   const removeKey = (index: number) => {
@@ -120,8 +129,10 @@ export function KeyManager({ keys, onKeysChange }: KeyManagerProps) {
       {/* Add keys input */}
       <div className="space-y-2">
         <textarea
+          ref={textareaRef}
           value={inputValue}
           onChange={(e) => setInputValue(e.target.value)}
+          onKeyDown={handleKeyDown}
           placeholder={"Paste OpenRouter API key(s) here, one per line\nsk-or-v1-xxxxxxxxxxxxxxxx\nsk-or-v1-yyyyyyyyyyyyyyyy"}
           className={cn(
             "w-full rounded-xl border border-stone-700 bg-stone-800 px-3 py-2.5",
@@ -143,7 +154,9 @@ export function KeyManager({ keys, onKeysChange }: KeyManagerProps) {
           )}
         >
           <Plus className="h-3.5 w-3.5" />
-          Add Key{inputValue.split("\n").filter((l) => l.trim()).length > 1 ? "s" : ""}
+          {inputValue.split("\n").filter((l) => l.trim()).length > 1
+            ? `Add ${inputValue.split("\n").filter((l) => l.trim()).length} Keys`
+            : "Add Key"}
         </button>
       </div>
     </div>
