@@ -218,7 +218,18 @@ async function callOpenRouter(text, key, model, timeoutMs = UPSTREAM_TIMEOUT_MS)
     }
     if (!res.ok) {
       const errBody = await res.text().catch(() => "");
-      throw new Error(`HTTP ${res.status}: ${errBody.slice(0, 300)}`);
+      
+      // Check if this is a model restriction error (not a bad key)
+      // Model restrictions like "only available on agentic harnesses" should be
+      // treated as model failures, not key failures, so the fallback chain continues
+      const errorMessage = errBody.slice(0, 300);
+      const isModelRestriction = /only available on|agentic harness|not available for this|request type|not supported|is only available/i.test(errorMessage);
+      
+      if (isModelRestriction) {
+        throw new Error(`MODEL_RESTRICTED: ${errorMessage}`);
+      }
+      
+      throw new Error(`HTTP ${res.status}: ${errorMessage}`);
     }
     const data = await res.json();
     const content = data?.choices?.[0]?.message?.content;
@@ -345,8 +356,22 @@ async function translateChunk(text, keys, requestedModel, liveModels) {
           
           allRateLimited = false;
           
+          // Check if this is a model restriction error (not a bad key)
+          // Model restrictions should NOT stop the fallback chain - only bad keys should
+          const isModelRestriction = lastError.message.includes("MODEL_RESTRICTED") || 
+            /only available on|agentic harness|not available for this|request type|not supported|is only available/i.test(lastError.message);
+          
+          if (isModelRestriction) {
+            // This model can't handle this request type - try next model
+            console.log(`Model restriction, trying next: ${lastError.message.slice(0, 100)}`);
+            continue;
+          }
+          
           if (lastError.message.includes("unavailable") || lastError.message.includes("KEY_REJECTED")) {
-            break;
+            // Only break if it's a genuine bad key, not a model restriction
+            if (!isModelRestriction) {
+              break;
+            }
           }
           
           break;
