@@ -428,6 +428,104 @@ async function translateGeminiChunk(
 }
 
 /**
+ * Direct Gemini streaming call (no worker). Used when no worker URL is configured.
+ * May fail with CORS in some browsers — that's why the worker path is preferred.
+ *
+ * Response format: a stream of JSON objects separated by newlines (NOT SSE
+ * "data: " lines). Each line is parsed as JSON; candidates[0].content.parts[*].text
+ * are concatenated.
+ */
+async function translateGeminiDirect(
+  text: string,
+  apiKey: string,
+  model: string,
+  onToken: (token: string) => void,
+  abortSignal?: AbortSignal,
+): Promise<string> {
+  const endpoint = `${GEMINI_BASE}/${model}:streamGenerateContent`;
+
+  const payload = {
+    contents: [
+      {
+        role: "user",
+        parts: [{ text }],
+      },
+    ],
+    generationConfig: {
+      temperature: 0.7,
+      topP: 0.95,
+      maxOutputTokens: 16000,
+    },
+    systemInstruction: {
+      parts: [
+        {
+          text: SYSTEM_PROMPT,
+        },
+      ],
+    },
+  };
+
+  try {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-goog-api-key": apiKey,
+      },
+      body: JSON.stringify(payload),
+      signal: abortSignal,
+    });
+
+    if (response.status === 429) throw new Error("RATE_LIMITED");
+
+    if (response.status === 401 || response.status === 403) {
+      const body = await response.text().catch(() => "");
+      const low = body.toLowerCase();
+      const looksLikeKeyProblem =
+        /api[ _-]?key|invalid|expired|unauthorized|credential|permission|forbidden|denied|authentication|access denied|no access/i.test(
+          low,
+        );
+      if (looksLikeKeyProblem) {
+        throw new Error(
+          `KEY_REJECTED (key …${apiKey.slice(-4)}): ${body.slice(0, 200) || "Invalid or expired API key"}`,
+        );
+      }
+      throw new Error(`AUTH_ERROR_${response.status}: ${body.slice(0, 200) || "Request rejected"}`);
+    }
+
+    if (!response.ok) {
+      const body = await response.text().catch(() => "");
+      if (body.includes("overloaded") || body.includes("503") || body.includes("502")) {
+        throw new Error(`SERVER_ERROR_${response.status}: Model overloaded`);
+      }
+      throw new Error(`API error ${response.status}: ${body.slice(0, 200)}`);
+    }
+
+    if (!response.body) throw new Error("Response body is null");
+
+    const reader = response.body.getReader();
+    const result = await parseGeminiStream(reader, onToken, abortSignal);
+    if (!result.trim()) {
+      throw new Error("Model returned empty translation");
+    }
+    return normalizeParagraphs(result);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg === "RATE_LIMITED" || msg === "Translation aborted" || msg.startsWith("KEY_REJECTED")) throw err;
+
+    // Streaming failed — fall back to non-streaming
+    console.log("[Translator] Gemini direct streaming failed:", msg, "— falling back to non-streaming");
+    const result = await translateGeminiDirectNonStreaming(text, apiKey, model);
+    const words = result.split(/\s+/);
+    for (const word of words) {
+      if (abortSignal?.aborted) throw new Error("Translation aborted");
+      onToken(word + " ");
+    }
+    return result;
+  }
+}
+
+/**
  * Parse Gemini's JSON-per-line stream (NOT SSE).
  *
  * Each line is a standalone JSON object. We extract
@@ -533,6 +631,80 @@ async function translateGeminiNonStreaming(
   return translateGeminiDirectNonStreaming(text, apiKey, model);
 }
 
+/**
+ * Direct Gemini non-streaming call (no worker). Used when no worker URL is configured.
+ * Calls streamGenerateContent without streaming — returns the full response at once.
+ */
+async function translateGeminiDirectNonStreaming(
+  text: string,
+  apiKey: string,
+  model: string,
+): Promise<string> {
+  const endpoint = `${GEMINI_BASE}/${model}:streamGenerateContent`;
+
+  const payload = {
+    contents: [
+      {
+        role: "user",
+        parts: [{ text }],
+      },
+    ],
+    generationConfig: {
+      temperature: 0.7,
+      topP: 0.95,
+      maxOutputTokens: 16000,
+    },
+    systemInstruction: {
+      parts: [
+        {
+          text: SYSTEM_PROMPT,
+        },
+      ],
+    },
+  };
+
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-goog-api-key": apiKey,
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (response.status === 429) throw new Error("RATE_LIMITED");
+
+  if (response.status === 401 || response.status === 403) {
+    const body = await response.text().catch(() => "");
+    const low = body.toLowerCase();
+    const looksLikeKeyProblem =
+      /api[ _-]?key|invalid|expired|unauthorized|credential|permission|forbidden|denied|authentication|access denied|no access/i.test(
+        low,
+      );
+    if (looksLikeKeyProblem) {
+      throw new Error(
+        `KEY_REJECTED (key …${apiKey.slice(-4)}): ${body.slice(0, 200) || "Invalid or expired API key"}`,
+      );
+    }
+    throw new Error(`AUTH_ERROR_${response.status}: ${body.slice(0, 200) || "Request rejected"}`);
+  }
+
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    throw new Error(`API error ${response.status}: ${body.slice(0, 200)}`);
+  }
+
+  const data = await response.json();
+
+  // Gemini non-stream response wraps the text under candidates[0].content.parts[0].text
+  const content =
+    data?.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (typeof content !== "string" || !content) {
+    throw new Error("No translation content in response");
+  }
+  return normalizeParagraphs(content);
+}
+
 // ─── Worker-mediated Gemini path ──────────────────────────────────────────────
 
 const WORKER_GEMINI_URL_KEY = "novel-translator-gemini-worker-url";
@@ -543,15 +715,6 @@ function getGeminiWorkerUrl(): string {
     return localStorage.getItem(WORKER_GEMINI_URL_KEY) ?? "";
   } catch {
     return "";
-  }
-}
-
-function setGeminiWorkerUrl(url: string): void {
-  if (typeof localStorage === "undefined") return;
-  try {
-    localStorage.setItem(WORKER_GEMINI_URL_KEY, url.trim().replace(/\/+$/, ""));
-  } catch {
-    /* ignore */
   }
 }
 
@@ -636,7 +799,12 @@ async function translateGeminiViaWorker(
 
 /** Set the Gemini worker URL (called from the dashboard when cloud mode is on). */
 export function setGeminiWorkerUrl(url: string): void {
-  setGeminiWorkerUrl(url);
+  if (typeof localStorage === "undefined") return;
+  try {
+    localStorage.setItem(WORKER_GEMINI_URL_KEY, url.trim().replace(/\/+$/, ""));
+  } catch {
+    /* ignore */
+  }
 }
 
 /** Set the Gemini worker secret. */
