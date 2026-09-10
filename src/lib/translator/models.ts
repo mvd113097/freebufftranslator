@@ -22,13 +22,6 @@ export interface ModelOption {
 // ─── OpenRouter free-tier models ──────────────────────────────────────
 
 const OPENROUTER_MODELS: ModelOption[] = [
-  // Quality-ranked with proven-reliability first. "Auto Free" cascades through
-  // these on failure. Non-reasoning models (Ling, Gemma) are listed before
-  // reasoning models (Nemotron Ultra, Inkling): reasoning models stream a long
-  // silent thinking phase that can time out short-lived fetches (e.g. the
-  // Cloudflare worker aborts mid-reasoning with "The operation was aborted").
-  // IMPORTANT: all slugs are real OpenRouter :free variants — paid slugs (no
-  // :free) are rejected with HTTP 402 on free-tier OpenRouter accounts.
   { value: "openrouter/free", label: "Auto (best available)", provider: "openrouter" },
   { value: "inclusionai/ling-3.0-flash-fin:free", label: "Ling 3.0 Flash Fin (262K ctx, free) ★", provider: "openrouter" },
   { value: "inclusionai/ling-3.0-flash-sante:free", label: "Ling 3.0 Flash Sante (262K ctx, free)", provider: "openrouter" },
@@ -50,8 +43,6 @@ const OPENROUTER_MODELS: ModelOption[] = [
 // ─── Gemini free-tier models (native Google endpoint, AQ. keys) ───────
 
 const GEMINI_MODELS: ModelOption[] = [
-  // All hit the native Gemini endpoint directly from the browser with an
-  // `x-goog-api-key` header (AQ. keys forbid query-param auth).
   { value: "gemini-2.5-flash", label: "Gemini 2.5 Flash (free tier)", provider: "gemini" },
   { value: "gemini-2.5-flash-lite", label: "Gemini 2.5 Flash Lite (free tier)", provider: "gemini" },
   { value: "gemini-2.5-pro", label: "Gemini 2.5 Pro (free tier)", provider: "gemini" },
@@ -59,9 +50,7 @@ const GEMINI_MODELS: ModelOption[] = [
   { value: "gemini-3.6-pro", label: "Gemini 3.6 Pro (free tier)", provider: "gemini" },
 ];
 
-// Master list: OpenRouter first, then Gemini. "Auto" sentinels are placed
-// at the top of each provider group so Auto always cascades through that
-// provider's own fallback chain only.
+// Master list: OpenRouter first, then Gemini.
 export const MODEL_OPTIONS: ModelOption[] = [
   ...OPENROUTER_MODELS,
   ...GEMINI_MODELS,
@@ -110,8 +99,7 @@ export function modelProvider(model: string): Provider | undefined {
 
 /**
  * Resolve an "Auto" sentinel to the first verified-working model slug for that
- * provider. Auto always stays within its own provider — OpenRouter Auto never
- * falls back to Gemini and vice-versa, because the key format differs.
+ * provider. Auto always stays within its own provider.
  */
 export function resolveAutoModel(model: string): string {
   if (OPENROUTER_AUTO_VALUES.has(model)) {
@@ -124,11 +112,9 @@ export function resolveAutoModel(model: string): string {
 }
 
 /**
- * Sanitize a user-saved model slug: map Auto values to the sentinel, and
- * migrate anything that is not a known live slug (removed/dead models like
- * minimax-minimax-m3:free saved by an older build) back to the OpenRouter
- * Auto sentinel, which always resolves to a verified-live model at
- * start/resume time.
+ * Sanitize a user-saved model slug: anything not a known live slug (removed/
+ * dead models like minimax-minimax-m3:free) is reset to the OpenRouter Auto
+ * sentinel, which always resolves to a verified-live model at start/resume.
  */
 export function sanitizeModel(model: string | undefined | null): string {
   if (!model) return "openrouter/free";
