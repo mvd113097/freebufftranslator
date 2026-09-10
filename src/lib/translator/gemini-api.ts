@@ -219,6 +219,7 @@ async function translateWithModel(
   model: string,
   onToken: (token: string) => void,
   abortSignal?: AbortSignal,
+  fallbackModels?: string[],
 ): Promise<string> {
   const payload = buildPayload(text, model);
 
@@ -288,7 +289,35 @@ async function translateWithModel(
     return normalizeParagraphs(result);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
+    
+    // Re-throw errors that should stop immediately
     if (msg === "RATE_LIMITED" || msg === "Translation aborted" || msg.startsWith("KEY_REJECTED")) throw err;
+    
+    // If this is a model restriction and we have fallback models, try them
+    if (msg.startsWith("MODEL_RESTRICTED") && fallbackModels && fallbackModels.length > 0) {
+      console.log("[Translator] Model restricted, trying fallback:", msg.slice(0, 80));
+      // Try fallback models
+      for (const fallbackModel of fallbackModels) {
+        if (abortSignal?.aborted) throw new Error("Translation aborted");
+        try {
+          onToken(`[Switching to ${fallbackModel}] `);
+          return translateWithModel(text, apiKey, fallbackModel, onToken, abortSignal);
+        } catch (fallbackErr) {
+          const fallbackMsg = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
+          // If fallback also fails with restriction, continue to next
+          if (fallbackMsg.startsWith("MODEL_RESTRICTED") || fallbackMsg.includes("unavailable")) {
+            continue;
+          }
+          // If it's a bad key or other fatal error, re-throw
+          if (fallbackMsg.startsWith("KEY_REJECTED") || fallbackMsg === "RATE_LIMITED") {
+            throw fallbackErr;
+          }
+          // Otherwise, keep trying fallbacks
+        }
+      }
+      // All fallbacks failed, throw the original error
+      throw err;
+    }
 
     // Streaming failed — try non-streaming fallback with the same model
     console.log(
@@ -381,9 +410,13 @@ export async function translateChunk(
 
   if (!isAutoSelector(selected)) {
     onModelUsed?.(selected);
+    // For specific models, pass the fallback chain so MODEL_RESTRICTED can trigger fallback
+    const fallbackChain = provider === "gemini" 
+      ? GEMINI_FALLBACK_MODELS.filter(m => m !== selected)
+      : OPENROUTER_FALLBACK_MODELS.filter(m => m !== selected);
     return provider === "gemini"
       ? translateGeminiChunk(text, apiKey, selected, onToken, abortSignal)
-      : translateOpenRouterChunk(text, apiKey, selected, onToken, abortSignal);
+      : translateOpenRouterChunk(text, apiKey, selected, onToken, abortSignal, fallbackChain);
   }
 
   // Auto: walk the per-provider fallback chain. RATE_LIMITED / 429 move to the
@@ -391,11 +424,12 @@ export async function translateChunk(
   const chain = provider === "gemini" ? GEMINI_FALLBACK_MODELS : OPENROUTER_FALLBACK_MODELS;
   let lastError: Error | null = null;
   for (const candidate of chain) {
-    if (abortSignal?.aborted) throw new Error("Translation aborted");      try {
+    if (abortSignal?.aborted) throw new Error("Translation aborted");
+    try {
       onModelUsed?.(candidate);
       return provider === "gemini"
         ? await translateGeminiChunk(text, apiKey, candidate, onToken, abortSignal)
-        : await translateOpenRouterChunk(text, apiKey, candidate, onToken, abortSignal);
+        : await translateOpenRouterChunk(text, apiKey, candidate, onToken, abortSignal, chain.filter(m => m !== candidate));
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (
@@ -859,6 +893,7 @@ export function clearGeminiWorkerConfig(): void {
 /**
  * OpenRouter wrapper — keeps the original translateWithModel name so existing
  * call sites that think in terms of "one model at a time" still read clearly.
+ * Passes the fallback chain so model restrictions can trigger fallback.
  */
 async function translateOpenRouterChunk(
   text: string,
@@ -866,8 +901,9 @@ async function translateOpenRouterChunk(
   model: string,
   onToken: (token: string) => void,
   abortSignal?: AbortSignal,
+  fallbackModels?: string[],
 ): Promise<string> {
-  return translateWithModel(text, apiKey, model, onToken, abortSignal);
+  return translateWithModel(text, apiKey, model, onToken, abortSignal, fallbackModels);
 }
 
 /** Transient upstream failures that should NOT fail a key-validity check. */
