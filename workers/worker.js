@@ -65,10 +65,11 @@ const MAX_TOKENS = 16000;
 const UPSTREAM_TIMEOUT_MS = 110000;
 const CASCADE_STATUSES = new Set([402, 404, 408, 429, 500, 502, 503, 504]);
 
-// Maximum characters per API request to Gemini (increase from 5000 to allow larger chunks)
-// Gemini 3.5/3.6 Flash can handle much larger inputs
-const MAX_CHARS_PER_REQUEST = 50000; // 50k chars per request - balances quota vs timeout risk
-const MIN_CHARS_PER_REQUEST = 5000; // minimum if splitting is needed
+// Maximum characters per API request
+// Set to a high value so the worker respects the client's chunk size
+// Client sends 35k chunks, worker should NOT split them further
+const MAX_CHARS_PER_REQUEST = 100000; // Allow up to 100k chars per request
+const MIN_CHARS_PER_REQUEST = 10000; // minimum if splitting is absolutely needed
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
