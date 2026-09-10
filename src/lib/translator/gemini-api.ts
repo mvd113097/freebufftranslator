@@ -291,7 +291,7 @@ async function translateWithModel(
     const msg = err instanceof Error ? err.message : String(err);
     
     // Re-throw errors that should stop immediately
-    if (msg === "RATE_LIMITED" || msg === "Translation aborted" || msg.startsWith("KEY_REJECTED")) throw err;
+    if (msg === "Translation aborted" || msg.startsWith("KEY_REJECTED")) throw err;
     
     // If this is a model restriction and we have fallback models, try them
     if (msg.startsWith("MODEL_RESTRICTED") && fallbackModels && fallbackModels.length > 0) {
@@ -308,14 +308,35 @@ async function translateWithModel(
           if (fallbackMsg.startsWith("MODEL_RESTRICTED") || fallbackMsg.includes("unavailable")) {
             continue;
           }
-          // If it's a bad key or other fatal error, re-throw
-          if (fallbackMsg.startsWith("KEY_REJECTED") || fallbackMsg === "RATE_LIMITED") {
+          // If it's a bad key, re-throw
+          if (fallbackMsg.startsWith("KEY_REJECTED")) {
             throw fallbackErr;
           }
-          // Otherwise, keep trying fallbacks
+          // For RATE_LIMITED or other errors, keep trying fallbacks
         }
       }
       // All fallbacks failed, throw the original error
+      throw err;
+    }
+    
+    // RATE_LIMITED should trigger fallback to next model (not stop)
+    if (msg === "RATE_LIMITED" && fallbackModels && fallbackModels.length > 0) {
+      console.log("[Translator] Rate limited, trying next model...");
+      // Small delay to let rate limit window cool down
+      await new Promise(r => setTimeout(r, 2000));
+      for (const fallbackModel of fallbackModels) {
+        if (abortSignal?.aborted) throw new Error("Translation aborted");
+        try {
+          onToken(`[Rate limited, trying ${fallbackModel}] `);
+          return translateWithModel(text, apiKey, fallbackModel, onToken, abortSignal);
+        } catch (fallbackErr) {
+          const fallbackMsg = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
+          if (fallbackMsg.startsWith("KEY_REJECTED")) {
+            throw fallbackErr;
+          }
+          // Continue trying other fallbacks
+        }
+      }
       throw err;
     }
 
@@ -443,6 +464,14 @@ export async function translateChunk(
       if (msg.startsWith("MODEL_RESTRICTED")) {
         console.log(
           `[Translator] ${candidate} restricted for this request — trying next model`,
+        );
+        continue;
+      }
+      
+      // RATE_LIMITED should also continue to next model (with delay handled in translateWithModel)
+      if (msg === "RATE_LIMITED") {
+        console.log(
+          `[Translator] ${candidate} rate limited — trying next model`,
         );
         continue;
       }
@@ -973,8 +1002,9 @@ export async function translateChunkSimple(
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       lastErr = err instanceof Error ? err : new Error(msg);
-      if (msg.startsWith("KEY_REJECTED") || msg === "RATE_LIMITED") throw err;
-      if (!isTransientModelError(msg)) throw err;
+      if (msg.startsWith("KEY_REJECTED")) throw err;
+      // RATE_LIMITED is transient, keep retrying
+      if (!isTransientModelError(msg) && msg !== "RATE_LIMITED") throw err;
       await new Promise((r) => setTimeout(r, 4000 * (attempt + 1)));
     }
   }
