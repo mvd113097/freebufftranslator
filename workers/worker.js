@@ -56,12 +56,19 @@ const GEMINI_MODELS = [
   "gemini-3.1-flash-lite"
 ];
 
+// Chunk splitting for worker - allow larger chunks to respect user's quota settings
+// User's pipeline uses 100k chars/chunk, worker should respect that
 const BATCH_SIZE = 1;
 const MAX_RETRIES = 3;
 const STAGGER_MS = 4500;
 const MAX_TOKENS = 16000;
 const UPSTREAM_TIMEOUT_MS = 110000;
 const CASCADE_STATUSES = new Set([402, 404, 408, 429, 500, 502, 503, 504]);
+
+// Maximum characters per API request to Gemini (increase from 5000 to allow larger chunks)
+// Gemini 3.5/3.6 Flash can handle much larger inputs
+const MAX_CHARS_PER_REQUEST = 50000; // 50k chars per request - balances quota vs timeout risk
+const MIN_CHARS_PER_REQUEST = 5000; // minimum if splitting is needed
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -90,6 +97,41 @@ function verifySecret(request, env) {
   if (!env.JOB_SECRET) return true;
   const provided = request.headers.get("x-job-secret") ?? "";
   return provided === env.JOB_SECRET;
+}
+
+// Split text into manageable chunks for API requests
+// Respects user's pipeline chunk size while avoiding worker timeouts
+function splitIntoApiChunks(text, maxChars = MAX_CHARS_PER_REQUEST) {
+  if (text.length <= maxChars) {
+    return [text];
+  }
+  
+  const chunks = [];
+  let remaining = text;
+  
+  while (remaining.length > 0) {
+    if (remaining.length <= maxChars) {
+      chunks.push(remaining);
+      break;
+    }
+    
+    // Try to split at a paragraph boundary (double newline) for better quality
+    let splitPoint = remaining.lastIndexOf('\n\n', maxChars);
+    if (splitPoint === -1 || splitPoint < MIN_CHARS_PER_REQUEST) {
+      // No good paragraph boundary, split at maxChars
+      splitPoint = maxChars;
+      // Try to find a sentence boundary near the split point
+      const nearSplit = remaining.lastIndexOf('.', splitPoint + 50);
+      if (nearSplit > maxChars - 100) {
+        splitPoint = nearSplit + 1;
+      }
+    }
+    
+    chunks.push(remaining.slice(0, splitPoint));
+    remaining = remaining.slice(splitPoint).trimStart();
+  }
+  
+  return chunks;
 }
 
 async function decompressGzip(base64) {
@@ -270,40 +312,69 @@ async function translateChunk(text, keys, requestedModel, liveModels) {
     models = [requestedModel, ...OPENROUTER_FREE_MODELS.filter(m => m !== requestedModel)];
   }
   
+  // Split text into API-sized chunks if needed (respects user's pipeline chunk size)
+  const apiChunks = splitIntoApiChunks(text);
+  
   let lastError = null;
   let allRateLimited = true;
+  let allTranslated = [];
   
-  for (const model of models) {
-    const backend = isGeminiModel(model) ? callGemini : callOpenRouter;
+  for (let chunkIdx = 0; chunkIdx < apiChunks.length; chunkIdx++) {
+    const chunkText = apiChunks[chunkIdx];
+    let chunkTranslated = false;
     
-    for (let ki = 0; ki < keys.length; ki++) {
-      const key = keys[ki];
-      try {
-        const result = await backend(text, key, model);
-        return { translated: result.content, model: result.model };
-      } catch (err) {
-        lastError = err instanceof Error ? err : new Error(String(err));
-        
-        if (lastError.message === "RATE_LIMITED") {
-          continue;
-        }
-        
-        allRateLimited = false;
-        
-        if (lastError.message.includes("unavailable") || lastError.message.includes("KEY_REJECTED")) {
+    for (const model of models) {
+      const backend = isGeminiModel(model) ? callGemini : callOpenRouter;
+      
+      for (let ki = 0; ki < keys.length; ki++) {
+        const key = keys[ki];
+        try {
+          const result = await backend(chunkText, key, model);
+          allTranslated.push(result.content);
+          chunkTranslated = true;
+          
+          // Update active model for tracking
+          // (model tracking would go here if needed)
+          break;
+        } catch (err) {
+          lastError = err instanceof Error ? err : new Error(String(err));
+          
+          if (lastError.message === "RATE_LIMITED") {
+            continue;
+          }
+          
+          allRateLimited = false;
+          
+          if (lastError.message.includes("unavailable") || lastError.message.includes("KEY_REJECTED")) {
+            break;
+          }
+          
           break;
         }
-        
-        break;
       }
+      
+      if (chunkTranslated) break;
+    }
+    
+    if (!chunkTranslated) {
+      // If we couldn't translate this sub-chunk, throw the last error
+      if (allRateLimited && lastError?.message === "RATE_LIMITED") {
+        throw new Error("QUOTA_EXHAUSTED");
+      }
+      throw lastError ?? new Error(`Failed to translate sub-chunk ${chunkIdx + 1}/${apiChunks.length}`);
+    }
+    
+    // Add small delay between sub-chunks to avoid overwhelming the API
+    if (chunkIdx < apiChunks.length - 1) {
+      await new Promise(r => setTimeout(r, 500));
     }
   }
   
-  if (allRateLimited && lastError?.message === "RATE_LIMITED") {
-    throw new Error("QUOTA_EXHAUSTED");
-  }
-  
-  throw lastError ?? new Error("All translation attempts failed");
+  // Combine all translated sub-chunks
+  return { 
+    translated: allTranslated.join('\n\n'), 
+    model: requestedModel 
+  };
 }
 
 async function handleRequest(request, env) {

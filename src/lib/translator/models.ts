@@ -42,15 +42,20 @@ const OPENROUTER_MODELS: ModelOption[] = [
 
 // ─── Gemini free-tier models (native Google endpoint, AQ. keys) ───────
 // These are the model IDs from Google's official Gemini API docs (2026-09)
-// Endpoint: https://googleapis.com/v1beta/models/{model}:streamGenerateContent
+// Endpoint: https://generativelanguage.googleapis.com/v1beta/models/{model}:streamGenerateContent
+// 
+// Model selection priority:
+// - gemini-3.5-flash-lite: ~500 RPD (best for high-volume translation)
+// - gemini-3.1-flash-lite: Good alternative
+// - gemini-3.6/3.7/3.8-flash: Higher quality but ~20 RPD limit
 
 const GEMINI_MODELS: ModelOption[] = [
-  { value: "gemini-3.8-flash", label: "Gemini 3.8 Flash (free tier) ★", provider: "gemini" },
-  { value: "gemini-3.7-flash", label: "Gemini 3.7 Flash (free tier)", provider: "gemini" },
-  { value: "gemini-3.6-flash", label: "Gemini 3.6 Flash (free tier)", provider: "gemini" },
-  { value: "gemini-3.5-flash", label: "Gemini 3.5 Flash (free tier)", provider: "gemini" },
-  { value: "gemini-3.5-flash-lite", label: "Gemini 3.5 Flash Lite (free tier)", provider: "gemini" },
+  { value: "gemini-3.5-flash-lite", label: "Gemini 3.5 Flash Lite (free tier) ★ Best for volume", provider: "gemini" },
   { value: "gemini-3.1-flash-lite", label: "Gemini 3.1 Flash Lite (free tier)", provider: "gemini" },
+  { value: "gemini-3.6-flash", label: "Gemini 3.6 Flash (free tier) ★", provider: "gemini" },
+  { value: "gemini-3.7-flash", label: "Gemini 3.7 Flash (free tier)", provider: "gemini" },
+  { value: "gemini-3.8-flash", label: "Gemini 3.8 Flash (free tier)", provider: "gemini" },
+  { value: "gemini-3.5-flash", label: "Gemini 3.5 Flash (free tier)", provider: "gemini" },
 ];
 
 // Master list: OpenRouter first, then Gemini.
