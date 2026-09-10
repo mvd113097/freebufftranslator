@@ -795,6 +795,10 @@ async function translateGeminiDirectNonStreaming(
 
 const WORKER_GEMINI_URL_KEY = "novel-translator-gemini-worker-url";
 
+/**
+ * Gemini worker URL (optional). When set, Gemini /api/translate calls are routed
+ * through the worker so the browser never calls googleapis.com directly.
+ */
 function getGeminiWorkerUrl(): string {
   if (typeof localStorage === "undefined") return "";
   try {

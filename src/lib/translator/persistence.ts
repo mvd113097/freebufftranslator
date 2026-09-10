@@ -13,7 +13,8 @@ import { sanitizeModel } from "./models";
 const SETTINGS_KEY = "novel-translator-settings";
 
 export interface AppSettings {
-  keys: string[];
+  openrouterKeys: string[];
+  geminiKeys: string[];
   model: string;
   chunkSize: number;
   concurrency: number;
@@ -32,7 +33,8 @@ export interface AppSettings {
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
-  keys: [],
+  openrouterKeys: [],
+  geminiKeys: [],
   model: "openrouter/free",
   chunkSize: 4000,
   concurrency: 1,

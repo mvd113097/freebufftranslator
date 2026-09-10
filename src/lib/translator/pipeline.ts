@@ -1,6 +1,6 @@
 import { chunkText, type TextChunk } from "./chunker";
 import { RateLimiter } from "./rate-limiter";
-import { translateChunk } from "./gemini-api";
+import { translateChunk, translateChunkSimple } from "./gemini-api";
 
 export type ChunkStatus = "pending" | "translating" | "completed" | "failed";
 
@@ -53,6 +53,12 @@ export interface PipelineOptions {
   onChunkFailed?: (chunk: ChunkProgress) => void;
   /** Called with the real model id whenever a request is dispatched. */
   onModelUsed?: (model: string) => void;
+  /** OpenRouter API keys (for client mode) */
+  openrouterKeys?: string[];
+  /** Gemini API keys (for cloud mode) */
+  geminiKeys?: string[];
+  /** Translation mode: "client" for OpenRouter, "cloud" for Gemini */
+  translationMode?: "client" | "cloud";
 }
 
 const DEFAULT_OPTIONS: PipelineOptions = {
@@ -268,7 +274,13 @@ export class TranslationPipeline {
       this.options = { ...DEFAULT_OPTIONS, ...options };
     }
 
-    this.keys = keys.filter((k) => k.trim().length > 0);
+    // Use the appropriate key set based on translation mode
+    const keyList =
+      this.options.translationMode === "cloud" && this.options.geminiKeys
+        ? this.options.geminiKeys
+        : this.options.openrouterKeys ?? keys;
+
+    this.keys = keyList.filter((k) => k.trim().length > 0);
     if (this.keys.length === 0) {
       throw new Error("No valid API keys provided");
     }
@@ -333,19 +345,30 @@ export class TranslationPipeline {
 
           console.log(`[Pipeline] Chunk ${chunk.id + 1} sending request (attempt ${attempt + 1})...`);
 
-          const translated = await translateChunk(
-            chunk.originalText,
-            currentKey,
-            (token) => {
-              chunk.tokensReceived++;
-              chunk.translatedText += token;
-              this.onToken?.(chunk.id, token);
-              this.reportProgress();
-            },
-            this.abortController?.signal,
-            this.options.model,
-            (realModel) => this.options.onModelUsed?.(realModel),
-          );
+          // Use appropriate translation function based on mode
+          const isCloudMode = this.options.translationMode === "cloud";
+          const translated = isCloudMode
+            ? await translateChunkSimple(
+                chunk.originalText,
+                currentKey,
+                this.options.model,
+              )
+            : await translateChunk(
+                chunk.originalText,
+                currentKey,
+                (token) => {
+                  chunk.tokensReceived++;
+                  chunk.translatedText += token;
+                  this.onToken?.(chunk.id, token);
+                  this.reportProgress();
+                },
+                this.abortController?.signal,
+                this.options.model,
+                (realModel) => this.options.onModelUsed?.(realModel),
+              );
+          if (!isCloudMode && translated && typeof translated === "string") {
+            chunk.translatedText = translated;
+          }
 
           results[chunk.id] = translated;
           chunk.translatedText = translated;

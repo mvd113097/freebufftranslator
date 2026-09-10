@@ -101,7 +101,8 @@ async function sendTelegramDirect(
 
 export default function Dashboard() {
   // ─── State ──────────────────────────────────────────────────────
-  const [keys, setKeys] = useState<string[]>(() => loadSettings().keys);
+  const [openrouterKeys, setOpenrouterKeys] = useState<string[]>(() => loadSettings().openrouterKeys || []);
+  const [geminiKeys, setGeminiKeys] = useState<string[]>(() => loadSettings().geminiKeys || []);
   const [rawText, setRawText] = useState("");
   const [fileName, setFileName] = useState("");
   const [chunkSize, setChunkSize] = useState(() => loadSettings().chunkSize);
@@ -186,7 +187,8 @@ export default function Dashboard() {
   const isDoneClean = isComplete && failedCount === 0;
   const canStart =
     rawText.length > 0 &&
-    keys.length > 0 &&
+    ((translationMode === "client" && openrouterKeys.length > 0) ||
+      (translationMode === "cloud" && geminiKeys.length > 0)) &&
     !hasSession &&
     !isStarting &&
     (translationMode === "client" || workerUrl.trim().length > 0);
@@ -425,7 +427,8 @@ export default function Dashboard() {
   // ─── Persist settings to localStorage on change ─────────────────
   useEffect(() => {
     saveSettings({
-      keys,
+      openrouterKeys,
+      geminiKeys,
       model: selectedModel,
       chunkSize,
       concurrency,
@@ -440,7 +443,7 @@ export default function Dashboard() {
       translationMode,
       cloudJobId,
     });
-  }, [keys, selectedModel, chunkSize, concurrency, telegramBotToken, telegramChatId, telegramNotifyOnStart, telegramNotifyOnProgress, telegramNotifyOnError, telegramNotifyOnComplete, telegramNotifyOnPause, telegramStatusInterval, translationMode, cloudJobId]);
+  }, [openrouterKeys, geminiKeys, selectedModel, chunkSize, concurrency, telegramBotToken, telegramChatId, telegramNotifyOnStart, telegramNotifyOnProgress, telegramNotifyOnError, telegramNotifyOnComplete, telegramNotifyOnPause, telegramStatusInterval, translationMode, cloudJobId]);
 
   // ─── Online/offline awareness ───────────────────────────────────
   useEffect(() => {
@@ -565,9 +568,14 @@ export default function Dashboard() {
   // ─── Core runner: shared by Start and Resume ────────────────────
   const runPipeline = useCallback(
     async (existingChunks: ChunkProgress[]) => {
-      const keysSnapshot = keys;
+      const keysSnapshot =
+        translationMode === "client" ? openrouterKeys : geminiKeys;
       if (keysSnapshot.length === 0) {
-        alert("Add at least one API key first.");
+        alert(
+          translationMode === "client"
+            ? "Add at least one OpenRouter API key first."
+            : "Add at least one Gemini API key first.",
+        );
         return;
       }
 
@@ -612,6 +620,9 @@ export default function Dashboard() {
           model: selectedModel,
           chunkSize,
           maxRetries: 3,
+          openrouterKeys,
+          geminiKeys,
+          translationMode,
           onChunkComplete: async (chunk) => {
             await persistChunk(chunk);
             // Update the Dashboard's chunkProgress state so the word counter
@@ -684,7 +695,7 @@ export default function Dashboard() {
         runningRef.current = false;
       }
     },
-    [keys, concurrency, selectedModel, chunkSize, persistChunk, releaseWakeLock],
+    [openrouterKeys, geminiKeys, concurrency, selectedModel, chunkSize, persistChunk, releaseWakeLock, translationMode],
   );
 
   // ─── Start translation ──────────────────────────────────────────
@@ -774,7 +785,7 @@ export default function Dashboard() {
             {
               fileName: fileName || "novel.txt",
               model: cloudModel,
-              keys,
+              keys: geminiKeys,
               chunks: chunks.map((c) => ({ id: c.id, text: c.text })),
               liveModels: LIVE_MODEL_SLUGS,
               originalChunkCount: chunks.length,
@@ -841,7 +852,7 @@ export default function Dashboard() {
                       prefs.botToken,
                       prefs.chatId,
                       reason === "quota_exhausted"
-                        ? `⏸️ <b>Translation paused — daily quota exhausted</b>\nAll OpenRouter keys hit their daily free limit.\n📖 ${p?.completedChunks ?? 0}/${p?.totalChunks ?? 0} done\n⏱️ Resets at midnight UTC — press Resume later.`
+                        ? `⏸️ <b>Translation paused — daily quota exhausted</b>\nAll Gemini keys hit their daily free limit.\n📖 ${p?.completedChunks ?? 0}/${p?.totalChunks ?? 0} done\n⏱️ Resets at midnight UTC — press Resume later.`
                         : `⚠️ <b>Translation paused — chunk failed</b>\n📖 ${p?.completedChunks ?? 0}/${p?.totalChunks ?? 0} done\nOpen the app and press Resume to retry.`,
                     );
                   }
@@ -894,7 +905,7 @@ export default function Dashboard() {
       setIsStarting(false);
       setUploadPhase(null);
     }
-  }, [canStart, rawText, fileName, chunkSize, keys, selectedModel, runPipeline, acquireWakeLock, translationMode, telegramBotToken, telegramChatId, telegramNotifyOnStart, telegramNotifyOnProgress, telegramNotifyOnError, telegramNotifyOnComplete, workerUrl, workerSecret]);
+  }, [canStart, rawText, fileName, chunkSize, openrouterKeys, geminiKeys, selectedModel, runPipeline, acquireWakeLock, translationMode, telegramBotToken, telegramChatId, telegramNotifyOnStart, telegramNotifyOnProgress, telegramNotifyOnError, telegramNotifyOnComplete, workerUrl, workerSecret]);
 
   // ─── Clear Gemini worker routing when leaving cloud mode ──────────────
   useEffect(() => {
@@ -923,7 +934,7 @@ export default function Dashboard() {
             {
               fileName: fileName || "novel.txt",
               model: cloudModel,
-              keys,
+              keys: geminiKeys,
               chunks: pending.map((c) => ({ id: c.id, text: c.originalText })),
               liveModels: LIVE_MODEL_SLUGS,
               originalChunkCount: pending.length,
@@ -1024,7 +1035,7 @@ export default function Dashboard() {
     } finally {
       setTimeout(() => setIsResuming(false), 500);
     }
-  }, [chunkProgress, runPipeline, acquireWakeLock, translationMode, fileName, selectedModel, keys, telegramBotToken, telegramChatId, telegramNotifyOnStart, telegramNotifyOnProgress, telegramNotifyOnError, telegramNotifyOnComplete]);
+  }, [chunkProgress, runPipeline, acquireWakeLock, translationMode, fileName, selectedModel, openrouterKeys, geminiKeys, telegramBotToken, telegramChatId, telegramNotifyOnStart, telegramNotifyOnProgress, telegramNotifyOnError, telegramNotifyOnComplete]);
 
   // ─── Pause ──────────────────────────────────────────────────────
   const pauseTranslation = useCallback(() => {
@@ -1168,28 +1179,42 @@ export default function Dashboard() {
 
 
 
-  // ─── Test all keys ──────────────────────────────────────────────
+  // ─── Test all keys (both sources) ────────────────────────────────────────
   const testAllKeys = useCallback(async () => {
-    try {
-      const lines: string[] = [];
-      for (let i = 0; i < keys.length; i++) {
-        const key = keys[i];
+    const lines: string[] = [];
+    if (openrouterKeys.length > 0) {
+      for (let i = 0; i < openrouterKeys.length; i++) {
+        const key = openrouterKeys[i];
         try {
           await translateChunkSimple("你好世界 Hello World", key, selectedModel);
-          lines.push(`Key ${i + 1} (…${key.slice(-4)}): ✅ works`);
+          lines.push(`OpenRouter Key ${i + 1} (…${key.slice(-4)}): ✅ works`);
         } catch (err2) {
           const msg = err2 instanceof Error ? err2.message : String(err2);
-          lines.push(`Key ${i + 1} (…${key.slice(-4)}): ❌ ${msg.slice(0, 140)}`);
+          lines.push(`OpenRouter Key ${i + 1} (…${key.slice(-4)}): ❌ ${msg.slice(0, 140)}`);
         }
       }
-      const okCount = lines.filter((l) => l.includes("✅")).length;
-      alert(
-        `Key check — ${okCount}/${keys.length} valid:\n\n${lines.join("\n\n")}\n\nRemove the ❌ keys (they will fail every chunk).`,
-      );
-    } catch (err) {
-      alert(`❌ Key test failed: ${err instanceof Error ? err.message : String(err)}`);
     }
-  }, [keys, selectedModel]);
+    if (geminiKeys.length > 0) {
+      for (let i = 0; i < geminiKeys.length; i++) {
+        const key = geminiKeys[i];
+        try {
+          await translateChunkSimple("你好世界 Hello World", key, selectedModel);
+          lines.push(`Gemini Key ${i + 1} (…${key.slice(-4)}): ✅ works`);
+        } catch (err2) {
+          const msg = err2 instanceof Error ? err2.message : String(err2);
+          lines.push(`Gemini Key ${i + 1} (…${key.slice(-4)}): ❌ ${msg.slice(0, 140)}`);
+        }
+      }
+    }
+    if (lines.length === 0) {
+      alert("No API keys configured yet.");
+      return;
+    }
+    const okCount = lines.filter((l) => l.includes("✅")).length;
+    alert(
+      `Key check — ${okCount}/${lines.length} valid:\n\n${lines.join("\n\n")}\n\nRemove the ❌ keys (they will fail every chunk).`,
+    );
+  }, [openrouterKeys, geminiKeys, selectedModel]);
 
 
 
@@ -1590,7 +1615,7 @@ export default function Dashboard() {
             transition={{ delay: 0.1 }}
             className="rounded-2xl border border-stone-700/50 bg-stone-900/80 backdrop-blur-xl p-4 shadow-sm"
           >
-            <KeyManager keys={keys} onKeysChange={setKeys} />
+                        <KeyManager\n              openrouterKeys={openrouterKeys}\n              onOpenrouterKeysChange={setOpenrouterKeys}\n              geminiKeys={geminiKeys}\n              onGeminiKeysChange={setGeminiKeys}\n            />
           </motion.div>
         </div>
 
