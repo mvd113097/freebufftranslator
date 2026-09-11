@@ -31,15 +31,20 @@ CREATE TABLE jobs (
 CREATE TABLE chunks (
   id INTEGER PRIMARY KEY AUTOINCREMENT,        -- rowid used by the cron claim query
   job_id TEXT NOT NULL,
-  seq INTEGER NOT NULL,                        -- chunk order in the original book
+  seq INTEGER NOT NULL,                        -- upload-unit order (parts of one original share the book order)
   text TEXT NOT NULL,                          -- source text (plain, or base64 gzip when the client flags it)
-  status TEXT NOT NULL DEFAULT 'pending',      -- pending | translating | completed | failed
+  status TEXT NOT NULL DEFAULT 'pending',      -- pending | translating | completed | partial | blocked | failed
   translated_text TEXT,
   model_used TEXT,
   error TEXT,
   attempts INTEGER NOT NULL DEFAULT 0,
   processing_since INTEGER,
-  updated_at INTEGER NOT NULL
+  updated_at INTEGER NOT NULL,
+  -- Server-authoritative split mapping (NULL = legacy job uploaded before
+  -- mapping existed; those keep the localStorage-plan behavior + UI warning).
+  original_chunk_id INTEGER,
+  part_index INTEGER,
+  part_count INTEGER
 );
 
 CREATE INDEX idx_chunks_job_seq ON chunks (job_id, seq);
