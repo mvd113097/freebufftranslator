@@ -75,7 +75,8 @@ export async function generateEpub(
     <title>${chapterTitle}</title>
     <style>
       body { font-family: Georgia, serif; line-height: 1.6; margin: 2em; }
-      p { margin: 0; text-indent: 1.5em; text-align: justify; }
+      p { margin: 0 0 0.75em 0; text-indent: 0; text-align: left; }
+      p + p { text-indent: 1.5em; }
       p.no-indent { text-indent: 0; }
     </style>
   </head>
