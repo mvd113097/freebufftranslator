@@ -98,6 +98,13 @@ const MAX_CONTINUATION_ROUNDS = 3;
 const MAX_TOTAL_ATTEMPTS = 8;
 /** Upstream fetch timeout per request. */
 const UPSTREAM_TIMEOUT_MS = 110000;
+/** A chunk in 'translating' whose updated_at is older than this was claimed
+ * by a cron invocation that was killed by Cloudflare's wall-clock limit
+ * (always shorter than this) — it is reclaimed with its accumulated
+ * translated_text preserved, so no live worker can ever be double-claimed. */
+const STALE_TRANSLATING_MS = 20 * 60_000;
+/** buffy-smoke-* jobs reclaim much faster so recovery is observable in tests. */
+const SMOKE_STALE_TRANSLATING_MS = 90_000;
 
 // ─── Official Gemini endpoint (verified: googleapis.com serves HTML 404s) ─────
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
@@ -579,7 +586,13 @@ async function translateChunk(
       continue; // a rejected key shouldn't kill the cascade; result still recorded
     }
     if (!result.truncated || result.translated.length === 0) {
-      break; // hard model failure with no progress — move on
+      // Hard failure on THIS model with no progress — including empty-content
+      // TRANSIENT (reasoning models can burn the entire output budget on
+      // hidden reasoning and return nothing). Cascade to the next FREE model
+      // instead of burning every attempt on a dead model; same treatment as
+      // RATE_LIMITED. On the last model this exits the loop and `last` is
+      // returned, so behavior for a fully-failed cascade is unchanged.
+      continue;
     }
     // Partial progress on this model — prefer it over gambling on the cascade.
     return result;
@@ -1026,6 +1039,26 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
     return json({ ok: true });
   }
 
+  // ── SMOKE TESTS ONLY: simulate a stalled 'translating' chunk ──────────
+  // Rewinds updated_at on an in-flight chunk of a buffy-smoke-* job so the
+  // stale-reclaim path can be observed deterministically. Refuses real jobs.
+  const smokeStaleMatch = path.match(/^\/api\/jobs\/([a-f0-9-]+)\/smoke-stale$/);
+  if (smokeStaleMatch && method === "POST") {
+    if (!verifySecret(request, env)) return json({ error: "Invalid secret" }, 403);
+    const jobId = smokeStaleMatch[1];
+    const job = await env.DB.prepare(`SELECT file_name FROM jobs WHERE id = ?`).bind(jobId).first();
+    if (!job) return json({ error: "Job not found" }, 404);
+    if (!(job.file_name as string).startsWith("buffy-smoke-")) {
+      return json({ error: "smoke-stale is only allowed on buffy-smoke-* jobs" }, 403);
+    }
+    const res = await env.DB.prepare(
+      `UPDATE chunks SET updated_at = ? WHERE job_id = ? AND status = 'translating'`
+    )
+      .bind(Date.now() - SMOKE_STALE_TRANSLATING_MS - 10_000, jobId)
+      .run();
+    return json({ ok: true, rewound: res.meta?.changes ?? 0 });
+  }
+
   return json({ error: "Not found" }, 404);
 }
 
@@ -1051,6 +1084,27 @@ async function handleCron(env: Env): Promise<void> {
 
     await env.DB.prepare(`UPDATE jobs SET last_heartbeat = ?, updated_at = ? WHERE id = ?`)
       .bind(Date.now(), Date.now(), jobId)
+      .run();
+
+    // ── Stale 'translating' reclaim (Defect #2 fix) ─────────────
+    // A cron invocation can be killed by Cloudflare's wall-clock limit
+    // mid-flight, stranding chunks in 'translating' forever — the claim below
+    // only picks pending/partial. Reclaim anything stale ATOMICALLY (the
+    // status + updated_at CAS means a second worker can never re-claim a row
+    // that was just recovered). Any accumulated translated_text is preserved
+    // and the chunk resumes from its exact stored position.
+    const staleMs = (job.file_name as string | undefined)?.startsWith("buffy-smoke-")
+      ? SMOKE_STALE_TRANSLATING_MS
+      : STALE_TRANSLATING_MS;
+    await env.DB.prepare(
+      `UPDATE chunks
+         SET status = CASE WHEN COALESCE(translated_text, '') = '' THEN 'pending' ELSE 'partial' END,
+             error = CASE WHEN COALESCE(translated_text, '') = '' THEN error
+                          ELSE 'reclaimed from stalled translating — continuation pending' END,
+             updated_at = ?
+       WHERE job_id = ? AND status = 'translating' AND updated_at < ?`
+    )
+      .bind(Date.now(), jobId, Date.now() - staleMs)
       .run();
 
     // Claim pending AND partial units — partials resume from their stored
@@ -1102,19 +1156,27 @@ async function handleCron(env: Env): Promise<void> {
     }
 
     const now = Date.now();
-    const markStmts = pending.results.map((r) =>
-      env.DB.prepare(`UPDATE chunks SET status = 'translating', updated_at = ? WHERE id = ?`)
+    // Atomic claim (Defect #2 companion): the status guard makes concurrent
+    // cron invocations safe — only the FIRST worker's UPDATE matches, so the
+    // same chunk can never be double-claimed (which would burn free quota).
+    const claimed: typeof pending.results = [];
+    for (const r of pending.results) {
+      const claim = await env.DB.prepare(
+        `UPDATE chunks SET status = 'translating', updated_at = ?
+         WHERE id = ? AND status IN ('pending', 'partial')`
+      )
         .bind(now, r.id)
-    );
-    await env.DB.batch(markStmts);
+        .run();
+      if ((claim.meta?.changes ?? 0) > 0) claimed.push(r);
+    }
 
     let completedDelta = 0;
     let failedDelta = 0;
     let blockedDelta = 0;
     let quotaExhausted = false;
 
-    for (let i = 0; i < pending.results.length; i++) {
-      const chunk = pending.results[i];
+    for (let i = 0; i < claimed.length; i++) {
+      const chunk = claimed[i];
       const chunkId = chunk.id as number;
       const seq = chunk.seq as number;
       const text = chunk.text as string;
@@ -1135,8 +1197,10 @@ async function handleCron(env: Env): Promise<void> {
 
         // BLOCKED: never retried, no key/model cycling — quota is protected.
         if (result.blockedReason) {
+          // CAS on the claim state: if the chunk was stale-reclaimed while a
+          // zombie worker was still computing, only the live claimant writes.
           await env.DB.prepare(
-            `UPDATE chunks SET status = 'blocked', translated_text = NULL, model_used = ?, error = ?, attempts = ?, updated_at = ? WHERE id = ?`
+            `UPDATE chunks SET status = 'blocked', translated_text = NULL, model_used = ?, error = ?, attempts = ?, updated_at = ? WHERE id = ? AND status = 'translating'`
           )
             .bind(result.model, `BLOCKED: ${result.blockedReason}`.slice(0, 1000), attempts, Date.now(), chunkId)
             .run();
@@ -1190,8 +1254,9 @@ async function handleCron(env: Env): Promise<void> {
         // text is never "completed": a transient failure with no output must
         // retry instead.
         if (!result.truncated && result.translated.trim().length > 0) {
+          // CAS on the claim state — same zombie-worker protection as above.
           await env.DB.prepare(
-            `UPDATE chunks SET status = 'completed', translated_text = ?, model_used = ?, error = NULL, attempts = ?, updated_at = ? WHERE id = ?`
+            `UPDATE chunks SET status = 'completed', translated_text = ?, model_used = ?, error = NULL, attempts = ?, updated_at = ? WHERE id = ? AND status = 'translating'`
           )
             .bind(result.translated, result.model, attempts, Date.now(), chunkId)
             .run();
