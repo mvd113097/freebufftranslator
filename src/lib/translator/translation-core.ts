@@ -90,7 +90,7 @@ export type ProviderOutcome =
   | { kind: "KEY_REJECTED"; reason: string }
   | { kind: "TRANSIENT"; reason: string };
 
-const BLOCK_RE = /SAFETY|PROHIBITED_CONTENT|BLOCKLIST|RECITATION|SPII|content filter|content_filter|moderation/i;
+export const PROVIDER_BLOCK_RE = /SAFETY|PROHIBITED_CONTENT|BLOCKLIST|RECITATION|SPII|content filter|content_filter|moderation/i;
 
 /** Classify a Gemini :generateContent JSON response. */
 export function classifyGeminiResponse(data: unknown, model: string): ProviderOutcome {
@@ -107,7 +107,7 @@ export function classifyGeminiResponse(data: unknown, model: string): ProviderOu
   if (err) {
     const msg = String(err.message ?? "");
     if (err.code === 429) return { kind: "RATE_LIMITED" };
-    if (BLOCK_RE.test(msg)) return { kind: "BLOCKED", reason: msg.slice(0, 300) };
+    if (PROVIDER_BLOCK_RE.test(msg)) return { kind: "BLOCKED", reason: msg.slice(0, 300) };
     return { kind: "TRANSIENT", reason: `MODEL_ERROR: ${msg.slice(0, 300)}` };
   }
   const cand = d?.candidates?.[0];
@@ -137,7 +137,7 @@ export function classifyOpenRouterResponse(data: unknown, model: string, httpSta
   const content = choice?.message?.content;
   if (!content) {
     const e = String(d?.error?.message ?? "");
-    if (BLOCK_RE.test(e)) return { kind: "BLOCKED", reason: e.slice(0, 300) };
+    if (PROVIDER_BLOCK_RE.test(e)) return { kind: "BLOCKED", reason: e.slice(0, 300) };
     return { kind: "TRANSIENT", reason: "empty response" };
   }
   if (choice?.finish_reason === "length") return { kind: "TRUNCATED", content, model };

@@ -18,6 +18,7 @@ const OPENROUTER_BASE = "https://openrouter.ai/api/v1/chat/completions";
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
 
 import { LIVE_MODEL_SLUGS, GEMINI_MODEL_SLUGS } from "./models";
+import { requestedMaxTokens } from "./translation-core";
 
 const SYSTEM_PROMPT = `You are an expert human literary translator specializing in Chinese web novels (Xianxia, Wuxia, and Sci-Fi). Translate the following Chinese prose into highly fluent, immersive English fiction. Do not use stiff or literal machine-like phrasing. Translate cultivation tiers, localized idioms, and online slang into contextually accurate Western fantasy equivalents while maintaining rigid character name consistency.
 
@@ -60,6 +61,14 @@ const GEMINI_FALLBACK_MODELS = GEMINI_MODEL_SLUGS;
  * models accept this fine.
  */
 const MAX_TOKENS_LIMIT = 16000;
+/**
+ * Per-model output budget (plan v3): request the highest value the SPECIFIC
+ * model supports (verified limits table), never a one-size constant that can
+ * exceed a model's real cap (the old 16000 exceeded lfm-2.5-2.6b's 8192).
+ */
+function maxTokensFor(model: string): number {
+  return Math.max(1024, requestedMaxTokens(model));
+}
 
 /** Sentinel values that mean "Auto for the current provider". */
 export function isAutoSelector(model: string): boolean {
@@ -104,7 +113,7 @@ function buildPayload(text: string, model: string) {
     ],
     temperature: 0.7,
     top_p: 0.95,
-    max_tokens: MAX_TOKENS_LIMIT,
+    max_tokens: maxTokensFor(model),
     stream: true,
   };
 }
@@ -763,6 +772,15 @@ function parseGeminiStream(
   });
 }
 
+export class OutputTruncatedError extends Error {
+  readonly partialText: string;
+  constructor(partialText: string) {
+    super("OUTPUT_TRUNCATED");
+    this.name = "OutputTruncatedError";
+    this.partialText = partialText;
+  }
+}
+
 /**
  * Gemini non-streaming fallback. Routes through the worker when configured,
  * otherwise hits the native endpoint directly.
@@ -801,7 +819,7 @@ async function translateGeminiDirectNonStreaming(
     generationConfig: {
       temperature: 0.7,
       topP: 0.95,
-      maxOutputTokens: 16000,
+      maxOutputTokens: maxTokensFor(model),
     },
     systemInstruction: {
       parts: [
@@ -849,12 +867,17 @@ async function translateGeminiDirectNonStreaming(
   // shape too, in case the model only supports the streaming endpoint.
   const body = (Array.isArray(data) ? data[0] : data) as {
     error?: { message?: string };
-    candidates?: { content?: { parts?: { text?: unknown }[] } }[];
+    promptFeedback?: { blockReason?: string };
+    candidates?: { finishReason?: string; content?: { parts?: { text?: unknown }[] } }[];
   };
   if (body?.error?.message) {
     throw new Error(`MODEL_ERROR: ${body.error.message.slice(0, 200)}`);
   }
+  if (body?.promptFeedback?.blockReason) {
+    throw new Error(`CONTENT_BLOCKED: ${body.promptFeedback.blockReason}`);
+  }
   let content = "";
+  const finishReason = body?.candidates?.[0]?.finishReason;
   const parts = body?.candidates?.[0]?.content?.parts;
   if (Array.isArray(parts)) {
     for (const part of parts) {
@@ -862,7 +885,15 @@ async function translateGeminiDirectNonStreaming(
     }
   }
   if (!content) {
+    if (finishReason && finishReason !== "STOP" && finishReason !== "MAX_TOKENS") {
+      throw new Error(`CONTENT_BLOCKED: finishReason=${finishReason}`);
+    }
     throw new Error("No translation content in response");
+  }
+  // Truncation must never pass silently as a completed translation — surface
+  // it as a distinct error so the pipeline shows a partial/failed state.
+  if (finishReason === "MAX_TOKENS") {
+    throw new OutputTruncatedError(normalizeParagraphs(content));
   }
   return normalizeParagraphs(content);
 }
@@ -942,13 +973,22 @@ async function translateGeminiViaWorker(
     throw new Error(`API error ${response.status}: ${msg.slice(0, 200)}`);
   }
 
-  const data = await response.json() as { translated?: string; model?: string; error?: string };
+  const data = await response.json() as { translated?: string; model?: string; error?: string; truncated?: boolean };
   if (data.error) {
+    // The worker reports content-policy blocks distinctly (HTTP 422 + BLOCKED).
+    if (data.error.startsWith("BLOCKED")) {
+      throw new Error(`CONTENT_BLOCKED: ${data.error.slice(8, 250)}`);
+    }
     throw new Error(`MODEL_ERROR: ${data.error.slice(0, 200)}`);
   }
   const translated = data.translated;
   if (typeof translated !== "string" || !translated) {
     throw new Error("Model returned empty translation");
+  }
+  // Worker completed the continuation rounds and the text is still partial —
+  // never present that as a finished translation.
+  if (data.truncated) {
+    throw new OutputTruncatedError(normalizeParagraphs(translated));
   }
 
   // Simulate token-by-token delivery for progress tracking

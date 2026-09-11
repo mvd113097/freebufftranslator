@@ -1,8 +1,17 @@
 import { chunkText, type TextChunk } from "./chunker";
 import { RateLimiter } from "./rate-limiter";
-import { translateChunk, translateChunkSimple } from "./gemini-api";
+import { translateChunk, translateChunkSimple, OutputTruncatedError } from "./gemini-api";
 
-export type ChunkStatus = "pending" | "translating" | "completed" | "failed";
+export type ChunkStatus =
+  | "pending"
+  | "translating"
+  | "completed"
+  | "failed"
+  /** Output hit the model limit and continuation could not finish — partial
+   * text is kept; Resume continues from it instead of re-translating. */
+  | "partial"
+  /** Provider refused the content (safety/policy) — never auto-retried. */
+  | "blocked";
 
 export interface ChunkProgress {
   id: number;
@@ -340,6 +349,7 @@ export class TranslationPipeline {
       this.reportProgress();
 
       let attempt = 0;
+      const isCloudMode = this.options.translationMode === "cloud";
 
       while (attempt <= this.options.maxRetries) {
         let currentKey: string | undefined;
@@ -364,7 +374,6 @@ export class TranslationPipeline {
           console.log(`[Pipeline] Chunk ${chunk.id + 1} sending request (attempt ${attempt + 1})...`);
 
           // Use appropriate translation function based on mode
-          const isCloudMode = this.options.translationMode === "cloud";
           const translated = isCloudMode
             ? await translateChunkSimple(
                 chunk.originalText,
@@ -398,6 +407,27 @@ export class TranslationPipeline {
         } catch (err: unknown) {
           const message = err instanceof Error ? err.message : String(err);
           console.error(`[Pipeline] Chunk ${chunk.id + 1} attempt ${attempt + 1} failed:`, message);
+
+          // Client-mode guards mirroring the worker engine (plan v3):
+          // blocks are terminal (never retried), truncation surfaces as partial.
+          if (!isCloudMode && /^CONTENT_BLOCKED/.test(message)) {
+            chunk.status = "blocked";
+            chunk.error = message;
+            chunk.translatedText = "";
+            this.reportProgress();
+            await this.options.onChunkComplete?.({ ...chunk });
+            this.options.onChunkFailed?.({ ...chunk });
+            return;
+          }
+          if (!isCloudMode && err instanceof OutputTruncatedError) {
+            chunk.status = "partial";
+            chunk.translatedText = err.partialText;
+            chunk.error = "partial: output hit the model's limit";
+            chunk.retries = attempt;
+            this.reportProgress();
+            await this.options.onChunkComplete?.({ ...chunk });
+            return; // Resume will continue from the stored partial text
+          }
 
           // A 429 means this key is temporarily exhausted — cool it down so
           // the other keys take over instead of hammering the same key.

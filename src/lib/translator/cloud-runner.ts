@@ -116,6 +116,56 @@ export function mapUnitsToOriginals(
 }
 
 /**
+ * Map worker units to originals preferring the SERVER mapping (each unit
+ * carries originalId/partIndex/partCount); falls back to the localStorage
+ * plan, then identity — with `uncertain` true when no reliable mapping exists
+ * so the UI can warn instead of silently merging.
+ */
+export function mapUnitsToOriginalsServerAware(
+  units: {
+    id: number;
+    text: string;
+    originalId?: number | null;
+    partIndex?: number | null;
+    partCount?: number | null;
+  }[],
+  plan: CloudPlanEntry[] | null,
+): { merged: { id: number; text: string }[]; uncertain: boolean } {
+  const hasServerMapping =
+    units.length > 0 &&
+    units.every(
+      (u) =>
+        typeof u.originalId === "number" &&
+        typeof u.partIndex === "number" &&
+        typeof u.partCount === "number",
+    );
+  if (hasServerMapping) {
+    const byOriginal = new Map<number, Map<number, string>>();
+    const expected = new Map<number, number>();
+    for (const u of units) {
+      const oid = u.originalId as number;
+      const parts = byOriginal.get(oid) ?? new Map<number, string>();
+      parts.set(u.partIndex as number, u.text);
+      byOriginal.set(oid, parts);
+      expected.set(oid, Math.max(expected.get(oid) ?? 0, u.partCount as number));
+    }
+    const merged: { id: number; text: string }[] = [];
+    for (const [oid, parts] of byOriginal) {
+      const want = expected.get(oid) ?? 1;
+      if (parts.size < want) continue; // still translating — skip
+      const text = Array.from({ length: want }, (_, i) => parts.get(i) ?? "")
+        .join("\n")
+        .replace(/\n{3,}/g, "\n\n")
+        .trim();
+      merged.push({ id: oid, text });
+    }
+    return { merged: merged.sort((a, b) => a.id - b.id), uncertain: false };
+  }
+  const merged = mapUnitsToOriginals(units, plan);
+  return { merged, uncertain: !plan || plan.length === 0 };
+}
+
+/**
  * Split text into parts of at most MAX_UPLOAD_CHARS, preferring paragraph
  * boundaries. Returns a single-element array for text that needs no split.
  */
@@ -218,15 +268,23 @@ export class CloudRunner {
     },
     callbacks: CloudRunnerCallbacks,
   ): Promise<CloudRunner> {
-    // Build the upload plan: split oversized chunks into safe parts.
+    // Build the upload plan: split oversized chunks into safe parts. The plan
+    // is ALSO sent to the worker so the mapping becomes server-authoritative
+    // (localStorage stays only as a reconnect cache — never the source of truth).
     const plan: CloudPlanEntry[] = [];
-    const payload: { text: string; gzip: boolean }[] = [];
+    const payload: { text: string; gzip: boolean; originalId: number; partIndex: number; partCount: number }[] = [];
     for (const chunk of input.chunks) {
       const parts = splitForUpload(chunk.text);
       plan.push({ id: chunk.id, parts: parts.length });
-      for (const part of parts) {
-        const prepared = await prepareChunkForUpload(part);
-        payload.push({ text: prepared.text, gzip: prepared.gzip });
+      for (let p = 0; p < parts.length; p++) {
+        const prepared = await prepareChunkForUpload(parts[p]);
+        payload.push({
+          text: prepared.text,
+          gzip: prepared.gzip,
+          originalId: chunk.id,
+          partIndex: p,
+          partCount: parts.length,
+        });
       }
     }
 
@@ -262,6 +320,24 @@ export class CloudRunner {
 
   getJobId(): string {
     return this.jobId;
+  }
+
+  /**
+   * Map worker units to originals using the SERVER mapping when available
+   * (each unit carries originalId/partIndex/partCount); falls back to the
+   * localStorage plan, then to identity mapping flagged uncertain.
+   */
+  private mapUnits(
+    units: {
+      id: number;
+      seq?: number;
+      text: string;
+      originalId?: number | null;
+      partIndex?: number | null;
+      partCount?: number | null;
+    }[],
+  ): { merged: { id: number; text: string }[]; uncertain: boolean } {
+    return mapUnitsToOriginalsServerAware(units, loadStoredPlan(this.jobId));
   }
 
   /** Map worker-unit failures back to original chunk ids via the upload plan. */
@@ -353,11 +429,24 @@ export class CloudRunner {
           this.startTime = status.createdAt;
         }
 
-        // Fetch any newly completed worker units and merge/emit them
+        // Fetch any newly completed worker units and merge/emit them. The
+        // server mapping (originalId/partIndex/partCount) is authoritative for
+        // new jobs; legacy jobs fall back to the localStorage plan and the
+        // uncertainty is surfaced so the UI can warn instead of guessing.
         if (status.completedChunks > this.completedUnitIds.size) {
           const units = await getCloudChunks(this.jobId);
-          for (const unit of units) {
-            await this.handleCompletedUnit(unit.id, unit.text);
+          const { merged, uncertain } = this.mapUnits(units);
+          if (uncertain && merged.length > 0) {
+            this.callbacks.onError(
+              "WARNING: mapping uncertain (legacy job) — export may mis-order sections. Re-translate or verify manually.",
+            );
+          }
+          for (const m of merged) {
+            if (this.completedOriginalIds.has(m.id)) continue;
+            this.completedOriginalIds.add(m.id);
+            this.totalCharsTranslated += m.text.length;
+            this.lastChunkCompletedAt = Date.now();
+            await this.onChunkCompleted?.(m.id, m.text);
           }
         }
 

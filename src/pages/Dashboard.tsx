@@ -271,13 +271,13 @@ export default function Dashboard() {
    */
   const importWorkerChunks = useCallback(async (jobId: string) => {
     try {
-      const { mapUnitsToOriginals, loadStoredPlan } = await import(
+      const { mapUnitsToOriginalsServerAware, loadStoredPlan } = await import(
         "@/lib/translator/cloud-runner"
       );
       const { getCloudChunks } = await import("@/lib/translator/cloud-client");
       const plan = loadStoredPlan(jobId);
       const units = await getCloudChunks(jobId);
-      const merged = mapUnitsToOriginals(units, plan);
+      const { merged } = mapUnitsToOriginalsServerAware(units, plan);
       for (const m of merged) {
         setChunkProgress((prev) =>
           prev.some((c) => c.id === m.id)
@@ -1105,12 +1105,68 @@ export default function Dashboard() {
 
   // ─── Export complete ────────────────────────────────────────────
   const handleExport = useCallback(async () => {
+    // Cloud mode: the worker is the source of truth — merge fresh remote units
+    // via the SERVER mapping before exporting (the old local-only merge could
+    // silently omit chunks the browser never imported).
+    if (translationMode === "cloud") {
+      const jobId = cloudRunnerRef.current?.getJobId() || cloudJobId;
+      if (jobId) {
+        try {
+          const { getCloudChunks, getCloudStatus } = await import("@/lib/translator/cloud-client");
+          const { mapUnitsToOriginalsServerAware, loadStoredPlan } = await import(
+            "@/lib/translator/cloud-runner"
+          );
+          const status = await getCloudStatus(jobId);
+          const remote = await getCloudChunks(jobId);
+          const { merged, uncertain } = mapUnitsToOriginalsServerAware(
+            remote,
+            loadStoredPlan(jobId),
+          );
+          const byId = new Map(chunkProgress.map((c) => [c.id, c.translatedText]));
+          for (const r of merged) {
+            if ((byId.get(r.id) ?? "").length < r.text.length) {
+              byId.set(r.id, r.text);
+            }
+          }
+          const incomplete =
+            status.completedChunks < status.totalChunks ||
+            status.failedChunks > 0 ||
+            status.blockedChunks > 0;
+          if (incomplete) {
+            const proceed = window.confirm(
+              `Cloud job is not fully complete: ${status.completedChunks}/${status.totalChunks} units done` +
+                (status.failedChunks ? `, ${status.failedChunks} failed` : "") +
+                (status.blockedChunks ? `, ${status.blockedChunks} blocked` : "") +
+                (status.partialChunks ? `, ${status.partialChunks} partial` : "") +
+                ". Export everything completed so far anyway?",
+            );
+            if (!proceed) return;
+          }
+          if (uncertain) {
+            const proceed = window.confirm(
+              "This is a legacy cloud job without a reliable server-side mapping. " +
+                "Section order may be wrong or sections may be missing.\n\nDownload anyway?",
+            );
+            if (!proceed) return;
+          }
+          const done = [...byId.entries()]
+            .map(([index, text]) => ({ index, text: text ?? "" }))
+            .filter((c) => c.text.length > 0)
+            .sort((a, b) => a.index - b.index);
+          const baseName = (fileName.replace(/\.txt$/i, "") || "translated_novel") + ".epub";
+          await downloadTranslation(done, baseName);
+          return;
+        } catch {
+          // Worker unreachable — fall through to the local snapshot below
+        }
+      }
+    }
     const done = chunkProgress
       .filter((c) => c.status === "completed")
       .map((c) => ({ index: c.id, text: c.translatedText }));
     const baseName = (fileName.replace(/\.txt$/i, "") || "translated_novel") + ".epub";
     await downloadTranslation(done, baseName);
-  }, [chunkProgress, fileName, downloadTranslation]);
+  }, [chunkProgress, fileName, downloadTranslation, translationMode, cloudJobId]);
 
   // ─── Download progress (partial, cumulative) ────────────────────
   const handleDownloadProgress = useCallback(async () => {
@@ -1130,11 +1186,22 @@ export default function Dashboard() {
         const jobId = cloudRunnerRef.current?.getJobId() || cloudJobId;
         if (jobId) {
           const { getCloudChunks } = await import("@/lib/translator/cloud-client");
-          const { mapUnitsToOriginals, loadStoredPlan } = await import(
+          const { mapUnitsToOriginalsServerAware, loadStoredPlan } = await import(
             "@/lib/translator/cloud-runner"
           );
           const remote = await getCloudChunks(jobId);
-          const merged = mapUnitsToOriginals(remote, loadStoredPlan(jobId));
+          const { merged, uncertain } = mapUnitsToOriginalsServerAware(
+            remote,
+            loadStoredPlan(jobId),
+          );
+          if (uncertain) {
+            const proceed = window.confirm(
+              "This is a legacy cloud job without a reliable server-side mapping. " +
+                "Section order in this export may be wrong or incomplete.\n\n" +
+                "Download anyway?",
+            );
+            if (!proceed) return;
+            }
           const byId = new Map(done.map((c) => [c.index, c.text]));
           for (const r of merged) {
             if ((byId.get(r.id) ?? "").length < r.text.length) {
