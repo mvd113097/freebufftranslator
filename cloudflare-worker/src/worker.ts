@@ -474,13 +474,13 @@ async function translateWithContinuation(
       }
       let outcome: ProviderOutcome | null = null;
       for (const key of roundKeys) {
-      outcome = isGeminiModel(model)
-        ? await (backend as typeof callGemini)(promptText, key, model, firstRound ? SYSTEM_PROMPT : CONTINUATION_PROMPT, budget)
-        : await (backend as typeof callOpenRouter)(promptText, key, model, firstRound ? SYSTEM_PROMPT : CONTINUATION_PROMPT, budget);
-      if (outcome.kind === "RATE_LIMITED") continue; // next key
-      if (outcome.kind === "KEY_REJECTED") continue; // next key; surfaced after loop
-      break;
-    }
+        outcome = isGeminiModel(model)
+          ? await (backend as typeof callGemini)(promptText, key, model, firstRound ? SYSTEM_PROMPT : CONTINUATION_PROMPT, budget)
+          : await (backend as typeof callOpenRouter)(promptText, key, model, firstRound ? SYSTEM_PROMPT : CONTINUATION_PROMPT, budget);
+        if (outcome.kind === "RATE_LIMITED") continue; // next key
+        if (outcome.kind === "KEY_REJECTED") continue; // next key; surfaced after loop
+        break;
+      }
     if (!outcome) {
       return { translated: accumulated, model, truncated: accumulated.length > 0, rateLimited: true };
     }
@@ -1179,10 +1179,10 @@ async function handleCron(env: Env): Promise<void> {
     const claimed: typeof pending.results = [];
     for (const r of pending.results) {
       const claim = await env.DB.prepare(
-        `UPDATE chunks SET status = 'translating', updated_at = ?
+        `UPDATE chunks SET status = 'translating', updated_at = ?, model_used = ?
          WHERE id = ? AND status IN ('pending', 'partial')`
       )
-        .bind(now, r.id)
+        .bind(now, model, r.id)
         .run();
       if ((claim.meta?.changes ?? 0) > 0) claimed.push(r);
     }
