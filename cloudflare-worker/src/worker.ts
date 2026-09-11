@@ -213,6 +213,7 @@ async function ensureSchema(env: Env): Promise<void> {
     `ALTER TABLE chunks ADD COLUMN part_index INTEGER`,
     `ALTER TABLE chunks ADD COLUMN part_count INTEGER`,
     `ALTER TABLE jobs ADD COLUMN original_count INTEGER`,
+    `ALTER TABLE jobs ADD COLUMN smoke_max_tokens INTEGER`,
   ];
   for (const sql of alters) {
     try {
@@ -401,9 +402,14 @@ async function translateWithContinuation(
   liveModels: string[] | null | undefined,
   /** Previously accumulated text when resuming a `partial` unit. */
   priorAccumulated: string = "",
+  /** SMOKE ONLY: forced budget for buffy-smoke-* jobs; always clamped below. */
+  budgetOverride?: number | null,
 ): Promise<TranslationResult> {
   const backend = isGeminiModel(model) ? callGemini : callOpenRouter;
-  const budget = requestedMaxTokens(model);
+  const budget =
+    budgetOverride && budgetOverride > 0
+      ? Math.min(budgetOverride, requestedMaxTokens(model))
+      : requestedMaxTokens(model);
 
   let accumulated = priorAccumulated;
   let firstRound = priorAccumulated.length === 0;
@@ -533,6 +539,7 @@ async function translateChunk(
   requestedModel: string,
   liveModels?: string[] | null,
   priorAccumulated: string = "",
+  budgetOverride?: number | null,
 ): Promise<TranslationResult> {
   if (!keys.length) {
     return { translated: "", model: requestedModel, truncated: false, transient: "No API keys provided" };
@@ -554,7 +561,7 @@ async function translateChunk(
   let allRateLimited = true;
 
   for (const model of models) {
-    const result = await translateWithContinuation(text, keys, model, liveModels, priorAccumulated);
+    const result = await translateWithContinuation(text, keys, model, liveModels, priorAccumulated, budgetOverride);
 
     if (result.blockedReason) return result; // BLOCKED: stop the entire cascade
     if (!result.rateLimited && !result.keyRejected && !result.transient) {
@@ -621,6 +628,11 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
       telegramNotifyOnProgress?: boolean;
       telegramNotifyOnError?: boolean;
       telegramNotifyOnComplete?: boolean;
+      /** SMOKE TESTS ONLY: forces a low output budget to make truncation
+       * deterministic. Honored exclusively for fileName starting with
+       * "buffy-smoke-" and can only LOWER the budget (clamped), so real jobs
+       * are never affected and no model limit can be exceeded. */
+      smoke?: { forceMaxOutputTokens?: number };
     };
 
     if (!body.chunks?.length) return json({ error: "No chunks provided" }, 400);
@@ -629,12 +641,19 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
     const jobId = crypto.randomUUID();
     const now = Date.now();
 
+    const smokeBudget =
+      body.fileName?.startsWith("buffy-smoke-") &&
+      Number.isInteger(body.smoke?.forceMaxOutputTokens) &&
+      (body.smoke?.forceMaxOutputTokens as number) >= 32
+        ? Math.min(body.smoke!.forceMaxOutputTokens!, 8192)
+        : null;
+
     const liveModelsJson = body.liveModels && body.liveModels.length > 0
       ? JSON.stringify(body.liveModels) : null;
 
     await env.DB.prepare(
-      `INSERT INTO jobs (id, file_name, model, keys_json, status, created_at, updated_at, live_models_json, telegram_bot_token, telegram_chat_id, telegram_on_start, telegram_on_progress, telegram_on_error, telegram_on_complete, last_milestone, original_count)
-       VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`
+      `INSERT INTO jobs (id, file_name, model, keys_json, status, created_at, updated_at, live_models_json, telegram_bot_token, telegram_chat_id, telegram_on_start, telegram_on_progress, telegram_on_error, telegram_on_complete, last_milestone, original_count, smoke_max_tokens)
+       VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`
     )
       .bind(
         jobId,
@@ -651,6 +670,7 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
         body.telegramNotifyOnError ? 1 : 0,
         body.telegramNotifyOnComplete ? 1 : 0,
         body.originalChunkCount ?? body.chunks.length,
+        smokeBudget,
       )
       .run();
 
@@ -1106,7 +1126,11 @@ async function handleCron(env: Env): Promise<void> {
       }
 
       try {
-        const result = await translateChunk(text, keys, model, liveModels, priorAccumulated);
+        const smokeBudget =
+          (job.file_name as string | undefined)?.startsWith("buffy-smoke-")
+            ? (job.smoke_max_tokens as number | null)
+            : null;
+        const result = await translateChunk(text, keys, model, liveModels, priorAccumulated, smokeBudget);
         const attempts = currentAttempts + 1;
 
         // BLOCKED: never retried, no key/model cycling — quota is protected.
@@ -1162,8 +1186,10 @@ async function handleCron(env: Env): Promise<void> {
           break;
         }
 
-        // Validated completion only — the gate ran inside the engine.
-        if (!result.truncated) {
+        // Validated completion only — the gate ran inside the engine. Empty
+        // text is never "completed": a transient failure with no output must
+        // retry instead.
+        if (!result.truncated && result.translated.trim().length > 0) {
           await env.DB.prepare(
             `UPDATE chunks SET status = 'completed', translated_text = ?, model_used = ?, error = NULL, attempts = ?, updated_at = ? WHERE id = ?`
           )
