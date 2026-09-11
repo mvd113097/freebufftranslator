@@ -1,0 +1,32 @@
+[runner] token loaded from .cf-token.tmp (value hidden)
+[
+  {
+    "results": [
+      {
+        "status": "failed",
+        "attempts": 8,
+        "acc_chars": 0,
+        "head": "",
+        "tail": ""
+      }
+    ],
+    "success": true,
+    "meta": {
+      "served_by": "v3-prod",
+      "served_by_region": "ENAM",
+      "served_by_colo": "EWR",
+      "served_by_primary": true,
+      "timings": {
+        "sql_duration_ms": 0.2615
+      },
+      "duration": 0.2615,
+      "changes": 0,
+      "last_row_id": 0,
+      "changed_db": false,
+      "size_after": 67436544,
+      "rows_read": 2,
+      "rows_written": 0,
+      "total_attempts": 1
+    }
+  }
+]

@@ -1,6 +1,5 @@
-// Deploy runner: loads CLOUDFLARE_API_TOKEN from the project's env files and
-// passes it to wrangler via the process environment. The value is NEVER
-// printed, logged, or written anywhere by this script.
+// Deploy runner: loads CLOUDFLARE_API_TOKEN from .cf-token.tmp (preferred) or
+// project env files, then runs wrangler. Values are NEVER printed or logged.
 const fs = require("fs");
 const path = require("path");
 const { spawnSync } = require("child_process");
@@ -8,66 +7,50 @@ const { spawnSync } = require("child_process");
 const here = __dirname;
 const root = path.resolve(here, "..");
 
-const candidates = fs.readdirSync(root).filter((f) => /^\.env/.test(f));
+process.env.CLOUDFLARE_API_TOKEN = "";
 
-function charClass(ch) {
-  if (/[A-Z]/.test(ch)) return "U"; // uppercase
-  if (/[a-z]/.test(ch)) return "l"; // lowercase
-  if (/[0-9]/.test(ch)) return "D"; // digit
-  if (ch === ":") return "C";
-  if (ch === "-" || ch === "_") return "S";
-  if (ch === "." ) return "P";
-  return "O"; // anything else
-}
-
-// Run-length-encoded skeleton: "U1.l20.D32.C1..." — shows structure, no content
-function skeleton(v) {
-  const out = [];
-  let i = 0;
-  while (i < v.length) {
-    const c = charClass(v[i]);
-    let j = i;
-    while (j < v.length && charClass(v[j]) === c) j++;
-    out.push(`${c}${j - i}`);
-    i = j;
-  }
-  return out.join(".");
-}
-
-let loaded = false;
-for (const f of candidates) {
-  const text = fs.readFileSync(path.join(root, f), "utf8");
-  const lines = text.split("\n");
-  for (let i = 0; i < lines.length; i++) {
-    const m = lines[i].match(/^\s*(?:export\s+)?CLOUDFLARE_API_TOKEN\s*=\s*(.*?)\s*$/);
-    if (!m) continue;
-    let val = m[1].replace(/\s+#.*$/, "").replace(/^["']|["']$/g, "").trim();
-    console.log(`[runner] ${f}:${i + 1} len=${val.length}`);
-    console.log(`[runner] skeleton: ${skeleton(val)}`);
-    // Segment shape around any colon (structure only)
-    const parts = val.split(":");
-    if (parts.length > 1) {
-      parts.forEach((p, idx) =>
-        console.log(`[runner] colon-segment ${idx}: len=${p.length} charset=/^[${p.replace(/[^A-Za-z0-9_./:-]/g, "^")}]$/-filtered`),
-      );
-    }
-    const shapeOk = /^[A-Za-z0-9_-]{30,60}$/.test(val);
-    if (shapeOk && !process.env.CLOUDFLARE_API_TOKEN) {
-      process.env.CLOUDFLARE_API_TOKEN = val;
-      loaded = true;
-      console.log("[runner] token shape OK — using it (value hidden)");
-    } else {
-      console.error("[runner] value does NOT match Cloudflare API token shape (30-60 chars of A-Za-z0-9_-).");
-    }
+// Preferred: temp token file (out-of-band paste, deleted after deploy).
+const tokenFile = path.join(here, ".cf-token.tmp");
+if (fs.existsSync(tokenFile)) {
+  const val = fs.readFileSync(tokenFile, "utf8").trim();
+  if (/^[A-Za-z0-9_-]{20,80}$/.test(val)) {
+    process.env.CLOUDFLARE_API_TOKEN = val;
+    console.log("[runner] token loaded from .cf-token.tmp (value hidden)");
+  } else {
+    console.error("[runner] .cf-token.tmp has invalid shape — ignoring");
   }
 }
-if (!loaded) {
-  console.error(`[runner] no usable CLOUDFLARE_API_TOKEN in: ${candidates.join(", ") || "(none)"}`);
+
+// Fallback: project env files (values there are platform-encrypted and won't
+// validate, but try anyway in case a raw token was ever stored).
+if (!process.env.CLOUDFLARE_API_TOKEN) {
+  const envFiles = fs.readdirSync(root).filter((f) => /^\.env/.test(f));
+  for (const f of envFiles) {
+    const text = fs.readFileSync(path.join(root, f), "utf8");
+    for (const line of text.split("\n")) {
+      const m = line.match(/^\s*(?:export\s+)?CLOUDFLARE_API_TOKEN\s*=\s*(.+?)\s*$/);
+      if (!m) continue;
+      const val = m[1].replace(/\s+#.*$/, "").replace(/^["']|["']$/g, "").trim();
+      if (/^[A-Za-z0-9_-]{20,80}$/.test(val)) {
+        process.env.CLOUDFLARE_API_TOKEN = val;
+        console.log(`[runner] token loaded from ${f} (value hidden)`);
+        break;
+      }
+    }
+    if (process.env.CLOUDFLARE_API_TOKEN) break;
+  }
+}
+
+if (!process.env.CLOUDFLARE_API_TOKEN) {
+  console.error("[runner] no usable CLOUDFLARE_API_TOKEN found");
   process.exit(2);
 }
 
 const args = process.argv.slice(2);
-const r = spawnSync("bunx wrangler " + args.join(" "), {
+// Shell-escape each arg (single-quote wrapping) so SQL with parens/quotes
+// survives the intermediate /bin/sh hop intact.
+const escaped = args.map((a) => `'${a.replace(/'/g, `'\\''`)}'`).join(" ");
+const r = spawnSync("bunx wrangler " + escaped, {
   stdio: "inherit",
   env: process.env,
   cwd: here,

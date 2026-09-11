@@ -369,6 +369,16 @@ async function callOpenRouter(
 }
 
 // ─── Continuation engine ───────────────────────────────────────────────────────
+/** Route a key to the provider that owns it by prefix (the app's convention):
+ * sk-or-v1-… → OpenRouter (Bearer), AQ.… → Gemini (x-goog-api-key header).
+ * Never feed a Gemini key to OpenRouter or vice versa — the provider just
+ * rejects it as "Missing Authentication" and the attempt is wasted. */
+function openrouterKeysOf(keys: string[]): string[] {
+  return keys.filter((k) => k.startsWith("sk-or-v1-"));
+}
+function geminiKeysOf(keys: string[]): string[] {
+  return keys.filter((k) => k.startsWith("AQ."));
+}
 
 interface TranslationResult {
   translated: string;
@@ -452,11 +462,18 @@ async function translateWithContinuation(
           `[FULL SOURCE — the translation above is MISSING its ending and possibly more. Output ONLY the missing continuation, starting exactly where the context stops mid-flow.]`;
       }
       if (round > MAX_CONTINUATION_ROUNDS - 1) break;
-    }
-
-    // Try all keys for this model/round.
-    let outcome: ProviderOutcome | null = null;
-    for (const key of keys) {
+    }      // Try all PROVIDER-APPROPRIATE keys for this model/round.
+      const roundKeys = isGeminiModel(model) ? geminiKeysOf(keys) : openrouterKeysOf(keys);
+      if (roundKeys.length === 0) {
+        // No key for this provider — skip the model entirely (cascade onward)
+        // instead of reporting a bogus quota exhaustion.
+        if (firstRound) {
+          return { translated: "", model, truncated: false, keyRejected: `no ${isGeminiModel(model) ? "Gemini" : "OpenRouter"} key provided` };
+        }
+        return { translated: accumulated, model, truncated: true, keyRejected: `no ${isGeminiModel(model) ? "Gemini" : "OpenRouter"} key provided` };
+      }
+      let outcome: ProviderOutcome | null = null;
+      for (const key of roundKeys) {
       outcome = isGeminiModel(model)
         ? await (backend as typeof callGemini)(promptText, key, model, firstRound ? SYSTEM_PROMPT : CONTINUATION_PROMPT, budget)
         : await (backend as typeof callOpenRouter)(promptText, key, model, firstRound ? SYSTEM_PROMPT : CONTINUATION_PROMPT, budget);
